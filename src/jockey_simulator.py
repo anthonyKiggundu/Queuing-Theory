@@ -128,37 +128,6 @@ def init_logger():
 logger = init_logger()
 logging.getLogger('matplotlib.font_manager').disabled = True
 
-class TestSum(unittest.TestCase):
-    '''
-       TODOs::
-       - Tests for the commandline inputs (present or not, their data-types)
-       - Tests for function return types (ensure no None types or empty returns)
-       - Tests for files read and written to
-       - Tests for process terminations
-    '''
-
-    def test_list_int(self):
-        """
-          Test that it can sum a list of integers
-        """
-        data = [1, 2, 3]
-        result = sum(data)
-        self.assertEqual(result, 6)
-
-    def test_upper(self):
-        self.assertEqual('foo'.upper(), 'FOO')
-
-    def test_isupper(self):
-        self.assertTrue('FOO'.isupper())
-        self.assertFalse('Foo'.isupper())
-
-    def test_split(self):
-        s = 'hello world'
-        self.assertEqual(s.split(), ['hello', 'world'])
-        # check that s.split fails when the separator is not a string
-        with self.assertRaises(TypeError):
-            s.split(2)
-
 
 class ProcessHandler(object):
     def __init__(self):
@@ -2837,27 +2806,3 @@ if __name__ == "__main__":
         count_processed_in_one = 0  
         count_processed_in_two = 0
 
-# write number of Monte Carlo runs to file
-    
-# save_runs_count_to_file(args.run_id)
- 
-# plot_results_3D(jockey_details_source_one, jockey_details_source_two)
-# plot_results(serv_rates_jockeying_file_one, serv_rates_jockeying_file_two)
-# plot_results(jockey_stats_file_one, jockey_stats_file_two)
-# plot_results(que_length_jockey_stats_one, que_length_jockey_stats_two)
-# plot_results(jockey_queu_length_waiting_time_one, jockey_queu_length_waiting_time_two)
-        
-            
-'''
-    - There are duplicate in the re-ordred list, get rid of them by checking
-    - There are also cases where the finished processed also show up repetitively in the leaving customers.
-    - Re-ordered appears now mixed with the jockey candidates from either queues and this messes up thing
-        Need to make each jockey choose a given queue that is opposite to the current one.
-    - Fix the infinite looping that was observed and understand the cause of the the problem. Actually the problem 
-    arises in the current state when we set the arrival rate to about 5 with a low jockeying rate say 2. 
-        This orchestate the looping attack where one customer keeps jockeying from one queue to another.
-        Hence no new arrivals are allowed into any of the queue due to the back and forth jockeying
-    - Fix the getting stuck when the jockeying threshold is set to 1
-    - * - Sometthing that was mentiones by Bin Han about mixing the jockekying threshold with waiting time metrics
-    - * - If a customer has just jockeyed to an alternative queue and then it appears again in the list of candidate jockeys then .........?
-'''
