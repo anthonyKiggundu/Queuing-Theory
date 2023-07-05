@@ -12,27 +12,27 @@ Under the same directory you will also find a sample configuration file with som
 
 In the case that this wrapper or the config file is not used, the script can be run using a command like:
 
-python3 ./of_latest.py --service_rate_one $_serv_rate_one 
+`python3 ./of_latest.py --service_rate_one $_serv_rate_one 
                        --service_rate_two $_serv_rate_two 
                        --arrival_rate $arrival_rate 
                        --jockeying_threshold $jockey_thresholds 
-                       --run_id ${spinner}
+                       --run_id ${spinner}`
 
-The jockeying_threshold parameter is optional, such that in absence of this parameter
+The `jockeying_threshold` parameter is optional, such that in absence of this parameter
 the jockeying behaviour is triggered based on the waiting time.
 
 - For pull requests please send an email to: antonkingdee@yahoo.com
 
 Please cite the tooling in the an experimental use-cases as:
 
-article{joc_simulator,
-author = {Anthony Kiggundu, Bin Han, Dennis Krummacher, Hans-D Schotten},
-title = {On Resource Allocation in Communication Networks: A Decision Model of the Jockeying Behavior in Queues},
-journal = {},
-pages = {},
-volume = {},
-month = {December},
-year = {2023},
+`article{joc_simulator,
+<br> author = {Anthony Kiggundu, Bin Han, Dennis Krummacher, Hans-D Schotten},</br>
+<br> title = {On Resource Allocation in Communication Networks: A Decision Model of the Jockeying Behavior in Queues},</br>
+<br> journal = {},</br>
+<br> pages = {}, </br>
+<br> volume = {}, </br>
+<br> month = {December}, </br>
+<br> year = {2023}, </br>
 doi = {}
-} 
+}` 
 
