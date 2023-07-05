@@ -22,16 +22,8 @@ the jockeying behaviour is triggered based on the waiting time.
 
 - For pull requests please send an email to: antonkingdee@yahoo.com
 
-Please cite the tooling in the an experimental use-cases as:
+Please use the `Cite this repository` link on the right pane in case you if you intend to cite the tooling for experimental use-cases.  
 
-`article{joc_simulator,
-author = {Anthony Kiggundu, Bin Han, Dennis Krummacher, Hans-D Schotten},  
-title = {On Resource Allocation in Communication Networks: A Decision Model of the Jockeying Behavior in Queues},  
-journal = {},  
-pages = {},  
-volume = {},  
-month = {December},  
-year = {2023},  
-doi = {}  
-}` 
+This work was done under the auspice of the Open6GHub Project.
+
 
