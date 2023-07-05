@@ -1,7 +1,7 @@
 
-`# ******************************************`
-`#         The Jockeying Simulator`
-`# ******************************************`
+` ******************************************`  
+`         The Jockeying Simulator`  
+` ******************************************`  
 
 The snippet simulates a simple M/M/C queuing systems setup, C=2 (two parallel queues).
 We have unfortunately not tested the script on legacy python interpreters, i.e. < Python3.6
