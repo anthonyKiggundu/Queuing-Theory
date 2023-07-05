@@ -26,13 +26,13 @@ the jockeying behaviour is triggered based on the waiting time.
 Please cite the tooling in the an experimental use-cases as:
 
 `article{joc_simulator,
-<br> author = {Anthony Kiggundu, Bin Han, Dennis Krummacher, Hans-D Schotten},</br>
-<br> title = {On Resource Allocation in Communication Networks: A Decision Model of the Jockeying Behavior in Queues},</br>
-<br> journal = {},</br>
-<br> pages = {}, </br>
-<br> volume = {}, </br>
-<br> month = {December}, </br>
-<br> year = {2023}, </br>
-doi = {}
+author = {Anthony Kiggundu, Bin Han, Dennis Krummacher, Hans-D Schotten},  
+title = {On Resource Allocation in Communication Networks: A Decision Model of the Jockeying Behavior in Queues},  
+journal = {},  
+pages = {},  
+volume = {},  
+month = {December},  
+year = {2023},  
+doi = {}  
 }` 
 
