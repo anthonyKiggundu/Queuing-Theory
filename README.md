@@ -36,7 +36,7 @@ the jockeying behaviour is triggered based on the waiting time.
 - This work was done under the auspice of the Open6GHub Project.
 
 **Citations**
-Please use the `Cite this repository` link on the right pane in case you if you intend to cite the tooling for experimental use-cases.  
+- Please use the `Cite this repository` link on the right pane in case you if you intend to cite the tooling for experimental use-cases.  
 
 **License**
 
