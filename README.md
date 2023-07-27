@@ -23,7 +23,7 @@ Under the same directory you will also find a sample configuration file with som
                        --jockeying_threshold $jockey_thresholds 
                        --run_id ${spinner}`
 
-The `jockeying_threshold` parameter is optional, such that in absence of this parameter
+- The `jockeying_threshold` parameter is optional, such that in absence of this parameter
 the jockeying behaviour is triggered based on the waiting time.
 
 **Notes**
