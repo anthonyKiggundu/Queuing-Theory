@@ -4,6 +4,11 @@
 ` ******************************************`  
 ![queue_other](https://github.com/anthonyKiggundu/Queuing-Theory/assets/12003998/ff6e428e-5871-49df-b957-a3cf643a4f2d)
 
+**Dependencies**
+- Python 3.6
+  Plus other corresponding libraries as listed in the import section
+
+**Get Started**
 The snippet simulates a simple M/M/C queuing systems setup, C=2 (two parallel queues).
 We have unfortunately not tested the script on legacy python interpreters, i.e. < Python3.6
 
@@ -21,10 +26,20 @@ In the case that this wrapper or the config file is not used, the script can be 
 The `jockeying_threshold` parameter is optional, such that in absence of this parameter
 the jockeying behaviour is triggered based on the waiting time.
 
-- For pull requests please send an email to: antonkingdee@yahoo.com
+**Notes**
+- 
 
+**Contact**
+- For pull requests please send an email to:
+
+**Acknowledgements**
+This work was done under the auspice of the Open6GHub Project.
+
+**Citations**
 Please use the `Cite this repository` link on the right pane in case you if you intend to cite the tooling for experimental use-cases.  
 
-This work was done under the auspice of the Open6GHub Project.
+**License**
+
+
 
 
