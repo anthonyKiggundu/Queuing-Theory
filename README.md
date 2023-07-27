@@ -6,7 +6,7 @@
 
 **Dependencies**
 - Python 3.6
-  Plus other corresponding libraries as listed in the import section
+- Plus other corresponding libraries as listed in the import section
 
 **Get Started**
 - The snippet simulates a simple M/M/C queuing systems setup, C=2 (two parallel queues).
