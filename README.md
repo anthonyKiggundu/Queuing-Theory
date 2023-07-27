@@ -2,6 +2,7 @@
 ` ******************************************`  
 `         The Jockeying Simulator`  
 ` ******************************************`  
+![queue_other](https://github.com/anthonyKiggundu/Queuing-Theory/assets/12003998/ff6e428e-5871-49df-b957-a3cf643a4f2d)
 
 The snippet simulates a simple M/M/C queuing systems setup, C=2 (two parallel queues).
 We have unfortunately not tested the script on legacy python interpreters, i.e. < Python3.6
