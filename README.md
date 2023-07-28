@@ -27,7 +27,9 @@ Under the same directory you will also find a sample configuration file with som
 the jockeying behaviour is triggered based on the waiting time.
 
 **Notes**
-- 
+- Ping-Pong effect: As documented in our findings, setting the jockeying threshold to a low value resulted in the behaviour that
+  packets jumps were so often leading to a intractable system. Getting out of this system state then required application termination
+  and we are working to improving the handling of these cases in code.
 
 **Contact**
 - For pull requests please send an email to:
