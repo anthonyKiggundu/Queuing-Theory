@@ -33,7 +33,7 @@ do
     
 done
 # Dump the simulation parameters to a log file
-echo -e "${spinner}\n" >> /home/dfkiterminal/Queuing_technology/constant/simulation_runs_count.txt
+echo -e "${spinner}\n" >> ../Queuing_technology/constant/simulation_runs_count.txt
 
 # done
 
