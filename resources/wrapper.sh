@@ -32,8 +32,6 @@ do
     let "spinner += 1"
     
 done
-# Dump the simulation parameters to a log file
-echo -e "${spinner}\n" >> ../Queuing_technology/constant/simulation_runs_count.txt
 
 # done
 
