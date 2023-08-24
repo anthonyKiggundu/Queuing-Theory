@@ -14,6 +14,7 @@ We have unfortunately not tested the script on legacy python interpreters, i.e. 
 
 - We have added a wrapper script (resources directory)that can be used to simulate multiple runs at a go.
 Under the same directory you will also find a sample configuration file with some defaults.
+Run the bootstrap.py script to initialize the csv files.
 
 - In the case that this wrapper or the config file is not used, the script can be run using a command like:
 
