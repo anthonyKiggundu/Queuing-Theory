@@ -43,6 +43,8 @@ the jockeying behaviour is triggered based on the waiting time.
 
 **License**
 
-
+**ToDo**
+- Code refactory
+- Test coverage
 
 
