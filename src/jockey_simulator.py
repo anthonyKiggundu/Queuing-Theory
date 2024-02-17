@@ -128,6 +128,37 @@ def init_logger():
 logger = init_logger()
 logging.getLogger('matplotlib.font_manager').disabled = True
 
+class TestSum(unittest.TestCase):
+    '''
+       TODOs::
+       - Tests for the commandline inputs (present or not, their data-types)
+       - Tests for function return types (ensure no None types or empty returns)
+       - Tests for files read and written to
+       - Tests for process terminations
+    '''
+
+    def test_list_int(self):
+        """
+          Test that it can sum a list of integers
+        """
+        data = [1, 2, 3]
+        result = sum(data)
+        self.assertEqual(result, 6)
+
+    def test_upper(self):
+        self.assertEqual('foo'.upper(), 'FOO')
+
+    def test_isupper(self):
+        self.assertTrue('FOO'.isupper())
+        self.assertFalse('Foo'.isupper())
+
+    def test_split(self):
+        s = 'hello world'
+        self.assertEqual(s.split(), ['hello', 'world'])
+        # check that s.split fails when the separator is not a string
+        with self.assertRaises(TypeError):
+            s.split(2)
+
 
 class ProcessHandler(object):
     def __init__(self):
@@ -173,12 +204,11 @@ class ProcessHandler(object):
             self.worker_stop_sent = True
             shutdown_et = int(time.time()) + max_allowed_shutdown_seconds
 
-        try:
-            print(colored('Terminating jockeyed {}','blue').format(colored(proc_to_terminate,'red')) + colored(' process in current queue ...','blue'))
+        try:            
             self.proc_to_terminate.terminate()
             self.proc_to_terminate.kill()
             new_size_queue = queue_tasks.qsize() - 1
-            #print("Decrementing task count in queue after terminating. Current task count in queue now is %01d"%(new_size_queue))
+            
         except Exception as e:
             logger.debug('Exception {}, e = {}'.format(type(e).__name__, e))
 
@@ -186,7 +216,7 @@ class ProcessHandler(object):
 def save_threshold_timetoservice_queue(dict_thresh_time_in_service, filename):
     try:        
         df = pd.DataFrame(dict_thresh_time_in_service, columns = ["Jockey_Threshold","Total_Waiting"])
-        # print("************** ", df.columns, filename)
+        
         df.to_csv (base_dir+'/constant/'+filename, mode='a',index=False, header=False)
     except OSError:
         if not filename:
@@ -196,12 +226,13 @@ def save_threshold_timetoservice_queue(dict_thresh_time_in_service, filename):
         print(f"Unexpected {err=}, {type(err)=}")
         raise
 
-def save_pose_waits_to_file_one(srv_one_pose_wait_dict):
+def save_pose_waits_to_file_one(srv_one_pose_wait_dict, data_source):
 
     try:
         filename = base_dir+'srv_one_pose_waits_stats.csv'
         df = pd.DataFrame(srv_one_pose_wait_dict, columns = ["Position","Waiting"])
-        df.to_csv (base_dir+'/constant/srv_one_pose_waits_stats.csv', mode='a',index=False, header=False)
+        
+        df.to_csv (data_source, mode='a',index=False, header=False)
     except OSError:
         if not filename:
             print("Could not open/read file:", filename)
@@ -235,12 +266,13 @@ def save_serv_rate_jockeying_rate_in_queues(data_source, queue_serv_rate, jockey
         raise
         
 
-def save_pose_waits_to_file_two(srv_two_pose_wait_dict):
+def save_pose_waits_to_file_two(srv_two_pose_wait_dict, data_source):
 
     try:
         filename = base_dir+'/constant/srv_two_pose_waits_stats.csv'
         df = pd.DataFrame(srv_two_pose_wait_dict, columns = ["Position","Waiting"])
-        df.to_csv (filename, mode='a',index=False, header=False)
+        # df.to_csv (filename, mode='a',index=False, header=False)
+        df.to_csv (data_source, mode='a',index=False, header=False)
     except OSError:
         if not fielname:
             print("Could not open/read file:", filename)
@@ -299,7 +331,7 @@ def save_jockey_details_to_file(jockeying_rates_with_threshold_in_server, queue_
 def save_pose_waits_to_file(pose_waits_dict, queue_name):
     if queue_name == "Server1":
         try:
-            filename = time_spent_in_pose_queue_one # base_dir+'/constant/constant/srv_one_pose_waits.csv'
+            filename = time_spent_in_pose_queue_one 
 
             header = ["Position","Time in Position"]
             with open(filename, 'a', encoding='utf-8-sig') as f:
@@ -321,7 +353,7 @@ def save_pose_waits_to_file(pose_waits_dict, queue_name):
 
     else:
         try:
-            filename = time_spent_in_pose_queue_two #base_dir+'/constant/srv_two_pose_waits.csv'
+            filename = time_spent_in_pose_queue_two 
 
             header = ["Position","Time in Position"]
             with open(filename, 'a', encoding='utf-8-sig') as f:
@@ -419,25 +451,13 @@ def generate_arrivals(num, arrivals_batch_num, run):
     return customers
 
 
-def get_process_id_to_terminate(customer_id, srv_one_processes, srv_two_processes):
-    #customer_id = list(customer_id.values())[0]
+def get_process_id_to_terminate(customer_id, srv_processes): #, srv_two_processes):
 
-    for t in srv_one_processes.items():        
+    for t in srv_processes.items():        
         if t[0] == customer_id:
             process_to_terminate = t[1]
-            print(colored("%s", 'green') % (customer_id) + " jockeying now, terminating process %s" % (
-                process_to_terminate))
+            print(colored("%s", 'green') % (customer_id) + " jockeying now, terminating process %s" % (colored(process_to_terminate,'red')))
             return process_to_terminate
-
-    for j in srv_two_processes.items():
-        if j[0] == customer_id:
-            process_to_terminate = j[1]
-            print(colored("%s", 'green') % (customer_id) + " jockeying now, terminating process %s" % (
-                process_to_terminate))
-            return process_to_terminate
-
-    # process_to_terminate =  srv_process_details.get(customer_id)
-    # print(colored("%s", 'green') % (customer_id) + " is going to terminate with process %s" % (process_to_terminate))
 
 
 def get_expected_customer_queue_waiting_times(datasource, pose, queue_size): #curr_queue):
@@ -448,27 +468,30 @@ def get_expected_customer_queue_waiting_times(datasource, pose, queue_size): #cu
     
         col_position = columns[0]
         col_waiting_time = columns[1]      
-            
-        grp_fields = df.groupby(col_position).agg(mean_pose=('Position', 'mean'), mean_waiting_time=('Waiting','mean')).reset_index(drop=True)
-        # print(grp_fields.mean_pose.tolist(), "\n",grp_fields.mean_waiting_time.tolist(), pose)
         
-        count = 0
-        for field in grp_fields.mean_pose: #range(len(grp_fields.mean_pose)):        
-            if float(pose) == field: #grp_fields.mean_pose[count]:
-                expected_wait = grp_fields.mean_waiting_time[count]
-                # print("-------<< ", float(pose), expected_wait)
+        grp_fields = df.groupby(col_position).agg(mean_pose=('Position', 'mean'), mean_waiting_time=('Waiting','mean')).reset_index(drop=True)        
+        
+        if len(grp_fields) == 0: 
+            if args.arrival_rate > 0:               
+                expected_wait = get_expected_by_littles_law(pose, args.arrival_rate) 
+                
                 return expected_wait
-                continue
-            else:
-                if args.arrival_rate > 0:
-                    # print("===>>>> ", curr_queue.qsize(), args.arrival_rate)
-                    expected_wait = get_expected_by_littles_law(pose, args.arrival_rate) # queue_size,
-                    # print("******** ",float(pose),  expected_wait)
-                    return expected_wait
-                    continue
-                else:
-                    continue
-            count = count + 1
+
+        else:
+            count = 0
+            for field in grp_fields.mean_pose:                     
+                if float(pose) == field:
+                    
+                    expected_wait = grp_fields.mean_waiting_time[count]
+                    if expected_wait > 0:
+                        
+                        return expected_wait
+                    else:
+                        expected_wait = get_expected_by_littles_law(pose, args.arrival_rate)                       
+                        return expected_wait
+                    
+                count = count + 1
+                    
     except OSError:
         print ("Could not open/read file:", datasource)
         sys.exit()
@@ -476,8 +499,7 @@ def get_expected_customer_queue_waiting_times(datasource, pose, queue_size): #cu
         print(f"Unexpected {err=}, {type(err)=}")
         raise
     
-    # return expected_wait
-    
+
     '''
     index = {}
     try:
@@ -529,7 +551,6 @@ def compute_jockey_wait_in_pose(customer_id, queue_size, preferred_que_name, que
         jockey will spend in the queue when it lands the the end.
 
     '''
-    # now_in_preferred_queue = set(list())  # Need to bring in the preferred_queue object here to
     
     get_customer_queue_waiting_times(preferred_queue)
 
@@ -541,14 +562,13 @@ def compute_jockey_wait_in_pose(customer_id, queue_size, preferred_que_name, que
     else:
         if queue_size > len(srv_times_list):
             wait_in_pose = srv_times_list[0]
-        else:
-            # wait_in_pose = compute_time_spent_in_service(srv_times_list, preferred_que_name, queue_size, all_serv_times)
+        else:            
             wait_in_pose = compute_time_spent_in_service(srv_times_list, queue_size, all_serv_times)
+            
     return wait_in_pose
 
 
 def save_jockey_waiting_time(jockeyed_customer_details, filename):
-    # print(jockeyed_customer_details)
 
     try:        
         # header = ["Jockeying_threshold","Jockey_count","Service_rate_diff"]        
@@ -566,62 +586,43 @@ def save_jockey_waiting_time(jockeyed_customer_details, filename):
         raise
 
 
-def get_total_amount_of_wait_for_jockey(wait_in_pose, customer_id, srv_cust_time_dict, wait_time_of_jockey_dict, wait_time_of_jockey_dict_other ):
+def get_total_amount_of_wait_for_jockey(wait_in_pose, customer_id, srv_cust_time_dict, wait_time_of_jockey_dict, wait_time_of_jockey_dict_other
+                                       , datasource, queue_size):
     # Read from the file of already jockeyed customers, then find the customer_id
     # If the customer_id already exists and has a suffix of _jockey, then read it's 
     # already spent time before jockeying, to the most recent time assigned when it jockeys
     # Return this as the total waiting time the jockeyed customer has spent in the system.
     
-    
-    wait_one = [value for key, value in wait_time_of_jockey_dict.items() if customer_id in key]
-    # print("----- ", wait_one)
-    if len(wait_one ) > 1 or len(wait_one) == 1:
-        wait_one = float(sum(wait_one))
-    #else:
-    #    return #wait_one = float(wait_one[0])
+    wait_one = [value for key, value in wait_time_of_jockey_dict.items() if customer_id in key] 
+    if wait_one is not None:
+        if len(wait_one ) > 1 or len(wait_one) == 1:
+            wait_one = float(sum(wait_one))
         
-    wait_two = [value for key, value in wait_time_of_jockey_dict_other.items() if customer_id in key]
-    # print("**** ", wait_two)
+    wait_two = [value for key, value in wait_time_of_jockey_dict_other.items() if customer_id in key] # if key in customer_id] #
+
     if len(wait_two ) > 1 or len(wait_two ) == 1:
         wait_two = float(sum(wait_two))
-    #else:
-    #    return #wait_two = float(wait_two[0])
     
+    count = 0
     for cust in srv_cust_time_dict.keys():
         if cust == customer_id or cust in customer_id:
             waiting_time_at_initial_queue_join = srv_cust_time_dict[cust]
-        else:
-            continue
-
-        
-        if wait_one and waiting_time_at_initial_queue_join and wait_in_pose:
-            total_wait_in_queue = waiting_time_at_initial_queue_join + wait_one + wait_in_pose
-            return total_wait_in_queue
-        
-        elif wait_two and waiting_time_at_initial_queue_join and wait_in_pose:
-            total_wait_in_queue = waiting_time_at_initial_queue_join + wait_two + wait_in_pose
-            return total_wait_in_queue
-        elif wait_two and waiting_time_at_initial_queue_join and wait_in_pose and wait_one:
-            total_wait_in_queue = waiting_time_at_initial_queue_join + wait_two + wait_in_pose + wait_one
-            return total_wait_in_queue
-        else:
-            continue
-        # addition_wait_in_queue = max([value for key, value in wait_time_of_jockey_dict.items() if customer_id in key])
-        # if addition_wait_in_queue and waiting_time_at_initial_queue_join and wait_in_pose:        
-        #    total_wait_in_queue = waiting_time_at_initial_queue_join + addition_wait_in_queue + wait_in_pose            
-        #    return total_wait_in_queue
             
-        #else:
-        #    continue 
-
+            if waiting_time_at_initial_queue_join and wait_in_pose:
+                total_wait_in_queue = waiting_time_at_initial_queue_join + wait_in_pose # + wait_two
+                return total_wait_in_queue
+            
+        else:
+            continue
+        
+        count = count + 1
+        
 
 def jockey_or_not(jockeys, other_jockeys, customer_id, curr_queue, preferred_que, preferred_que_name,
                       queue_size, srv_one_cust_time_dict, srv_two_cust_time_dict, queue_name,
                       dict_server_customer_queue, srv_times_list, srv_lst_arrivals, all_serv_times, unused_waiting_times):
-
-
-    customer_id = customer_id+"_jockey"     
-    
+        
+    original_id = customer_id.split("_jockey")[0]
     jockey_count = customer_id.count('jockey')
     dict_customer_id_total_wait_one = {}
     dict_customer_id_total_wait_two  = {}  
@@ -637,113 +638,107 @@ def jockey_or_not(jockeys, other_jockeys, customer_id, curr_queue, preferred_que
     lst_len_wait_jockey_count_two  = []
     ls_multiple_xteristics = []
     
-    # no_jockeyed_thresh_count_wait_diff = []
+    data_source_one = base_dir+"/constant/wait/srv_one_pose_waits_stats.csv"
+    data_source_two = base_dir+"/constant/wait/srv_two_pose_waits_stats.csv"
     
-    data_source_one = base_dir+"/constant/srv_one_pose_waits_stats.csv"
-    data_source_two = base_dir+"/constant/srv_two_pose_waits_stats.csv"
+    data_customer_id_jockey_wait_one = base_dir+"/constant/wait/srv_one_jockey_waiting_time.csv"
+    data_customer_id_jockey_wait_two = base_dir+"/constant/wait/srv_two_jockey_waiting_time.csv"
     
-    data_customer_id_jockey_wait_one = base_dir+"/constant/srv_one_jockey_waiting_time.csv"
-    data_customer_id_jockey_wait_two = base_dir+"/constant/srv_two_jockey_waiting_time.csv"
+    data_customer_id_jockey_wait_serv_diff_one = base_dir+"/constant/wait/srv_one_jockey_waiting_time_serv_diff.csv"
+    data_customer_id_jockey_wait_serv_diff_two = base_dir+"/constant/wait/srv_two_jockey_waiting_time_serv_diff.csv"
+    data_length_wait_jockey_count_one = base_dir+"/constant/wait/srv_one_len_wait_count.csv"
+    data_length_wait_jockey_count_two = base_dir+"/constant/wait/srv_two_len_wait_count.csv"
     
-    data_customer_id_jockey_wait_serv_diff_one = base_dir+"/constant/srv_one_jockey_waiting_time_serv_diff.csv"
-    data_customer_id_jockey_wait_serv_diff_two = base_dir+"/constant/srv_two_jockey_waiting_time_serv_diff.csv"
-    # data_customer_id_jockey_wait_serv_diff = base_dir+"/constant/all_queues_jockey_waiting_time_serv_diff.csv"
-    
-    # store the queue length, waiting time to see influence on the number of times jockeyed
-    data_length_wait_jockey_count_one = base_dir+"/constant/srv_one_len_wait_count.csv"
-    data_length_wait_jockey_count_two = base_dir+"/constant/srv_two_len_wait_count.csv"
-    
-    # datasource_jockey_details_two = base_dir+'/constant/que_two_jockeying_details.csv'
-    # datasource_diffs_two = base_dir+'/constant/que_two_jockeying_serv_diff.csv'
     datasource_diffs = base_dir+'/constant/all_queues_jockeying_serv_diff.csv'
-    # datasource_jockey_details_one = base_dir+'/constant/que_one_jockeying_details.csv'
     datasource_jockey_details = base_dir+'/constant/all_que_jockeying_threshold_count_diff.csv'
     datasource_jockey_details_extra = base_dir+'/constant/all_que_jockeying_threshold_count_totalwaitingtime_diff.csv'
-    # datasource_diffs_one = base_dir+'/constant/que_one_jockeying_serv_diff.csv'
-    datasource_multiple_xters = base_dir+'/constant/multiple_xteristics.csv'
+    datasource_multiple_xters = base_dir+'/constant/wait/multiple_xteristics.csv'
     
     if isinstance(customer_id, list):
         customer_id = ",".join(customer_id)
     
         
     if queue_name == "Server1":        
+        preferred_que_name = "Server2"
+        now_in_other_queue =  len(list(set(preferred_que.queue)))+1 
+        wait_in_pose = get_expected_customer_queue_waiting_times(data_source_two, now_in_other_queue, len(list(set(curr_queue.queue)))) 
+        alt_data_source = data_source_two
 
-        now_in_other_queue =  len(list(set(preferred_que.queue)))+1 #preferred_que.qsize()+1 #
-        wait_in_pose = get_expected_customer_queue_waiting_times(data_source_two, now_in_other_queue, len(list(set(curr_queue.queue))))   
-        jockeyed_waits_two.update({customer_id:wait_in_pose})
+        if "_jockey" in customer_id:
+            curr_serv_time = jockeyed_waits_two.get(customer_id) 
+            if  curr_serv_time is None:
+                curr_serv_time = jockeyed_waits_one.get(customer_id)
+        else:
+            curr_serv_time = srv_one_cust_time_dict.get(original_id)
         
-        lst_wait_threshold_diff_serv_rates_two.append([args.jockeying_threshold, wait_in_pose, abs(args.service_rate_one - args.service_rate_two)])
+        waiting_time_threshold = abs(curr_serv_time - wait_in_pose)
+                
+        jockeyed_waits_two.update({customer_id:wait_in_pose})    
+        
         lst_jockeyed_pose_wait_time_queue_two.append([now_in_other_queue, wait_in_pose])
         save_jockey_waiting_time(lst_wait_threshold_diff_serv_rates_two, datasource_diffs)
-        save_jockey_waiting_time(lst_jockeyed_pose_wait_time_queue_two, base_dir+"/constant/que_two_length_waits_jockeyed.csv")
-        jockeyed_pose_plus_wait_time_queue_two.append([args.jockeying_threshold, jockey_count, abs(args.service_rate_one - args.service_rate_two)])
+        save_jockey_waiting_time(lst_jockeyed_pose_wait_time_queue_two, base_dir+"/constant/que_two_length_waits_jockeyed.csv")        
         
-        save_jockey_waiting_time(jockeyed_pose_plus_wait_time_queue_two, datasource_jockey_details) #datasource_jockey_details_two)
+        save_jockey_waiting_time(jockeyed_pose_plus_wait_time_queue_two, datasource_jockey_details) 
+        total_wait_jockey = get_total_amount_of_wait_for_jockey(wait_in_pose, customer_id, srv_one_cust_time_dict, jockeyed_waits_two, 
+                                                               jockeyed_waits_one, alt_data_source, preferred_que)         
         
-        total_wait_jockey = get_total_amount_of_wait_for_jockey(wait_in_pose, customer_id, srv_one_cust_time_dict, jockeyed_waits_two, jockeyed_waits_one) 
-        
-        # print(total_wait_jockey)
-        jockeyed_pose_plus_wait_time_queue_two_extra.append([args.jockeying_threshold, jockey_count, total_wait_jockey,  abs(args.service_rate_one - args.service_rate_two)])
-        
-        ls_multiple_xteristics.append([args.jockeying_threshold, jockey_count, total_wait_jockey,  abs(args.service_rate_one - args.service_rate_two), now_in_other_queue])
-        #save_jockey_waiting_time(jockeyed_pose_plus_wait_time_queue_two_extra, datasource_jockey_details_extra)
-        
-        if total_wait_jockey is not None:
-            # print("................... ", total_wait_jockey, type(total_wait_jockey))
+        if total_wait_jockey is not None and total_wait_jockey > 0:            
             total_wait_jockey = float(str(total_wait_jockey).lstrip('[').rstrip(']'))
         
-            # lst_customer_id_total_wait_two.append([customer_id, jockey_count, total_wait_jockey])
-            # save_jockey_waiting_time(lst_customer_id_total_wait_two, data_customer_id_jockey_wait_two)
-        
             lst_len_wait_jockey_count_two.append([now_in_other_queue,total_wait_jockey, jockey_count])
-        
-            lst_customer_id_total_wait_serv_diff_two.append([now_in_other_queue,total_wait_jockey, jockey_count, abs(args.service_rate_two - args.service_rate_one)])
+            
+            ls_multiple_xteristics.append([waiting_time_threshold, jockey_count, wait_in_pose, total_wait_jockey, args.arrival_rate, args.service_rate_one, args.service_rate_two,  abs(args.service_rate_one - args.service_rate_two)])
+           
             save_jockey_waiting_time(lst_len_wait_jockey_count_two, data_length_wait_jockey_count_two)
             
             save_jockey_waiting_time(lst_customer_id_total_wait_serv_diff_two, data_customer_id_jockey_wait_serv_diff_two)
-            print(colored("%s choosing %s for jockeying with %01d customers. %6.7f seconds will be needed until service completion",'white') % (customer_id, preferred_que_name, now_in_other_queue, total_wait_jockey)) #wait_in_pose))
-            save_jockey_waiting_time(jockeyed_pose_plus_wait_time_queue_two_extra, datasource_jockey_details_extra)
+            print(colored("%s choosing %s for jockeying with %01d customers. %6.7f seconds will be needed until service completion",'white') % (customer_id, preferred_que_name, now_in_other_queue, total_wait_jockey))             
             
+            del srv_one_cust_time_dict[original_id]
             save_jockey_waiting_time(ls_multiple_xteristics, datasource_multiple_xters) 
         
     else:
-
+     
         now_in_other_queue = len(list(set(preferred_que.queue)))+1 # preferred_que.qsize()+1 
-    
+        preferred_que_name = "Server1"
         wait_in_pose = get_expected_customer_queue_waiting_times(data_source_one, now_in_other_queue, len(list(set(curr_queue.queue))))
+
+        if "_jockey" in customer_id:
+            curr_serv_time = jockeyed_waits_one.get(customer_id)
+            if curr_serv_time is None:
+                curr_serv_time = jockeyed_waits_two.get(customer_id)
+        else:
+            curr_serv_time = srv_one_cust_time_dict.get(original_id)
+            
+        alt_data_source = data_source_one
+        waiting_time_threshold = abs(curr_serv_time - wait_in_pose)
+        
+        # customer_id = customer_id+"_jockey" 
         jockeyed_waits_one.update({customer_id:wait_in_pose})        
             
-        lst_wait_threshold_diff_serv_rates_one.append([args.jockeying_threshold, wait_in_pose, abs(args.service_rate_one - args.service_rate_two)])
+        lst_wait_threshold_diff_serv_rates_one.append([args.jockeying_threshold, wait_in_pose, curr_serv_time, abs(args.service_rate_one - args.service_rate_two)])
         
         lst_jockeyed_pose_wait_time_queue_one.append([now_in_other_queue, wait_in_pose])
         save_jockey_waiting_time(lst_wait_threshold_diff_serv_rates_one, datasource_diffs)
         save_jockey_waiting_time(lst_jockeyed_pose_wait_time_queue_one, base_dir+"/constant/que_one_length_waits_jockeyed.csv")
-        jockeyed_pose_plus_wait_time_queue_one.append([args.jockeying_threshold, jockey_count, abs(args.service_rate_one - args.service_rate_two)])
-        save_jockey_waiting_time(jockeyed_pose_plus_wait_time_queue_one, datasource_jockey_details) #datasource_jockey_details_one)
-        
-        total_wait_jockey = get_total_amount_of_wait_for_jockey(wait_in_pose, customer_id, srv_two_cust_time_dict, jockeyed_waits_one, jockeyed_waits_two)
-        
-        jockeyed_pose_plus_wait_time_queue_one_extra.append([args.jockeying_threshold, jockey_count, total_wait_jockey,  abs(args.service_rate_one - args.service_rate_two)])
-        
-        ls_multiple_xteristics.append([args.jockeying_threshold, jockey_count, total_wait_jockey,  abs(args.service_rate_one - args.service_rate_two), now_in_other_queue])
-        # save_jockey_waiting_time(jockeyed_pose_plus_wait_time_queue_one_extra, datasource_jockey_details_extra)
-        
-        if total_wait_jockey is not None:
-            # print ("************",total_wait_jockey, type(total_wait_jockey))
+
+        total_wait_jockey = get_total_amount_of_wait_for_jockey(wait_in_pose, customer_id, srv_two_cust_time_dict, jockeyed_waits_one, 
+                                                               jockeyed_waits_two, alt_data_source, preferred_que)                
+        if total_wait_jockey is not None and total_wait_jockey > 0:
+            
             total_wait_jockey = float(str(total_wait_jockey).lstrip('[').rstrip(']'))
         
-            lst_customer_id_total_wait_one.append([customer_id, jockey_count, total_wait_jockey])
-            save_jockey_waiting_time(lst_customer_id_total_wait_one, data_customer_id_jockey_wait_one)
-        
-            lst_len_wait_jockey_count_one.append([now_in_other_queue,total_wait_jockey, jockey_count]) # abs(args.service_rate_two - args.service_rate_one)
-            lst_customer_id_total_wait_serv_diff_one.append([now_in_other_queue,total_wait_jockey, jockey_count, abs(args.service_rate_one - args.service_rate_two)])
-        
+            lst_len_wait_jockey_count_one.append([now_in_other_queue,total_wait_jockey, jockey_count]) 
+            jockey_count = customer_id.count('jockey')
+            
+            ls_multiple_xteristics.append([waiting_time_threshold, jockey_count, wait_in_pose, total_wait_jockey, args.arrival_rate, args.service_rate_one, args.service_rate_two, abs(args.service_rate_one - args.service_rate_two)])
             save_jockey_waiting_time(lst_len_wait_jockey_count_one, data_length_wait_jockey_count_one)
             save_jockey_waiting_time(lst_customer_id_total_wait_serv_diff_one, data_customer_id_jockey_wait_serv_diff_one)           
     
-            print(colored("%s choosing %s for jockeying with %01d customers. %6.7f seconds will be needed until service completion",'white') % (customer_id, preferred_que_name, now_in_other_queue, total_wait_jockey)) #wait_in_pose))
-            save_jockey_waiting_time(jockeyed_pose_plus_wait_time_queue_one_extra, datasource_jockey_details_extra)
+            print(colored("%s choosing %s for jockeying with %01d customers. %6.7f seconds will be needed until service completion",'white') % (customer_id, preferred_que_name, now_in_other_queue, total_wait_jockey)) #wait_in_pose))            
         
+            del srv_two_cust_time_dict[original_id]
             save_jockey_waiting_time(ls_multiple_xteristics, datasource_multiple_xters)
 
     populate_task_into_queue(preferred_que, customer_id)
@@ -753,9 +748,7 @@ def jockey_or_not(jockeys, other_jockeys, customer_id, curr_queue, preferred_que
         other_jockeys, curr_queue, jockeyed_customer_server_one_dict, jockeyed_customer_server_two_dict,
         srv_lst_arrivals, all_serv_times, unused_waiting_times))
     # proc.daemon = True
-    proc.start()
-
-    # print(colored("%s process started on %s with PID -> %01d","white")%(customer_id, preferred_que_name, proc.pid))
+    proc.start()    
     
     return 
 
@@ -775,73 +768,79 @@ def filter_jockeys(jockeys, jockeys_in_other_queue):
         for jockey in jockeys:
             if jockey != split_temp and jockey != temp_in_other_queue:
                 filtered_jockeys_list.append(jockey)
-                
+        
     return filtered_jockeys_list
 
+def removekey(d, key):
+    r = dict(d)
+    del r[key]
+    return r
 
 def jockeying_init(curr_queue, jockeys, other_jockeys, srv_process_details, preferred_queue, preferred_queue_id,
             srv_lst_arrivals, srv_one_cust_time_dict, srv_two_cust_time_dict,
-            queue_name, dict_server_customer_queue, srv_times_list, all_serv_times, unused_waiting_times): #  srv_cust_pose_dict,
+            queue_name, dict_server_customer_queue, srv_times_list, all_serv_times, unused_waiting_times): 
+        
+        if preferred_queue_id == "Server1":
             
-
-        jockeys = filter_jockeys(jockeys, other_jockeys)
-        for jockey in range(len(jockeys)):
-
-            print(colored("%s has been identified for jockeying...",'red')%(jockeys[jockey]))
-            jockey_or_not(jockeys, other_jockeys, jockeys[jockey], curr_queue, preferred_queue, preferred_queue_id,
-                          curr_queue.qsize(), srv_one_cust_time_dict, srv_two_cust_time_dict,
-                          queue_name, dict_server_customer_queue, srv_times_list, srv_lst_arrivals, all_serv_times, unused_waiting_times)
+            if jockeys in list(customer_processes_in_two.keys()):
+                return
+        
+        elif preferred_queue_id == "Server2":            
+            jockeys = list(set(jockeys) - set(list(customer_processes_in_one.keys())))
+            if jockeys in list(customer_processes_in_one.keys()):
+                return
+        else:    
+            for jockey in range(len(jockeys)):                
     
-        simple_process(curr_queue, srv_one_cust_time_dict, srv_two_cust_time_dict,
-                           queue_name, jockeys, other_jockeys, preferred_queue, dict_server_customer_queue_one,
-                           dict_server_customer_queue_two, srv_lst_arrivals, all_serv_times, unused_waiting_times)
+                print(colored("%s has been identified for jockeying...",'red')%(jockeys[jockey]))
+                jockey_or_not(jockeys, other_jockeys, jockeys[jockey], curr_queue, preferred_queue, preferred_queue_id,
+                            curr_queue.qsize(), srv_one_cust_time_dict, srv_two_cust_time_dict,
+                            queue_name, dict_server_customer_queue, srv_times_list, srv_lst_arrivals, all_serv_times, unused_waiting_times)
+    
+            simple_process(curr_queue, srv_one_cust_time_dict, srv_two_cust_time_dict,
+                            queue_name, jockeys, other_jockeys, preferred_queue, dict_server_customer_queue_one,
+                            dict_server_customer_queue_two, srv_lst_arrivals, all_serv_times, unused_waiting_times)
 
         return preferred_queue_id
 
 
 def compare_waiting_times(queue_size, preferred_queue, data_source_one,
-                          data_source_two, serv_time, customer_id, queue_name):
+                          data_source_two, serv_time, customer_id, queue_name):    
+    
     if isinstance(customer_id, dict):
-        customer_id = list(customer_id.values())[0]
+        customer_id = list(customer_id.values())[0]    
 
     if serv_time is None:
         # assign a random service time here if service time is None type
         serv_time = np.random.exponential(args.service_rate_one, 1)
 
-    if queue_name == "Server1":
-        xpected_in_preferred_que = read_pose_waiting_times_in_queue_two(preferred_queue.qsize() + 1,
-                                                                        preferred_queue, data_source_two, serv_time)
+    if queue_name == "Server1":       
+        xpected_in_preferred_que = get_expected_customer_queue_waiting_times(data_source_two, preferred_queue.qsize() + 1, queue_size)
 
         preferred_queue_name = "Server2"
         if xpected_in_preferred_que is None:
             xpected_in_preferred_que = get_expected_by_littles_law(queue_size, serv_time)
 
-        if serv_time > xpected_in_preferred_que:
-            print(colored("FYI %s -> tenants who jockeyed to %s at position %01d spent %s ..", 'green') % (
-                customer_id, preferred_queue_name, preferred_queue.qsize() + 1, xpected_in_preferred_que))
+        if  xpected_in_preferred_que < serv_time:
             jockey_flag = True
         else:
             jockey_flag = False
-
-
+        
         enqueued_in_srv_one_cust_times.update({customer_id: xpected_in_preferred_que})
         jockeyed_customer_server_one_dict.update({customer_id: preferred_queue_name})
 
     else:
-        xpected_in_preferred_que = read_pose_waiting_times_in_queue_one(preferred_queue.qsize() + 1,
-                                                                        preferred_queue, data_source_one, serv_time)
+        xpected_in_preferred_que = get_expected_customer_queue_waiting_times(data_source_one, preferred_queue.qsize() + 1, queue_size)
+        
         if xpected_in_preferred_que is None:
             xpected_in_preferred_que = get_expected_by_littles_law(queue_size, serv_time)
 
         preferred_queue_name = "Server1"
 
-        if serv_time > xpected_in_preferred_que:
-            print(colored("FYI %s -> tenants who jockeyed to %s at position %01d spent %s ..", 'green') % (
-                customer_id, preferred_queue_name, preferred_queue.qsize() + 1, xpected_in_preferred_que))
+        if  xpected_in_preferred_que < serv_time:            
             jockey_flag = True
         else:
             jockey_flag = False
-
         enqueued_in_srv_two_cust_times.update({customer_id: xpected_in_preferred_que})
         jockeyed_customer_server_two_dict.update({customer_id: preferred_queue_name})
 
@@ -885,10 +884,10 @@ def jockey_selector(curr_queue, serv_time, customer_id, queue_name, preferred_qu
                     enqueued_in_srv_two_cust_times.update({customer_id:serv_time})
                     jockeyed_customer_server_two_dict.update({customer_id:preferred_queue_name})
     else:
-
+        
         try:
-            data_source_one = base_dir+"/constant/srv_one_pose_waits_stats.csv"
-            data_source_two = base_dir+"/constant/srv_two_pose_waits_stats.csv"
+            data_source_one = base_dir+"/constant/wait/srv_one_pose_waits_stats.csv"
+            data_source_two = base_dir+"/constant/wait/srv_two_pose_waits_stats.csv"
 
             jockey_flag = compare_waiting_times(len(curr_queue.queue), preferred_queue, data_source_one, data_source_two,
                                   serv_time, customer_id, queue_name)
@@ -906,7 +905,7 @@ def random_jockey_selector(queue_obj, still_in_queue):
         selector = np.random.randint(1,len(still_in_queue))
         customer_to_jockey = still_in_queue.get(selector)
         if not customer_to_jockey:
-            customer_to_jockey = list(still_in_queue.values())[selector-1] # over impatient customer might jockey from position 1 to longer queue
+            customer_to_jockey = list(still_in_queue.values())[selector-1] 
 
         return customer_to_jockey
         
@@ -919,23 +918,27 @@ def random_jockey_selector(queue_obj, still_in_queue):
 
 def get_max_waiting_times_list(still_in_queue, srv_cust_time_dict):
     
-    selected = []
+    selected = {}
     wait_times = []
     selected_details = {}
-    randstartparam = int(min(args.service_rate_one, args.service_rate_two))
-    
-    for customer in still_in_queue:
-        #for cust, time in srv_one_cust_time_dict.items():
-        for cust, time in srv_cust_time_dict.items():
-            if cust == customer:
+    randstartparam = int(max(args.service_rate_one, args.service_rate_two))
+
+    counter = 0
+    for cust, time in srv_cust_time_dict.items():
+        
+        if counter < len(still_in_queue):
+            customer = still_in_queue[counter]
+            if cust == customer:                
                 wait_times.append(time)
-                selected_details.update({cust:time})                 
+                selected_details.update({cust:time}) 
+                
+        counter = counter + 1                 
     
     n = random.randint(1, randstartparam)
 
     # First, sort the List
-    wait_times.sort()    
-    # Now, get the largest N integers from the list
+    wait_times.sort()   
+    
     if n < len(wait_times):
         
         only_selected = wait_times[-n:]    
@@ -945,11 +948,15 @@ def get_max_waiting_times_list(still_in_queue, srv_cust_time_dict):
     if len(only_selected) > 0:
         
         for selected_time in only_selected:
-            counter = 0
+            i = 0
             if selected_time in list(selected_details.values()):                
-                selected.append(list(selected_details.keys())[counter])
-            counter = counter + 1
-              
+                # selected.append(list(selected_details.keys())[counter])
+                selected.update({list(selected_details.keys())[i]:list(selected_details.values())[i]})
+            if i > len(only_selected):
+                continue
+            else:
+                i = i + 1
+                   
         return selected
 
 def bulk_random_jockey_selector(curr_queue, still_in_queue, srv_one_cust_time_dict, srv_two_cust_time_dict):
@@ -995,117 +1002,368 @@ def in_curr_queue_at_pose(customer_to_switch, still_in_queue):
                 cust_pose = cust_pose + 1
 
 
-def re_evaluate_jockeying_decision_based_on_both_queue_metrics(customers_in_motion, queue_, preferred_queue,
-                                      queue_name, customer_processes_in_one, customer_processes_in_two, jockeys,
-                                      other_jockeys, srv_cust_pose_dict, dict_server_customer_queue_one,
-                                      dict_server_customer_queue_two, srv_lst_arrivals, srv_one_cust_time_dict,
-                                      srv_two_cust_time_dict):
-
-    customer_id = get_last_in_curr_queue(queue_, customers_in_motion)
-
-    data_source_one = base_dir + "/constant/srv_one_pose_waits_stats.csv"
-    data_source_two = base_dir + "/constant/srv_two_pose_waits_stats.csv"
-    jockey_flag = compare_waiting_times(queue_, preferred_queue, data_source_one,
-                          data_source_two, serv_time, customer_id, queue_name)
-
-    if jockey_flag and args.jockeying_threshold is not None:
-        pass
-
-def re_evaluate_jockeying_based_on_waiting_time(customers_in_motion, still_in_preferred_queue, queue_, preferred_queue, queue_name,
+def re_evaluate_jockeying_based_on_waiting_time(still_in_queue, still_in_preferred_queue, queue_, preferred_queue, queue_name,
                                       customer_processes_in_one, customer_processes_in_two, jockeys,
                                       other_jockeys, dict_server_customer_queue_one,
                                       dict_server_customer_queue_two, srv_lst_arrivals, srv_one_cust_time_dict,
                                       srv_two_cust_time_dict, all_serv_times, unused_waiting_times):
 
-    customer_last_in_queue = get_last_in_curr_queue(queue_, customers_in_motion)
+    data_source_one = base_dir + "/constant/wait/srv_one_pose_waits_stats.csv"
+    data_source_two = base_dir + "/constant/wait/srv_two_pose_waits_stats.csv"
+    lst_len_wait_jockey_count_one  = []
+    lst_len_wait_jockey_count_two  = []
+    # store the queue length, waiting time to see influence on the number of times jockeyed
+    data_length_wait_jockey_count_one = base_dir+"/constant/wait/srv_one_len_wait_count.csv"
+    data_length_wait_jockey_count_two = base_dir+"/constant/wait/srv_two_len_wait_count.csv"
+    datasource_multiple_xters = base_dir+'/constant/wait/multiple_xteristics.csv'
+    datasource_non_jockeyed_multiple_xters = base_dir+'/constant/wait/non_jockeyed_multiple_xteristics.csv'    
+    
+    lst_details_to_save = []    
+        
+    if len(still_in_queue) >= 1:        
+        
+        if queue_name == "Server1":
+            customer_to_switch_in_curr_queue = get_max_waiting_times_list(still_in_queue, srv_one_cust_time_dict) 
+            if customer_to_switch_in_curr_queue is not None:
+                customer_to_switch_in_curr_queue = list(customer_to_switch_in_curr_queue.keys())[0]                 
+                pose_of_last_customer_in_queue = in_curr_queue_at_pose(customer_to_switch_in_curr_queue, still_in_queue)
+                
+                preferred_que_name = "Server2"  
+                
+            else:
+                return 
+        else:
+            customer_to_switch_in_curr_queue = get_max_waiting_times_list(still_in_queue, srv_two_cust_time_dict)
+            if customer_to_switch_in_curr_queue is not None:
+                customer_to_switch_in_curr_queue = list(customer_to_switch_in_curr_queue.keys())[0] 
+                pose_of_last_customer_in_queue = in_curr_queue_at_pose(customer_to_switch_in_curr_queue, still_in_queue)                
+                preferred_que_name = "Server1" 
+                
+            else:
+                return  
 
-    customer_last_in_queue_id = list(customer_last_in_queue.values())[0]
-    pose_of_last_customer_in_queue = list(customer_last_in_queue.keys())[0]
+        if customer_to_switch_in_curr_queue:
+            customer_now_queued_in_server = on_which_server(customer_to_switch_in_curr_queue, dict_server_customer_queue_one, dict_server_customer_queue_two,
+                                                           jockeyed_customer_server_one_dict, jockeyed_customer_server_two_dict)             
+            
+            customers_with_arrivals_shuffled_curr = switch_customers_in_bulk_shuffled(customer_to_switch_in_curr_queue, preferred_queue, srv_lst_arrivals, queue_name)
+            customers_with_arrivals_shuffled_curr = list(flatten(customers_with_arrivals_shuffled_curr))            
+            
+            if customers_with_arrivals_shuffled_curr:
 
-    customer_now_queued_in_server = on_which_server(customer_last_in_queue, dict_server_customer_queue_one,
-                                                    dict_server_customer_queue_two)
+                # Incase there are no new arrivals, the shuffled list contains only 1 entry
+                if len(customers_with_arrivals_shuffled_curr) == 1:                            
+                    
+                    serv_time = serv_time_one[0]
+                    srv_times_list = serv_time_one               
+                    
+                    if queue_name == "Server1":
+                        jockeyed_customer_server_one_dict.update({customers_with_arrivals_shuffled_curr[0]:preferred_que_name})
+                        
+                        time_to_spend_in_current_queue = find_customer_times(customer_to_switch_in_curr_queue, srv_one_cust_time_dict, srv_two_cust_time_dict)
+                                                
+                        if time_to_spend_in_current_queue is None:
+                            return
+                        else:                            
+                            
+                            jockey_flag = compare_waiting_times(queue_.qsize(), preferred_queue, data_source_one,
+                                                                data_source_two, time_to_spend_in_current_queue,
+                                                                customer_to_switch_in_curr_queue, queue_name)
+                            
+                            avg_wait_in_alt_queue_pose = get_expected_customer_queue_waiting_times(data_source_two, len(list(set(preferred_queue.queue)))+1, len(list(set(curr_queue.queue))))
+                                                
+                            if jockey_flag:
+                                
+                                preferred_que_name = "Server2"                                
+                                
+                                proc_id_to_kill = get_process_id_to_terminate(customer_to_switch_in_curr_queue, customer_processes_in_one) 
+                                serv_time = serv_time_one[0]
+                                srv_times_list = serv_time_one
+                                                                                                
+                                print(colored("%s in %s at position %s jockeying to %s to position %01d. Terminating process ID: %s ",
+                                            "yellow") % (
+                                        customer_to_switch_in_curr_queue, customer_now_queued_in_server, pose_of_last_customer_in_queue,
+                                        preferred_que_name, preferred_queue.qsize() + 1, proc_id_to_kill))
+                    
+                                jockeyed_customer_server_one_dict.update({customer_to_switch_in_curr_queue: preferred_que_name})
+                    
+                                dict_server_customer_queue = dict_server_customer_queue_one
+                                # kill returned processID matching the customer to move
+                                ProcessHandler().terminate_process(proc_id_to_kill, queue_) 
+                                customer_to_switch_in_curr_queue = customer_to_switch_in_curr_queue + "_jockey"  
+                                jockeyed_waits_two.update({customer_to_switch_in_curr_queue:time_to_spend_in_current_queue})                              
+                    
+                                jockey_or_not(jockeys, other_jockeys, customer_to_switch_in_curr_queue, queue_, preferred_queue, preferred_que_name,
+                                            queue_.qsize(), srv_one_cust_time_dict, srv_two_cust_time_dict, queue_name,
+                                            dict_server_customer_queue, srv_times_list, srv_lst_arrivals, all_serv_times, unused_waiting_times)
+                            
+                            else:                 
+                                jockey_count = 0 
+                                wait_threshold = avg_wait_in_alt_queue_pose - time_to_spend_in_current_queue
+                      
+                                lst_details_to_save.append([wait_threshold, jockey_count, time_to_spend_in_current_queue,  args.arrival_rate, args.service_rate_one, args.service_rate_two, abs(args.service_rate_one - args.service_rate_two)])
+                                save_jockey_waiting_time(lst_details_to_save, datasource_multiple_xters)
+                                  
+                                lst_len_wait_jockey_count_two.append([preferred_queue.qsize() + 1, avg_wait_in_alt_queue_pose, jockey_count]) 
+                                save_jockey_waiting_time(lst_len_wait_jockey_count_two, data_length_wait_jockey_count_two) 
 
-    data_source_one = base_dir + "/constant/srv_one_pose_waits_stats.csv"
-    data_source_two = base_dir + "/constant/srv_two_pose_waits_stats.csv"
+                                            
+                    else:
+                        jockeyed_customer_server_two_dict.update({customers_with_arrivals_shuffled_curr[0]:preferred_que_name})
+                        
+                        time_to_spend_in_current_queue = find_customer_times(customer_to_switch_in_curr_queue, srv_one_cust_time_dict, srv_two_cust_time_dict)
+                        
+                        if time_to_spend_in_current_queue is None:
+                            return
+                        else:                           
+                             
+                            jockey_flag = compare_waiting_times(queue_.qsize(), preferred_queue, data_source_one,
+                                                                data_source_two, time_to_spend_in_current_queue, customer_to_switch_in_curr_queue
+                                                                , queue_name)
+                           
+                            avg_wait_in_alt_queue_pose = get_expected_customer_queue_waiting_times(data_source_one, len(list(set(preferred_queue.queue)))+1, len(list(set(queue_.queue))))
+                            
+                            if jockey_flag:
+                                
+                                preferred_que_name = "Server1"
+                                
+                                
+                                proc_id_to_kill = get_process_id_to_terminate(customer_to_switch_in_curr_queue, customer_processes_in_two) 
+                                serv_time = serv_time_two[0]
+                                srv_times_list = serv_time_one
+                                
+                                print(colored("%s in %s at position %s jockeying to %s to position %01d. Terminating process ID: %s ", "yellow") % (
+                                            customer_to_switch_in_curr_queue, customer_now_queued_in_server, pose_of_last_customer_in_queue,
+                                            preferred_que_name, preferred_queue.qsize() + 1, proc_id_to_kill))
+                    
+                                jockeyed_customer_server_two_dict.update({customer_to_switch_in_curr_queue: preferred_que_name})
+                      
+                                dict_server_customer_queue = dict_server_customer_queue_one
+                                # kill returned processID matching the customer to move
+                                ProcessHandler().terminate_process(proc_id_to_kill, queue_)    
+                                customer_to_switch_in_curr_queue = customer_to_switch_in_curr_queue + "_jockey"                                                                                                                                          
+                                jockeyed_waits_one.update({customer_to_switch_in_curr_queue:time_to_spend_in_current_queue})
+                                
+                                jockey_or_not(jockeys, other_jockeys, customer_to_switch_in_curr_queue, queue_, preferred_queue, preferred_que_name,
+                                            queue_.qsize(), srv_one_cust_time_dict, srv_two_cust_time_dict, queue_name,
+                                            dict_server_customer_queue, srv_times_list, srv_lst_arrivals, all_serv_times, unused_waiting_times)
+                            else:
+                                            
+                                jockey_count = 0          
+                                wait_threshold = avg_wait_in_alt_queue_pose - time_to_spend_in_current_queue
+                        
+                                lst_details_to_save.append([wait_threshold, jockey_count, time_to_spend_in_current_queue,  args.arrival_rate, args.service_rate_one, args.service_rate_two, abs(args.service_rate_one - args.service_rate_two)])
+                                save_jockey_waiting_time(lst_details_to_save, datasource_multiple_xters) 
+                                
+                                lst_len_wait_jockey_count_one.append([preferred_queue.qsize() + 1, avg_wait_in_alt_queue_pose, jockey_count]) 
+                                save_jockey_waiting_time(lst_len_wait_jockey_count_one, data_length_wait_jockey_count_one)                            
+                                            
+                    
+                if len(customers_with_arrivals_shuffled_curr) > 1: # el
+                     
+                    if queue_name == "Server1":
+                        curr_preferred_queue_id = "Server2"
+                    else:
+                        curr_preferred_queue_id = "Server1"
+                    
+                    if len(unused_waiting_times) > 0:
+                        srv_times_list = unused_waiting_times
+                    else:
+                        # if no unused service times in the originally generated dictionary
+                        # simply generate a new list of service times for each jockey candidate.
+                        srv_times_list = np.random.exponential(len(customers_with_arrivals_shuffled_curr), 1)                                    
+                    
+                    count = 0   
+                    
+                    for customer_to_switch in list(set(customers_with_arrivals_shuffled_curr)):
+                        
+                        process_jockeying_re_evaluating(queue_, preferred_queue, customer_to_switch, 
+                                                customer_now_queued_in_server, srv_times_list, srv_lst_arrivals, still_in_queue, list(set(preferred_queue.queue)),
+                                                jockeys, other_jockeys, all_serv_times, queue_name, srv_one_cust_time_dict, srv_two_cust_time_dict, unused_waiting_times)
+                        
+                        if queue_name == "Server1":
+                            # TODO:: modularize(create a seperate function block) save these details to reduce redundant code
+                            jockeyed_customer_server_one_dict.update({customers_with_arrivals_shuffled_curr[count]:preferred_que_name})
+                  
+                        else:
+                            jockeyed_customer_server_two_dict.update({customers_with_arrivals_shuffled_curr[count]:preferred_que_name})
+                        
+                        count = count + 1
 
-    if queue_name == "Server1": # customer_now_queued_in_server
-        # time_to_spend_in_current_queue = srv_one_cust_time_dict.get(customer_last_in_queue_id)
-        time_to_spend_in_current_queue = find_customer_times(customer_last_in_queue_id, srv_one_cust_time_dict, srv_two_cust_time_dict)
-        xpected_in_preferred_que = read_pose_waiting_times_in_queue_one(pose_of_last_customer_in_queue + 1,
-                                                                        preferred_queue, data_source_two,
-                                                                        time_to_spend_in_current_queue)
-        if xpected_in_preferred_que is None:
-            xpected_in_preferred_que = get_expected_by_littles_law(len(list(queue_.queue)), time_to_spend_in_current_queue)
+    
+    if len(still_in_preferred_queue) >= 1:
+        
+        
+        if queue_name == "Server1":
+            customer_to_switch_in_preferred_queue = get_max_waiting_times_list(still_in_preferred_queue, srv_one_cust_time_dict)
+            if customer_to_switch_in_preferred_queue is not None:
+                customer_to_switch_in_preferred_queue = list(customer_to_switch_in_preferred_queue.keys())[0] 
+                pose_of_last_customer_in_queue = in_curr_queue_at_pose(customer_to_switch_in_preferred_queue, still_in_preferred_queue)
+                
+                curr_preferred_queue_id = "Server2"
+            else:
+                return
+        else:
+            customer_to_switch_in_preferred_queue = get_max_waiting_times_list(still_in_preferred_queue, srv_two_cust_time_dict)
+            if customer_to_switch_in_preferred_queue is not None:
+                customer_to_switch_in_preferred_queue = list(customer_to_switch_in_preferred_queue.keys())[0] #
 
-        jockey_flag = compare_waiting_times(queue_, preferred_queue, data_source_one,
-                                            data_source_two, time_to_spend_in_current_queue,
-                                            customer_last_in_queue, queue_name)
+                pose_of_last_customer_in_queue = in_curr_queue_at_pose(customer_to_switch_in_preferred_queue, still_in_preferred_queue)                
+                curr_preferred_queue_id = "Server1"
+            else:
+                return 
+        
+        if customer_to_switch_in_preferred_queue:
+            
+            customer_now_queued_in_server = on_which_server(customer_to_switch_in_preferred_queue, dict_server_customer_queue_one, dict_server_customer_queue_two,
+                                                           jockeyed_customer_server_one_dict, jockeyed_customer_server_two_dict)
+                        
+            customers_with_arrivals_shuffled_preferred = switch_customers_in_bulk_shuffled(customer_to_switch_in_preferred_queue, queue_, srv_lst_arrivals, queue_name)
+            customers_with_arrivals_shuffled_preferred = list(flatten(customers_with_arrivals_shuffled_preferred))
 
-        if jockey_flag:
-            preferred_que_name = "Server2"
-            proc_id_to_kill = get_process_id_to_terminate(customer_last_in_queue_id, customer_processes_in_one,
-                                                          customer_processes_in_two)
-            serv_time = serv_time_one[0]
-            srv_times_list = serv_time_one
-            print(colored("%s in %s at position %s jockeying to %s to position %01d. Terminating process ID: %s ",
-                          "yellow") % (
-                      customer_last_in_queue_id, customer_now_queued_in_server, pose_of_last_customer_in_queue,
-                      preferred_que_name, preferred_queue.qsize() + 1, proc_id_to_kill))
-
-            jockeyed_customer_server_one_dict.update({customer_last_in_queue_id: preferred_que_name})
-
-            dict_server_customer_queue = dict_server_customer_queue_one
-            # kill returned processID matching the customer to move
-            ProcessHandler().terminate_process(proc_id_to_kill, queue_)
-            # customer_to_switch = list(customer_to_switch.values())[0]
-
-            jockey_or_not(jockeys, other_jockeys, customer_last_in_queue_id, queue_, preferred_queue, preferred_que_name,
-                          queue_.qsize(), serv_time_one, serv_time_two, queueID,
-                          dict_server_customer_queue, srv_times_list, srv_lst_arrivals, all_serv_times, unused_waiting_times)
-
-            jockey_rate = get_jockeying_rate(jockeyed_customer_server_one_dict, srv_lst_arrivals, queue_.qsize(), preferred_queue.qsize()) #global_arrivals_in_one)
-            #print(colored("Customers jockeyed from %s at a rate of %6.4f",'yellow', attrs=["blink"])%(queue_name, jockey_rate))
-
+            if customers_with_arrivals_shuffled_preferred: # el
+                
+                if len(unused_waiting_times) > 0:
+                    srv_times_list = unused_waiting_times
+                else:
+                    '''
+                        if no unused service times in the originally generated dictionary exist
+                        simply generate a new list of service times for each jockey candidate.
+                    '''
+                    srv_times_list = np.random.exponential(len(customers_with_arrivals_shuffled_preferred), 1)
+                
+                
+                
+                if len(customers_with_arrivals_shuffled_preferred) == 1:                                    
+                    serv_time = serv_time_two[0]
+                    srv_times_list = serv_time_two
+                    srv_process_details = srv_two_process_details
+                            
+                    if queue_name == "Server1":
+                        jockeyed_customer_server_one_dict.update({customers_with_arrivals_shuffled_curr[0]:preferred_que_name})
+                        
+                        time_to_spend_in_current_queue = find_customer_times(customer_to_switch_in_preferred_queue, srv_one_cust_time_dict, srv_two_cust_time_dict)
+                                                
+                        if time_to_spend_in_current_queue is None:
+                            return
+                        else:
+                            
+                            jockey_flag = compare_waiting_times(queue_.qsize(), preferred_queue, data_source_one,
+                                                                data_source_two, time_to_spend_in_current_queue,
+                                                                customer_to_switch_in_preferred_queue, queue_name)
+                            
+                            avg_wait_in_alt_queue_pose = get_expected_customer_queue_waiting_times(data_source_two, len(list(set(preferred_queue.queue)))+1, len(list(set(queue_.queue))))
+                                                        
+                            if jockey_flag:
+                                preferred_que_name = "Server2"
+                                proc_id_to_kill = get_process_id_to_terminate(customer_to_switch_in_preferred_queue, customer_processes_in_one)
+                                                                
+                                serv_time = serv_time_one[0]
+                                srv_times_list = serv_time_one
+                                
+                                
+                                
+                                print(colored("%s in %s at position %s jockeying to %s to position %01d. Terminating process ID: %s ",
+                                            "yellow") % (
+                                        customer_to_switch_in_preferred_queue, customer_now_queued_in_server, pose_of_last_customer_in_queue,
+                                        preferred_que_name, preferred_queue.qsize() + 1, proc_id_to_kill))
+                    
+                                jockeyed_customer_server_one_dict.update({customer_to_switch_in_preferred_queue: preferred_que_name})
+                    
+                                dict_server_customer_queue = dict_server_customer_queue_one
+                                # kill returned processID matching the customer to move
+                                ProcessHandler().terminate_process(proc_id_to_kill, queue_)
+                                # customer_to_switch = list(customer_to_switch.values())[0]  
+                                
+                                customer_to_switch_in_preferred_queue = customer_to_switch_in_preferred_queue + "_jockey"                                                                                                                         
+                                
+                                jockeyed_waits_two.update({customer_to_switch_in_preferred_queue:time_to_spend_in_current_queue})
+                                
+                                jockey_or_not(jockeys, other_jockeys, customer_to_switch_in_preferred_queue, queue_, preferred_queue, preferred_que_name,
+                                            queue_.qsize(), srv_one_cust_time_dict, srv_two_cust_time_dict, queue_name,
+                                            dict_server_customer_queue, srv_times_list, srv_lst_arrivals, all_serv_times, unused_waiting_times)
+                            
+                            else:
+                                            
+                                jockey_count = 0 # customer_last_in_queue_id.count("_jockey")         
+                                wait_threshold = avg_wait_in_alt_queue_pose - time_to_spend_in_current_queue
+                        
+                                lst_details_to_save.append([wait_threshold, jockey_count, time_to_spend_in_current_queue,  args.arrival_rate, args.service_rate_one, args.service_rate_two, abs(args.service_rate_one - args.service_rate_two)])
+                                save_jockey_waiting_time(lst_details_to_save, datasource_multiple_xters) 
+                                
+                                lst_len_wait_jockey_count_two.append([preferred_queue.qsize() + 1, avg_wait_in_alt_queue_pose, jockey_count]) 
+                                save_jockey_waiting_time(lst_len_wait_jockey_count_two, data_length_wait_jockey_count_two)
+                    
+                    else:
+                        jockeyed_customer_server_two_dict.update({customers_with_arrivals_shuffled_preferred[0]: curr_preferred_queue_id})
+                        
+                        time_to_spend_in_current_queue = find_customer_times(customer_to_switch_in_preferred_queue, srv_one_cust_time_dict, srv_two_cust_time_dict)
+                        
+                        if time_to_spend_in_current_queue is None:
+                            return
+                        else:
+                            jockey_flag = compare_waiting_times(queue_.qsize(), preferred_queue, data_source_one,
+                                                                data_source_two, time_to_spend_in_current_queue, customer_to_switch_in_preferred_queue
+                                                                , queue_name)
+                            
+                            avg_wait_in_alt_queue_pose = get_expected_customer_queue_waiting_times(data_source_one, len(list(set(preferred_queue.queue)))+1, len(list(set(curr_queue.queue))))
+                            
+                            if jockey_flag:
+                    
+                                preferred_que_name = "Server1"
+                                
+                                proc_id_to_kill = get_process_id_to_terminate(customer_to_switch_in_preferred_queue, customer_processes_in_two) #, customer_processes_in_one
+                                serv_time = serv_time_two[0]
+                                srv_times_list = serv_time_two
+                                
+                                print(colored("%s in %s at position %s jockeying to %s to position %01d. Terminating process ID: %s ", "yellow") % (
+                                            customer_to_switch_in_preferred_queue, customer_now_queued_in_server, pose_of_last_customer_in_queue,
+                                            preferred_que_name, preferred_queue.qsize() + 1, proc_id_to_kill))
+                    
+                                jockeyed_customer_server_two_dict.update({customer_to_switch_in_preferred_queue: preferred_que_name})
+                    
+                                dict_server_customer_queue = dict_server_customer_queue_one
+                                # kill returned processID matching the customer to move
+                                ProcessHandler().terminate_process(proc_id_to_kill, queue_) 
+                                customer_to_switch_in_preferred_queue = customer_to_switch_in_preferred_queue + "_jockey" 
+                                jockeyed_waits_one.update({customer_to_switch_in_preferred_queue:time_to_spend_in_current_queue})
+                                
+                                jockey_or_not(jockeys, other_jockeys, customer_to_switch_in_preferred_queue, queue_, preferred_queue, preferred_que_name,
+                                            queue_.qsize(), srv_one_cust_time_dict, srv_two_cust_time_dict, queue_name,
+                                            dict_server_customer_queue, srv_times_list, srv_lst_arrivals, all_serv_times, unused_waiting_times)
+                            
+                            else:                                            
+                                jockey_count = 0 # customer_last_in_queue_id.count("_jockey")         
+                                wait_threshold = avg_wait_in_alt_queue_pose - time_to_spend_in_current_queue
+                           
+                                lst_details_to_save.append([wait_threshold, jockey_count, time_to_spend_in_current_queue, args.arrival_rate, args.service_rate_one, args.service_rate_two, abs(args.service_rate_one - args.service_rate_two)])
+                                save_jockey_waiting_time(lst_details_to_save, datasource_multiple_xters) 
+                                
+                                lst_len_wait_jockey_count_one.append([preferred_queue.qsize() + 1, avg_wait_in_alt_queue_pose, jockey_count]) 
+                                save_jockey_waiting_time(lst_len_wait_jockey_count_one, data_length_wait_jockey_count_one)
+           
+                
+                elif len(customers_with_arrivals_shuffled_preferred) > 1: #el
+                                                    
+                    count = 0
+                    for customer_to_switch in list(set(customers_with_arrivals_shuffled_preferred)):  
+                            
+                        process_jockeying_re_evaluating(queue_, preferred_queue, customer_to_switch,
+                                        customer_now_queued_in_server, srv_times_list, srv_lst_arrivals, still_in_queue, 
+                                        list(set(preferred_queue.queue)), jockeys, other_jockeys, all_serv_times, queue_name, 
+                                        srv_one_cust_time_dict, srv_two_cust_time_dict, unused_waiting_times)
+                                    
+                        if queue_name == "Server1":
+                            jockeyed_customer_server_one_dict.update({customers_with_arrivals_shuffled_preferred[count]: curr_preferred_queue_id})                          
+                        else:
+                            jockeyed_customer_server_two_dict.update({customers_with_arrivals_shuffled_preferred[count]: curr_preferred_queue_id})                           
+                            
+                        count = count + 1
+                                
     else:
-        time_to_spend_in_current_queue = find_customer_times(customer_last_in_queue_id, srv_one_cust_time_dict, srv_two_cust_time_dict)
-
-        xpected_in_preferred_que = read_pose_waiting_times_in_queue_one(pose_of_last_customer_in_queue + 1,
-                                                                        preferred_queue, data_source_two, time_to_spend_in_current_queue)
-        if xpected_in_preferred_que is None:
-            xpected_in_preferred_que = get_expected_by_littles_law(len(list(queue_.queue)), time_to_spend_in_current_queue)
-
-        jockey_flag = compare_waiting_times(queue_, preferred_queue, data_source_one,
-                                            data_source_two, time_to_spend_in_current_queue, customer_last_in_queue_id
-                                            , queue_name)
-
-        if jockey_flag:
-
-            preferred_que_name = "Server1"
-            proc_id_to_kill = get_process_id_to_terminate(customer_last_in_queue_id, customer_processes_in_one,
-                                                          customer_processes_in_two)
-            serv_time = serv_time_two[0]
-            srv_times_list = serv_time_one
-            # srv_process_details = srv_one_process_details
-            # at_pose = list(customer_to_switch.keys())[0]
-            print(colored("%s in %s at position %s jockeying to %s to position %01d. Terminating process ID: %s ", "yellow") % (
-                        customer_last_in_queue_id, customer_now_queued_in_server, pose_of_last_customer_in_queue,
-                        preferred_que_name, preferred_queue.qsize() + 1, proc_id_to_kill))
-
-            jockeyed_customer_server_two_dict.update({customer_last_in_queue_id: preferred_que_name})
-
-            dict_server_customer_queue = dict_server_customer_queue_one
-            # kill returned processID matching the customer to move
-            ProcessHandler().terminate_process(proc_id_to_kill, queue_)
-
-            jockey_or_not(jockeys, other_jockeys, customer_last_in_queue_id, queue_, preferred_queue, preferred_que_name,
-                          queue_.qsize(), serv_time_one, serv_time_two, queueID,
-                          dict_server_customer_queue, srv_times_list, srv_lst_arrivals, all_serv_times, unused_waiting_times)
-
-            jockey_rate = get_jockeying_rate(jockeyed_customer_server_two_dict, queue_.qsize(), srv_lst_arrivals,  preferred_queue.qsize()) # global_arrivals_in_two)
-
-            # print(colored("Customers jockeyed from %s at a rate of %6.4f",'yellow', attrs=["blink"])%(queue_name, jockey_rate))
-
-    #return jockey_flag
+        
+        print("No customer is interested in anymore jockeying....")
+        return
 
 
 def pose_updated(still_in_queue, still_in_preferred_queue, customer_id):
@@ -1184,7 +1442,7 @@ def save_jockeying_rate_queue_length(jockey_rate_in_curr_queue, still_in_queue, 
 def switch_customers_in_bulk_shuffled(customer_to_switch_in_curr_queue, preferred_que, srv_lst_arrivals, queue_name):
 
     final_entries = []
-
+    '''
     for item in customer_to_switch_in_curr_queue:
         extracted_cust_id = []
         if len(item) == 3:
@@ -1192,16 +1450,20 @@ def switch_customers_in_bulk_shuffled(customer_to_switch_in_curr_queue, preferre
             extracted_cust_id.append(item)
         else:
             extracted_cust_id.append(item)
-
+    '''
     if queue_name == "Server1":
         no_duplicates = [e for e in srv_lst_arrivals if e not in processed_in_one]
-        combined_customer_list = extracted_cust_id + no_duplicates
+        # combined_customer_list = extracted_cust_id + no_duplicates
+        no_duplicates.append(customer_to_switch_in_curr_queue)
         # TODO: Below - trying to keep track of which jockey customer to move to which queue after reordering
-        final_entries.append(random.sample(combined_customer_list, len(combined_customer_list)))
+        
+        final_entries.append(random.sample(no_duplicates, len(no_duplicates)))
     else:
         no_duplicates = [e for e in srv_lst_arrivals if e not in processed_in_two]
-        combined_customer_list = extracted_cust_id + no_duplicates
-        final_entries.append(random.sample(combined_customer_list, len(combined_customer_list)))
+        # combined_customer_list = extracted_cust_id + no_duplicates
+        no_duplicates.append(customer_to_switch_in_curr_queue)
+        # final_entries.append(random.sample(combined_customer_list, len(combined_customer_list)))
+        final_entries.append(random.sample(no_duplicates, len(no_duplicates)))
 
     return final_entries
 
@@ -1218,134 +1480,155 @@ def get_estimated_wait_in_queue_pose(pose, queue_name, serv_time, data_source):
     return avg_wait_que
         
         
-# plot of queue size (x-axis independent variable) with waiting time as a dependent variable (y-axis)
-# plot of jockeying size (x-axis independent variable) with waiting time a dependent variable (y-axis)
-# 
-        
 def process_jockeying_re_evaluating(curr_queue, preferred_queue, customer_to_switch_in_curr_queue, customer_now_queued_in_server, srv_times_list, 
                                     srv_lst_arrivals, still_in_queue, still_in_preferred_queue, jockeys, other_jockeys, 
                                     all_serv_times, queueID, srv_one_cust_time_dict, srv_two_cust_time_dict, unused_waiting_times): 
-                                    
+                                                                            
+    datasource_multiple_xters = base_dir+'/constant/wait/multiple_xteristics.csv'
+    datasource_non_jockeyed_multiple_xters = base_dir+'/constant/wait/non_jockeyed_multiple_xteristics.csv'
     sorted_list = sorted(list(set(still_in_queue)))
-    # print("******* ", customer_to_switch_in_curr_queue)
-    # customer_to_switch_in_curr_queue = ', '.join(customer_to_switch_in_curr_queue)
-        
-    if isinstance(still_in_queue, list):   
-                                  
-        if  customer_now_queued_in_server == "Server1":
-            # print("------------- CALLED RE_EVALUATE-------------------") #, avg_wait_in_alt_queue_pose, avg_wait_in_curr_queue_pose)            
-            #pose_in_curr_queue = pose_updated(list(set(curr_queue.queue)),list(set(preferred_queue.queue)), customer_to_switch_in_curr_queue)
-            # pose_in_curr_queue = in_curr_queue_at_pose(customer_to_switch_in_curr_queue, list(set(still_in_queue)))
-            
-            # print("******* ",customer_to_switch_in_curr_queue,  sorted_list)
-            # if customer_to_switch_in_curr_queue in in_list or customer_to_switch_in_curr_queue+"_jockey" == in_list:
-            if customer_to_switch_in_curr_queue in sorted_list:
-                pose_in_curr_queue = int(sorted_list.index(customer_to_switch_in_curr_queue))+1 
-            #else:
-            #    return 
-            # if not pose_in_curr_queue:
-            #    return         
-            dict_server_customer_queue = dict_server_customer_queue_one
-            preferred_que_name = "Server2"
-        else:
-            # Since it is a priority queue, elements are ordered in the way they are added,
-            # so we sort the list to get the customers list and return the index as a position in the queue
-            # Then add one since the indices start with zero
-            if customer_to_switch_in_curr_queue in sorted_list:
-                pose_in_curr_queue = int(sorted_list.index(customer_to_switch_in_curr_queue))+1
-            #else:            
-            #    return 
-            dict_server_customer_queue = dict_server_customer_queue_two
-            preferred_que_name = "Server1"
     
-    # Fixme: As an example ['Batch3_customer4'] - the variable customer_to_switch_in_curr_queue sometimes 
+    # store the queue length, waiting time to see influence on the number of times jockeyed
+    data_length_wait_jockey_count_one = base_dir+"/constant/wait/srv_one_len_wait_count.csv"
+    data_length_wait_jockey_count_two = base_dir+"/constant/wait/srv_two_len_wait_count.csv"
+    
+    lst_len_wait_jockey_count_one  = []
+    lst_len_wait_jockey_count_two  = []
+    
+    lst_details_to_save = []
+    
     #        contains a list therefore to strip of the square brackets below is a fast walk-around.
     if isinstance(customer_to_switch_in_curr_queue, list):
         customer_to_switch_in_curr_queue = customer_to_switch_in_curr_queue[0]
-    
-    pose_in_alt_queue = len(list(set(preferred_queue.queue)))+1
     
     
     if customer_now_queued_in_server == "Server1":
         # definately should be read from the file since the customer has since changed position
         # or alternatively build a function for how_much_more_customer_stays()
         # avg_wait_in_curr_queue_pose = srv_one_cust_time_dict.get(customer_to_switch_in_curr_queue)
-        data_source = base_dir + "/constant/srv_one_pose_waits_stats.csv"
+        data_source = base_dir + "/constant/wait/srv_one_pose_waits_stats.csv"
         serv_time = srv_one_cust_time_dict.get(customer_to_switch_in_curr_queue)
+        preferred_que_name = "Server2"
+        dict_server_customer_queue = dict_server_customer_queue_one
+        
         if customer_to_switch_in_curr_queue in sorted_list:
             pose_in_curr_queue = int(sorted_list.index(customer_to_switch_in_curr_queue))+1
-        # avg_wait_in_curr_queue_pose = read_pose_waiting_times_in_queue_two( pose_in_curr_queue, curr_queue, data_source, serv_time)
-            avg_wait_in_curr_queue_pose = get_expected_customer_queue_waiting_times(data_source, pose_in_curr_queue, len(list(curr_queue.queue)))
+            pose_in_alt_queue = len(list(set(preferred_queue.queue)))+1            
+            
+            avg_wait_in_curr_queue_pose = srv_one_cust_time_dict.get(customer_to_switch_in_curr_queue)            
         
             if avg_wait_in_curr_queue_pose: 
-                alt_data_source = base_dir + "/constant/srv_two_pose_waits_stats.csv"       
-                avg_wait_in_alt_queue_pose = get_expected_customer_queue_waiting_times(alt_data_source, pose_in_alt_queue, len(list(curr_queue.queue)))
-                
-                # if  avg_wait_in_curr_queue_pose and avg_wait_in_alt_queue_pose:          
-                if avg_wait_in_alt_queue_pose < avg_wait_in_curr_queue_pose:        
-                    
-                    if customer_now_queued_in_server == "Server1":
-                        global_jockeying_list_in_one.append(customer_to_switch_in_curr_queue)
+                alt_data_source = base_dir + "/constant/wait/srv_two_pose_waits_stats.csv" 
+                wait_in_alt_queue = get_expected_customer_queue_waiting_times(alt_data_source, pose_in_alt_queue, len(list(set(preferred_queue.queue))))      
+                                                             
+                avg_wait_in_alt_queue_pose = get_total_amount_of_wait_for_jockey(wait_in_alt_queue, customer_to_switch_in_curr_queue, srv_one_cust_time_dict, jockeyed_waits_two, jockeyed_waits_one, alt_data_source, preferred_queue)
+                 
+                if avg_wait_in_alt_queue_pose is not None:
+                    if  avg_wait_in_alt_queue_pose < avg_wait_in_curr_queue_pose:
+                                                
+                        global_jockeying_list_in_one.append(customer_to_switch_in_curr_queue)                        
+                        
+                        proc_id_to_kill = get_process_id_to_terminate(customer_to_switch_in_curr_queue, customer_processes_in_one) #, customer_processes_in_two)
+                        
+                        if proc_id_to_kill:
+                            
+                            ProcessHandler().terminate_process(proc_id_to_kill, curr_queue)
+                            
+                            
+                            print(colored("%s in %s at position %s jockeying to %s to position %01d. Terminating process ID: %s ", "yellow") % (
+                                    customer_to_switch_in_curr_queue, customer_now_queued_in_server, pose_in_curr_queue, preferred_que_name, preferred_queue.qsize() + 1, proc_id_to_kill))
+                            
+                            customer_to_switch_in_curr_queue = customer_to_switch_in_curr_queue+"_jockey"
+                            jockeyed_waits_two.update({customer_to_switch_in_curr_queue:avg_wait_in_alt_queue_pose})
+                            
+                            jockey_or_not(jockeys, other_jockeys, customer_to_switch_in_curr_queue, curr_queue, preferred_queue, preferred_que_name,
+                                    curr_queue.qsize(), srv_one_cust_time_dict, srv_two_cust_time_dict, customer_now_queued_in_server,
+                                    dict_server_customer_queue, srv_times_list, srv_lst_arrivals, all_serv_times, unused_waiting_times) 
+                            
+                            sorted_list = set(sorted_list ) - set(global_jockeying_list_in_one) #.remove(customer_to_switch_in_curr_queue)
+                            
+                            jockey_count = customer_to_switch_in_curr_queue.count("_jockey")         
+                            wait_threshold = avg_wait_in_alt_queue_pose - avg_wait_in_curr_queue_pose
+                            
+                            lst_len_wait_jockey_count_two.append([pose_in_alt_queue,avg_wait_in_alt_queue_pose, jockey_count]) 
+                            save_jockey_waiting_time(lst_len_wait_jockey_count_two, data_length_wait_jockey_count_two)
+                                                
+                            lst_details_to_save.append([wait_threshold, jockey_count, avg_wait_in_curr_queue_pose, avg_wait_in_alt_queue_pose, args.arrival_rate, args.service_rate_one, args.service_rate_two, abs(args.service_rate_one - args.service_rate_two)])
+                            save_jockey_waiting_time(lst_details_to_save, datasource_multiple_xters)                    
                     else:
-                        global_jockeying_list_in_two.append(customer_to_switch_in_curr_queue)
-                    # at_pose = in_curr_queue_at_pose(customer_to_switch_in_curr_queue, still_in_queue)
-                    
-                    proc_id_to_kill = get_process_id_to_terminate(customer_to_switch_in_curr_queue, customer_processes_in_one, customer_processes_in_two)
-                    if proc_id_to_kill:
-                        
-                        ProcessHandler().terminate_process(proc_id_to_kill, curr_queue)
-                        
-                        print(colored("%s in %s at position %s jockeying to %s to position %01d. Terminating process ID: %s ", "yellow") % (
-                                customer_to_switch_in_curr_queue, customer_now_queued_in_server, pose_in_curr_queue, preferred_que_name, preferred_queue.qsize() + 1, proc_id_to_kill))
-                        
-                        jockey_or_not(jockeys, other_jockeys, customer_to_switch_in_curr_queue, curr_queue, preferred_queue, preferred_que_name,
-                                curr_queue.qsize(), srv_one_cust_time_dict, srv_two_cust_time_dict, customer_now_queued_in_server,
-                                dict_server_customer_queue, srv_times_list, srv_lst_arrivals, all_serv_times, unused_waiting_times) 
-                                    
-                else:
-                    return
+                        jockey_count = 0 # customer_last_in_queue_id.count("_jockey")         
+                        wait_threshold = avg_wait_in_alt_queue_pose - avg_wait_in_curr_queue_pose
+                         
+                        lst_details_to_save.append([wait_threshold, jockey_count, avg_wait_in_curr_queue_pose, avg_wait_in_alt_queue_pose, args.arrival_rate, args.service_rate_one, args.service_rate_two, abs(args.service_rate_one - args.service_rate_two)])                         
+                        save_jockey_waiting_time(lst_details_to_save, datasource_multiple_xters)
+                        lst_len_wait_jockey_count_one.append([pose_in_alt_queue, avg_wait_in_alt_queue_pose, jockey_count]) 
+                        save_jockey_waiting_time(lst_len_wait_jockey_count_one, data_length_wait_jockey_count_one)  
+                        return
         
     else:
-        
-        # avg_wait_in_curr_queue_pose = srv_two_cust_time_dict.get(customer_to_switch_in_curr_queue)
+    
         serv_time = srv_two_cust_time_dict.get(customer_to_switch_in_curr_queue)
-        data_source = base_dir + "/constant/srv_two_pose_waits_stats.csv"
+        data_source = base_dir + "/constant/wait/srv_two_pose_waits_stats.csv"
         # plus 1 below because an index is returned starting at 0
         if customer_to_switch_in_curr_queue in sorted_list:
             pose_in_curr_queue = int(sorted_list.index(customer_to_switch_in_curr_queue))+1
-        # avg_wait_in_curr_queue_pose = read_pose_waiting_times_in_queue_two( pose_in_curr_queue, curr_queue, data_source, serv_time)
-            avg_wait_in_curr_queue_pose = get_expected_customer_queue_waiting_times(data_source, pose_in_curr_queue, len(list(curr_queue.queue)))
-     
+            pose_in_alt_queue = len(list(set(preferred_queue.queue)))+1
+            dict_server_customer_queue = dict_server_customer_queue_two
+            preferred_que_name = "Server1"            
+            
+            avg_wait_in_curr_queue_pose = srv_two_cust_time_dict.get(customer_to_switch_in_curr_queue)
+            
             if avg_wait_in_curr_queue_pose:
-                alt_data_source = base_dir + "/constant/srv_one_pose_waits_stats.csv"       
-                avg_wait_in_alt_queue_pose = get_expected_customer_queue_waiting_times(alt_data_source, pose_in_alt_queue, len(list(curr_queue.queue)))
+                alt_data_source = base_dir + "/constant/wait/srv_one_pose_waits_stats.csv"   
+                wait_in_alt_queue = get_expected_customer_queue_waiting_times(alt_data_source, pose_in_alt_queue, len(list(set(preferred_queue.queue))))          
+                
+                avg_wait_in_alt_queue_pose = get_total_amount_of_wait_for_jockey(wait_in_alt_queue, customer_to_switch_in_curr_queue, srv_one_cust_time_dict, jockeyed_waits_two, jockeyed_waits_one, alt_data_source, preferred_queue) 
         
-                # if  avg_wait_in_curr_queue_pose and avg_wait_in_alt_queue_pose:          
-                if avg_wait_in_alt_queue_pose < avg_wait_in_curr_queue_pose:        
+                if avg_wait_in_alt_queue_pose is not None:
                     
-                    if customer_now_queued_in_server == "Server1":
-                        global_jockeying_list_in_one.append(customer_to_switch_in_curr_queue)
+                    if  avg_wait_in_alt_queue_pose < avg_wait_in_curr_queue_pose:
+                           
+                        global_jockeying_list_in_two.append(customer_to_switch_in_curr_queue)                        
+                        
+                        proc_id_to_kill = get_process_id_to_terminate(customer_to_switch_in_curr_queue, customer_processes_in_two) # customer_processes_in_one,
+                        
+                        if proc_id_to_kill:
+                            
+                            ProcessHandler().terminate_process(proc_id_to_kill, curr_queue) 
+                                                    
+                            
+                            print(colored("%s in %s at position %s jockeying to %s to position %01d. Terminating process ID: %s ", "yellow") % (
+                                    customer_to_switch_in_curr_queue, customer_now_queued_in_server, pose_in_curr_queue, preferred_que_name, preferred_queue.qsize() + 1, proc_id_to_kill))
+                            
+                            customer_to_switch_in_curr_queue = customer_to_switch_in_curr_queue+"_jockey"
+                            
+                            jockeyed_waits_one.update({customer_to_switch_in_curr_queue:avg_wait_in_alt_queue_pose})   
+                            jockey_or_not(jockeys, other_jockeys, customer_to_switch_in_curr_queue, curr_queue, preferred_queue, preferred_que_name,
+                                    curr_queue.qsize(), srv_one_cust_time_dict, srv_two_cust_time_dict, customer_now_queued_in_server,
+                                    dict_server_customer_queue, srv_times_list, srv_lst_arrivals, all_serv_times, unused_waiting_times) 
+                            
+                            sorted_list = set(sorted_list) - set(global_jockeying_list_in_two)
+                            
+                            jockey_count = customer_to_switch_in_curr_queue.count("_jockey")         
+                            wait_threshold = avg_wait_in_alt_queue_pose - avg_wait_in_curr_queue_pose 
+                            
+                            lst_len_wait_jockey_count_two.append([pose_in_alt_queue,avg_wait_in_alt_queue_pose, jockey_count]) 
+                            save_jockey_waiting_time(lst_len_wait_jockey_count_two, data_length_wait_jockey_count_two)
+                                                        
+                            lst_details_to_save.append([wait_threshold, jockey_count, avg_wait_in_curr_queue_pose, avg_wait_in_alt_queue_pose, args.arrival_rate, args.service_rate_one, args.service_rate_two, abs(args.service_rate_one - args.service_rate_two)])
+                            save_jockey_waiting_time(lst_details_to_save, datasource_multiple_xters)
+                                        
                     else:
-                        global_jockeying_list_in_two.append(customer_to_switch_in_curr_queue)
-                    # at_pose = in_curr_queue_at_pose(customer_to_switch_in_curr_queue, still_in_queue)
-                    
-                    proc_id_to_kill = get_process_id_to_terminate(customer_to_switch_in_curr_queue, customer_processes_in_one, customer_processes_in_two)
-                    if proc_id_to_kill:
+                        jockey_count = 0 # customer_last_in_queue_id.count("_jockey")         
+                        wait_threshold = avg_wait_in_alt_queue_pose - avg_wait_in_curr_queue_pose
                         
-                        ProcessHandler().terminate_process(proc_id_to_kill, curr_queue)
-                        
-                        print(colored("%s in %s at position %s jockeying to %s to position %01d. Terminating process ID: %s ", "yellow") % (
-                                customer_to_switch_in_curr_queue, customer_now_queued_in_server, pose_in_curr_queue, preferred_que_name, preferred_queue.qsize() + 1, proc_id_to_kill))
-                        
-                        jockey_or_not(jockeys, other_jockeys, customer_to_switch_in_curr_queue, curr_queue, preferred_queue, preferred_que_name,
-                                curr_queue.qsize(), srv_one_cust_time_dict, srv_two_cust_time_dict, customer_now_queued_in_server,
-                                dict_server_customer_queue, srv_times_list, srv_lst_arrivals, all_serv_times, unused_waiting_times) 
-                                    
-                else:
-                    return
+                        lst_details_to_save.append([wait_threshold, jockey_count, avg_wait_in_curr_queue_pose, avg_wait_in_alt_queue_pose, args.arrival_rate, args.service_rate_one, args.service_rate_two, abs(args.service_rate_one - args.service_rate_two)])
+                         
+                        save_jockey_waiting_time(lst_details_to_save, datasource_multiple_xters)
+                        lst_len_wait_jockey_count_two.append([pose_in_alt_queue,avg_wait_in_alt_queue_pose, jockey_count]) 
+                        save_jockey_waiting_time(lst_len_wait_jockey_count_two, data_length_wait_jockey_count_two) 
+                        return
 
-# TODO: check that this customer is not a new arrival -> in the direction of tagging to 
-# TODO: to also address the mentioned point of differentiating between an arrival and a jockey.
 
 def re_evaluate_jockeying_based_on_jockeying_threshold(still_in_queue, still_in_preferred_queue, curr_queue, preferred_queue, queueID,
                                   customer_processes_in_one, customer_processes_in_two, jockeys, other_jockeys,
@@ -1371,10 +1654,12 @@ def re_evaluate_jockeying_based_on_jockeying_threshold(still_in_queue, still_in_
             if len(customer_to_switch_in_curr_queue) > 1: 
                 customer_to_switch_in_curr_queue = list(set(customer_to_switch_in_curr_queue))
                 customerid = customer_to_switch_in_curr_queue[0]
-                customer_now_queued_in_server = on_which_server(customerid, dict_server_customer_queue_one, dict_server_customer_queue_two)
+                customer_now_queued_in_server = on_which_server(customerid, dict_server_customer_queue_one, dict_server_customer_queue_two,
+                                                               jockeyed_customer_server_one_dict, jockeyed_customer_server_two_dict)
             else:
                 customerid = customer_to_switch_in_curr_queue[0]
-                customer_now_queued_in_server = on_which_server(customerid, dict_server_customer_queue_one, dict_server_customer_queue_two)
+                customer_now_queued_in_server = on_which_server(customerid, dict_server_customer_queue_one, dict_server_customer_queue_two,
+                                                               jockeyed_customer_server_one_dict, jockeyed_customer_server_two_dict)
         else:      
             customer_now_queued_in_server = queueID
             
@@ -1491,7 +1776,8 @@ def re_evaluate_jockeying_based_on_jockeying_threshold(still_in_queue, still_in_
         # use one of the customers to retrieve which queue the entire batch is in
         if customer_to_switch_in_preferred_queue:
             customerid = customer_to_switch_in_preferred_queue[0]
-            customer_now_queued_in_server = on_which_server(customerid, dict_server_customer_queue_one, dict_server_customer_queue_two)
+            customer_now_queued_in_server = on_which_server(customerid, dict_server_customer_queue_one, dict_server_customer_queue_two,
+                                                        jockeyed_customer_server_one_dict, jockeyed_customer_server_two_dict)
         else:
             customer_now_queued_in_server = queueID
         
@@ -1571,15 +1857,17 @@ def re_evaluate_jockeying_based_on_jockeying_threshold(still_in_queue, still_in_
     else:
         
         print("No customer is interested in anymore jockeying....")
-        return
+        # return
 
 
 def get_expected_by_littles_law(curr_queue, serv_time):
     
     try:
-        # return (curr_queue.qsize()/serv_time)        
-        return (curr_queue/serv_time)
-          
+        
+        if serv_time > 0: 
+            return (curr_queue/args.arrival_rate)
+        else:
+            return
     except ZeroDivisionError:
         print('Service Time = %6.7f: Cannot divide by zero.'%(serv_time))
         sys.exit(1)
@@ -1625,7 +1913,7 @@ def leftover_includes_a_jockey(left_behind, customerid):
 '''
 
 
-def on_which_server(customerid, dict_srv_one, dict_srv_two):
+def on_which_server(customerid, dict_srv_one, dict_srv_two, jockeyed_customer_server_one_dict, jockeyed_customer_server_two_dict):
 
     for t in dict_srv_one.items():
         if t[0] == customerid:
@@ -1637,6 +1925,16 @@ def on_which_server(customerid, dict_srv_one, dict_srv_two):
             required_value = j[1]
             return required_value
 
+    for q in jockeyed_customer_server_one_dict.items():
+        if q[0] == customerid:
+            required_value = q[1]
+            return required_value
+        
+    for k in jockeyed_customer_server_two_dict.items():
+        if k[0] == customerid:
+            required_value = k[1]
+            return required_value
+    
 '''
    FIXME:
        A poor approach to finding what I am looking for.
@@ -1669,9 +1967,12 @@ def find_customer_times(customerid, srv_one_cust_time_dict, srv_two_cust_time_di
 def get_last_in_curr_queue(curr_queue, customers_in_motion):
 
     last_in_queue_pose = {}
-    if len(customers_in_motion) > 0:
-        k, last_value = _, customers_in_motion[k] = customers_in_motion.popitem()
-        last_in_queue_pose.update({k:last_value})
+    
+    if len(customers_in_motion) > 0:        
+        last_in_queue_pose.update({len(list(set(customers_in_motion)))-1:list(set(curr_queue.queue))[len(list(set(customers_in_motion)))-1]})
+        #k, last_value = _, customers_in_motion[k] =  customers_in_motion.popitem() # curr_queue.pop() #
+        # print("\n ............. ", k, last_value) 
+        # last_in_queue_pose.update({k:last_value})
 
         return last_in_queue_pose
 
@@ -1736,6 +2037,8 @@ def simple_process(queue_, srv_one_cust_time_dict, srv_two_cust_time_dict,
                        dict_server_customer_queue_two, srv_lst_arrivals, all_serv_times, unused_waiting_times):
 
     srv_pose_wait_dict = {}
+    lst_one_len_time_diff = []
+    lst_two_len_time_diff = []
 
     task = queue_.get()
     lst_done_processed.append(task)
@@ -1758,8 +2061,10 @@ def simple_process(queue_, srv_one_cust_time_dict, srv_two_cust_time_dict,
         customers_being_processed_in_curr_queue = cleanup_queue_listings_of_duplicates_in_curr(jockeyed_customer_server_two_dict, queue_)
         customers_being_processed_in_other_queue = cleanup_queue_listings_of_duplicates_in_preferred(jockeyed_customer_server_one_dict, preferred_queue)
         
-    actual_server = on_which_server(task, dict_server_customer_queue_one, dict_server_customer_queue_two)
-    jockey_on_server = on_which_server(task, jockeyed_customer_server_one_dict, jockeyed_customer_server_two_dict)
+    actual_server = on_which_server(task, dict_server_customer_queue_one, dict_server_customer_queue_two, 
+                                   jockeyed_customer_server_one_dict, jockeyed_customer_server_two_dict)
+    jockey_on_server = on_which_server(task, dict_server_customer_queue_one, dict_server_customer_queue_two,
+                                      jockeyed_customer_server_one_dict, jockeyed_customer_server_two_dict)
     
     customers_being_processed_in_curr_queue = [ x for x in customers_being_processed_in_curr_queue if x not in lst_done_processed ]
     customers_being_processed_in_other_queue = [ x for x in customers_being_processed_in_other_queue if x not in lst_done_processed ] 
@@ -1770,10 +2075,6 @@ def simple_process(queue_, srv_one_cust_time_dict, srv_two_cust_time_dict,
     customers_being_processed_in_curr_queue = filter_jockeys(customers_being_processed_in_curr_queue, customers_being_processed_in_other_queue)
     customers_being_processed_in_other_queue = filter_jockeys(customers_being_processed_in_other_queue, customers_being_processed_in_curr_queue)   
     
-    # srv_lst_arrivals = []
-    
-    # TODO: Fix left over displayed not to include those jockeyed but original name appearing in list
-    
     lst_threshold_timetoservice_one = {}
     lst_threshold_timetoservice_two = {}
     no_jockeyed_thresh_count_diff = []
@@ -1783,66 +2084,87 @@ def simple_process(queue_, srv_one_cust_time_dict, srv_two_cust_time_dict,
     
     if queue_.qsize() == 0:
         if queue_name == "Server1":
+            data_source = base_dir+'/constant/wait/srv_one_pose_waits_stats.csv'
+            data_source_non_jockey = base_dir+'/constant/wait/srv_one_pose_waits_stats_non_jockey.csv'
             dest_filename = "threshold_timetoservice_queue_one.csv"
-            if task in jockeyed_waits_one and task not in global_jockeying_list_in_one: # and not in global_jockeying_list_in_two:
+            if task in jockeyed_waits_one and task not in global_jockeying_list_in_one: 
+                
                 time_to_service = jockeyed_waits_one.get(task)
+                
                 print("%s left %s of size %01d after %s " % (task, jockey_on_server, len(customers_being_processed_in_curr_queue), time_to_service)) 
                 
             else:
                 if task in list(srv_one_cust_time_dict.keys()):
-                    time_to_service = srv_one_cust_time_dict.get(task)                
+                    time_to_service = srv_one_cust_time_dict.get(task) 
+                    lst_one_len_time_diff.append([queue_.qsize(), time_to_service, abs(args.service_rate_one - args.service_rate_two)])
+                    save_jockey_waiting_time(lst_one_len_time_diff, data_source_non_jockey)
+                               
                     print("%s left %s of size %01d after %s " % (task, actual_server, len(customers_being_processed_in_curr_queue), time_to_service))
                     
             queue_.task_done()
             
             lst_threshold_timetoservice_one.update({args.jockeying_threshold:time_to_service})
-            # print(" ***** writing to one *****************", lst_threshold_timetoservice_one)
+            
             save_threshold_timetoservice_queue(lst_threshold_timetoservice_one, dest_filename)
-
+            srv_pose_wait_dict.update({queue_.qsize(): time_to_service})
+            srv_one_process_details.update({proc.pid:proc})
+            # save_pose_waits_to_file_one(list(srv_pose_wait_dict.items()), data_source) 
+            lst_one_len_time_diff.append([queue_.qsize(), time_to_service])
+            save_jockey_waiting_time(lst_one_len_time_diff, data_source)                       
+            
             processed_in_one.append(task)
  
         else:
+            data_source = base_dir+'/constant/wait/srv_two_pose_waits_stats.csv'
+            data_source_non_jockey = base_dir+'/constant/wait/srv_two_pose_waits_stats_non_jockey.csv'
             dest_filename = "threshold_timetoservice_queue_two.csv"
-            if task in jockeyed_waits_two and task not in global_jockeying_list_in_two: # and not in global_jockeying_list_in_one:
+            if task in jockeyed_waits_two and task not in global_jockeying_list_in_two: 
                 time_to_service = jockeyed_waits_two.get(task)            
                 print("%s left %s of size %01d after %s " % (task, jockey_on_server, len(customers_being_processed_in_curr_queue), time_to_service))
             else:
                 if task in list(srv_two_cust_time_dict.keys()):
                     time_to_service = srv_two_cust_time_dict.get(task)
+                    lst_two_len_time_diff.append([queue_.qsize(), time_to_service, abs(args.service_rate_one - args.service_rate_two)])
+                    save_jockey_waiting_time(lst_two_len_time_diff, data_source_non_jockey)
                     print("%s left %s of size %01d after %s "% ( task, actual_server, len(customers_being_processed_in_curr_queue), time_to_service ))
             queue_.task_done()
             
             lst_threshold_timetoservice_two.update({args.jockeying_threshold:time_to_service})
+            srv_pose_wait_dict.update({queue_.qsize(): time_to_service})
+            srv_two_process_details.update({proc.pid:proc})
+            # save_pose_waits_to_file_two(list(srv_pose_wait_dict.items()), data_source)
+            # save_threshold_timetoservice_queue(lst_threshold_timetoservice_two, dest_filename)
+            lst_two_len_time_diff.append([queue_.qsize(), time_to_service])
+
+            save_jockey_waiting_time(lst_two_len_time_diff, data_source)
             
-            save_threshold_timetoservice_queue(lst_threshold_timetoservice_two, dest_filename)
             processed_in_two.append(task)   
     
         if not args.jockeying_threshold:
 
-            if len(customers_being_processed_in_curr_queue) > 0: 
-
-                print(colored("Jockey candidates in alternative queue %s :=> %s", "green")%(preferred_queue_name, list(set(customers_being_processed_in_other_queue)))) 
-                print(colored("Jockey candidates in current queue %s given the waiting times at the respective "
-                    "positions :=> %s ", "green") % (queue_name, customers_being_processed_in_curr_queue))
+            if len(customers_being_processed_in_curr_queue) > 0:                 
 
                 re_evaluate_jockeying_based_on_waiting_time(list(set(queue_.queue)),list(set(preferred_queue.queue)), queue_, preferred_queue, queue_name,
                                       customer_processes_in_one, customer_processes_in_two, jockeys, other_jockeys, dict_server_customer_queue_one,
                                       dict_server_customer_queue_two, srv_lst_arrivals, srv_one_cust_time_dict, srv_two_cust_time_dict, all_serv_times, unused_waiting_times)
+                return
+                                      
+            elif len(customers_being_processed_in_other_queue) > 0:
+                
+                re_evaluate_jockeying_based_on_waiting_time(list(set(customers_being_processed_in_other_queue)),list(set(customers_being_processed_in_curr_queue)), preferred_queue, queue_,  queue_name,
+                                      customer_processes_in_one, customer_processes_in_two, jockeys, other_jockeys, dict_server_customer_queue_one,
+                                      dict_server_customer_queue_two, srv_lst_arrivals, srv_one_cust_time_dict, srv_two_cust_time_dict, all_serv_times, unused_waiting_times)
+                return
 
         else:
             from_one_to_two_jockeys = {}
             from_two_to_one_jockeys = {}
-            
-            # diffs_in_lengths = abs(len(customers_being_processed_in_curr_queue) - len(customers_being_processed_in_other_queue)) #abs(queue_.qsize() - preferred_queue.qsize())
+                       
             other_diff = abs(len(list(set(queue_.queue))) - len(list(set(preferred_queue.queue))) )
             
             if  other_diff >= args.jockeying_threshold:
-                # FIXME: update the customer positions in the queue
-                # new_poses_in_curr_queue = pose_updater(customers_in_motion, queue_.qsize())
-                # new_poses_in_preferred_queue = pose_updater(customer_in_motion_in_preferred_queue, preferred_queue.qsize())
-                if len(list(set(queue_.queue))) > 1: # 0:
-                    print(colored("Jockey candidates in current queue %s given the queue size differences %01d :=> %s",
-                        "green") % (queue_name,  other_diff, list(set(queue_.queue))))
+                
+                if len(list(set(queue_.queue))) > 1: # 0:                    
                        
                     from_one_to_two_jockeys.update({queue_name:customers_being_processed_in_curr_queue})
                     
@@ -1851,90 +2173,116 @@ def simple_process(queue_, srv_one_cust_time_dict, srv_two_cust_time_dict,
                                                                dict_server_customer_queue_two, srv_lst_arrivals, srv_one_cust_time_dict,srv_two_cust_time_dict, all_serv_times,
                                                                unused_waiting_times)
                                                                
-                if len(list(set(preferred_queue.queue))) > 1: #0:
-                    print(colored("Jockey candidates in alternative queue %s :=> %s","green")%(preferred_queue_name, list(set(preferred_queue.queue))))
+                if len(list(set(preferred_queue.queue))) > 1: #0:                    
                     
                     from_one_to_two_jockeys.update({preferred_queue_name:customers_being_processed_in_other_queue})
-
-                    re_evaluate_jockeying_based_on_jockeying_threshold(list(set(queue_.queue)), list(set(preferred_queue.queue)), queue_, preferred_queue, queue_name,
+                    re_evaluate_jockeying_based_on_jockeying_threshold(list(set(customers_being_processed_in_other_queue)), list(set(customers_being_processed_in_curr_queue)), preferred_queue, queue_, queue_name,
                                                                customer_processes_in_one, customer_processes_in_two, jockeys, other_jockeys, dict_server_customer_queue_one,
                                                                dict_server_customer_queue_two, srv_lst_arrivals, srv_one_cust_time_dict,srv_two_cust_time_dict, all_serv_times,
                                                                unused_waiting_times)
-                
-
-    else:      
-        
+                                                               
+                    
+    if queue_.qsize() >= 1:    
+            
         if jockey_on_server:
             actual_server = jockey_on_server
 
         if len(customers_being_processed_in_curr_queue) > 0 and queueID == "Server1":  # actual_server == "Server1":
             dest_filename = "threshold_timetoservice_queue_one.csv"
+            data_source = base_dir+'/constant/wait/srv_one_pose_waits_stats.csv'
+            data_source_non_jockey = base_dir+'/constant/wait/srv_one_pose_waits_stats_non_jockey.csv'
+            # lst_one_len_time_diff = []
+            
             if task in jockeyed_waits_one:
                 time_to_service: Optional[Any] = jockeyed_waits_one.get(task)
             else:
                 time_to_service: Optional[Any] = srv_one_cust_time_dict.get(task)                        
 
             if time_to_service and actual_server:
-                if task not in global_jockeying_list_in_one:
+                if task in jockeyed_waits_one and task not in global_jockeying_list_in_one:
                     print("%s left %s of size %01d after %s. Left over in %s :=> %s" % (
                             task, actual_server, len(list(set(customers_being_processed_in_curr_queue))), time_to_service, actual_server,
-                            list(set(customers_being_processed_in_curr_queue))))
+                            list(set(customers_being_processed_in_curr_queue)- set(global_jockeying_list_in_one))))
+            else:
+                if task in list(srv_one_cust_time_dict.keys()):
+                    time_to_service = srv_one_cust_time_dict.get(task)
+                    lst_one_len_time_diff.append([queue_.qsize(), time_to_service, abs(args.service_rate_one - args.service_rate_two)])
+                    save_jockey_waiting_time(lst_one_len_time_diff, data_source_non_jockey)
+                    print("%s left %s of size %01d after %s "% ( task, actual_server, len(customers_being_processed_in_curr_queue), time_to_service ))
                             
             queue_.task_done()
             
             lst_threshold_timetoservice_one.update({args.jockeying_threshold:time_to_service})
-            # print(" ***** writing to one *****************", lst_threshold_timetoservice_one)
+            
             save_threshold_timetoservice_queue(lst_threshold_timetoservice_one, dest_filename)
             srv_pose_wait_dict.update({queue_.qsize(): time_to_service})
             srv_one_process_details.update({proc.pid:proc})
-            save_pose_waits_to_file_one(list(srv_pose_wait_dict.items()))
+            # save_pose_waits_to_file_one(list(srv_pose_wait_dict.items()), data_source)
+            
+            lst_one_len_time_diff.append([queue_.qsize(), time_to_service])
+
+            save_jockey_waiting_time(lst_one_len_time_diff, data_source)
 
             processed_in_one.append(task)            
 
         elif len(customers_being_processed_in_curr_queue) > 0 and queueID == "Server2": #actual_server == "Server2":
-            
+            data_source = base_dir+'/constant/wait/srv_two_pose_waits_stats.csv'
+            data_source_non_jockey = base_dir+'/constant/wait/srv_two_pose_waits_stats_non_jockey.csv'
             dest_filename = "threshold_timetoservice_queue_two.csv"
+            # lst_two_len_time_diff = []
+            
             if task in jockeyed_waits_two:
                 time_to_service = jockeyed_waits_two.get(task)
             else:
                 time_to_service = srv_two_cust_time_dict.get(task)
 
             if time_to_service or actual_server :
-                if task not in global_jockeying_list_in_two:
+                if task in jockeyed_waits_two and task not in global_jockeying_list_in_two:
                     print("%s left %s of size %01d after %s. Left over in %s :=> %s" % (
                             task, actual_server, len(list(set(customers_being_processed_in_curr_queue))), time_to_service, actual_server,
-                            list(set(customers_being_processed_in_curr_queue))))
+                            list(set(customers_being_processed_in_curr_queue) - set(global_jockeying_list_in_two))))
+                else:
+                    if task in list(srv_two_cust_time_dict.keys()):
+                        time_to_service = srv_two_cust_time_dict.get(task)
+                        lst_two_len_time_diff.append([queue_.qsize(), time_to_service, abs(args.service_rate_one - args.service_rate_two)])
+                        save_jockey_waiting_time(lst_two_len_time_diff, data_source_non_jockey)
+                        print("%s left %s of size %01d after %s "% ( task, actual_server, len(customers_being_processed_in_curr_queue), time_to_service ))
+                
                             
             queue_.task_done()
             
             lst_threshold_timetoservice_two.update({args.jockeying_threshold:time_to_service})
-            # print(" ***** writing to two *****************", lst_threshold_timetoservice_two)
+            
             save_threshold_timetoservice_queue(lst_threshold_timetoservice_two, dest_filename)
             srv_pose_wait_dict.update({queue_.qsize(): time_to_service})
             srv_two_process_details.update({proc.pid:proc})
-            save_pose_waits_to_file_two(list(srv_pose_wait_dict.items()))
+            # save_pose_waits_to_file_two(list(srv_pose_wait_dict.items()), data_source)
+            
+            lst_two_len_time_diff.append([queue_.qsize(), time_to_service])
+
+            save_jockey_waiting_time(lst_two_len_time_diff, data_source)
 
             processed_in_two.append(task)                           
 
 
         if not args.jockeying_threshold:
-            if len(list(set(queue_.queue))) > 0:
-                print(colored("Jockey candidates in current queue %s given the waiting times at the respective "
-                    "positions :=> %s ", "green") % (queue_name, list(set(customers_being_processed_in_curr_queue) - set(customers_being_processed_in_other_queue))))
-                    
-                print(colored("Jockey candidates in alternative queue %s :=> %s", "green")%(preferred_queue_name, list(set(customers_being_processed_in_other_queue) -set(customers_being_processed_in_curr_queue))))
+            if len(list(set(queue_.queue))) > 1:                                            
 
                 re_evaluate_jockeying_based_on_waiting_time(customers_being_processed_in_curr_queue, customers_being_processed_in_other_queue, 
                                     queue_, preferred_queue, queue_name, customer_processes_in_one, customer_processes_in_two, jockeys, other_jockeys, 
                                     dict_server_customer_queue_one, dict_server_customer_queue_two, srv_lst_arrivals, srv_one_cust_time_dict,
                                     srv_two_cust_time_dict, all_serv_times, unused_waiting_times)
+                                    
+            elif len(list(set(preferred_queue.queue))) > 1:                
+                
+                re_evaluate_jockeying_based_on_waiting_time(list(set(customers_being_processed_in_other_queue)), list(set(customers_being_processed_in_curr_queue)), preferred_queue, queue_, queue_name,
+                                      customer_processes_in_one, customer_processes_in_two, jockeys, other_jockeys, dict_server_customer_queue_one,
+                                      dict_server_customer_queue_two, srv_lst_arrivals, srv_one_cust_time_dict, srv_two_cust_time_dict, all_serv_times, unused_waiting_times)
         else:
             
             diffs_in_lengths = abs(len(customers_being_processed_in_curr_queue) - len(customers_being_processed_in_other_queue))
             
-            other_diff = abs(len(list(set(queue_.queue))) - len(list(set(preferred_queue.queue))) )
-            
-            # print("===============>> ", other_diff, args.jockeying_threshold)
+            other_diff = abs(len(list(set(queue_.queue))) - len(list(set(preferred_queue.queue))) )                
             
             if other_diff >= args.jockeying_threshold:
                 
@@ -1944,17 +2292,14 @@ def simple_process(queue_, srv_one_cust_time_dict, srv_two_cust_time_dict,
                      and moving it into the other queue plus the jockeying costs together exceed the benefits of jockeying to 
                      the other queue even if that alternative queue is empty.
                 '''
-                if len(list(set(queue_.queue))) > 1: 
-                    print(colored("Jockey candidates in current queue %s given the queue size differences %01d :=> %s ",
-                        "green") % (queue_name, other_diff, list(set(customers_being_processed_in_curr_queue) - set(customers_being_processed_in_other_queue))))
+                if len(list(set(queue_.queue))) > 1:                     
                         
                     re_evaluate_jockeying_based_on_jockeying_threshold(customers_being_processed_in_curr_queue, customers_being_processed_in_other_queue, 
                                     queue_, preferred_queue, queue_name, customer_processes_in_one, customer_processes_in_two, jockeys, other_jockeys,
                                     dict_server_customer_queue_one, dict_server_customer_queue_two, srv_lst_arrivals, srv_one_cust_time_dict, 
                                     srv_two_cust_time_dict, all_serv_times, unused_waiting_times)
                                     
-                if len(list(set(preferred_queue.queue))) > 1: 
-                    print(colored("Jockey candidates in alternative queue %s :=> %s","green")%(preferred_queue_name, list(set(customers_being_processed_in_other_queue) - set(customers_being_processed_in_curr_queue))))
+                if len(list(set(preferred_queue.queue))) > 1:                     
                     
                     re_evaluate_jockeying_based_on_jockeying_threshold(list(set(queue_.queue)), list(set(preferred_queue.queue)), 
                                     queue_, preferred_queue, queue_name, customer_processes_in_one, customer_processes_in_two, jockeys, other_jockeys,
@@ -1964,8 +2309,9 @@ def simple_process(queue_, srv_one_cust_time_dict, srv_two_cust_time_dict,
         no_jockeyed_thresh_count_diff.append([args.jockeying_threshold, jockey_count, abs(args.service_rate_one - args.service_rate_two)])
         
         save_jockey_waiting_time(no_jockeyed_thresh_count_diff, datasource_jockey_details)
+                
 
-    return task #queue_.qsize()
+    return task 
     
     
 def filter_inputs(jockeyed_waits_two, jockeyed_waits_one, customers_being_processed_in_curr_queue):
@@ -1998,12 +2344,10 @@ def get_jockeying_rate(jockeys_in_queue, srv_arrivals, queue_size_now, alt_queue
     # => k = (number of arrivals - number of serviced)/ number of arrivals
     
     k = abs(len(srv_arrivals) - len(jockeys_in_queue))/len(srv_arrivals)
-    # print("JOCKEYING RATE ===>> ", k, queue_size_now, alt_queue_size_now)
+    
     jockeying_rate = k * abs(queue_size_now - alt_queue_size_now)
     
-    return jockeying_rate
-    
-    # return (len(jockeys_in_queue)/len(srv_arrivals))
+    return jockeying_rate    
 
 
 '''
@@ -2029,16 +2373,7 @@ def compute_time_spent_in_service(service_time_list, position_in_queue, all_serv
         # in the case the position the customer lands in exceeds the number of service times generated
         waiting_in_queue = get_expected_by_littles_law(position_in_queue, args.arrival_rate)
         total_time_till_served = waiting_in_queue + (1 /sum(service_time_list))
-    '''
-    else:
-        if position_in_queue == 1 or position_in_queue == 0:
-            total_time_till_served = total_time_till_served + service_time_list[0]
-        elif position_in_queue > 1 and position_in_queue <= len(service_time_list):
-            total_time_till_served = total_time_till_served + sum(service_time_list[-position_in_queue:])
-        elif position_in_queue > 1:
-            print("******** ", all_serv_time[-position_in_queue:])
-            total_time_till_served = total_time_till_served + sum(all_serv_time[-position_in_queue:])
-    '''
+
 
     return total_time_till_served
 
@@ -2072,11 +2407,11 @@ def start_processing_queues(queue_, srv_one_cust_time_dict, srv_two_cust_time_di
                             jockeys, other_jockeys, queue_name, preferred_queue, srv_lst_arrivals,
                             dict_server_customer_queue_one, dict_server_customer_queue_two, srv_one_times_list,
                             srv_two_times_list, all_serv_times, unused_waiting_times, local_arrivals):                                
-
+    
     if len(jockeys) > 0 and queue_name == "Server1":
         preferred_queue_id = "Server2"
         flag_no_jockeys = True
-
+        
         jockeyed_to = jockeying_init(queue_, jockeys, other_jockeys, srv_two_process_details, preferred_queue,
                                      preferred_queue_id, srv_lst_arrivals, srv_one_cust_time_dict,
                                      srv_two_cust_time_dict, queue_name, dict_server_customer_queue_one, 
@@ -2086,14 +2421,12 @@ def start_processing_queues(queue_, srv_one_cust_time_dict, srv_two_cust_time_di
     elif len(jockeys) > 0 and queue_name == "Server2" :
         preferred_queue_id = "Server1"
         flag_no_jockeys = True
-
+        
         jockeyed_to = jockeying_init(queue_, jockeys, other_jockeys, srv_two_process_details, preferred_queue,
                                      preferred_queue_id, srv_lst_arrivals, srv_two_cust_time_dict,
                                      srv_one_cust_time_dict, queue_name, dict_server_customer_queue_two, 
                                      srv_one_times_list, all_serv_times, unused_waiting_times) 
-                                     
-    #else:
-    #flag_no_jockeys = True
+                                         
 
     if queue_.qsize() > 0:
 
@@ -2141,7 +2474,8 @@ def get_arrivals_jockeys_given_jockeying_threshold(still_in_queue, still_in_pref
     
     customerid = still_in_queue[0]
     
-    customer_now_queued_in_server = on_which_server(customerid, dict_server_customer_queue_one, dict_server_customer_queue_two) 
+    customer_now_queued_in_server = on_which_server(customerid, dict_server_customer_queue_one, dict_server_customer_queue_two,
+                                                   jockeyed_customer_server_one_dict, jockeyed_customer_server_two_dict) 
        
     if len(still_in_queue) >= 1:
         if customer_now_queued_in_server == "Server1":
@@ -2160,7 +2494,7 @@ def get_arrivals_jockeys_given_jockeying_threshold(still_in_queue, still_in_pref
                     if "_jockey" in customer:
                         count = count + 1
             
-        customer_to_switch_in_curr_queue_pose = in_curr_queue_at_pose(customer_to_switch_in_curr_queue, still_in_queue)         
+        customer_to_switch_in_curr_queue_pose = in_curr_queue_at_pose(customer_to_switch_in_curr_queue, still_in_queue)                 
 
         if jockey_candidates: 
             for jockey in jockey_candidates:
@@ -2171,14 +2505,39 @@ def get_arrivals_jockeys_given_jockeying_threshold(still_in_queue, still_in_pref
                     preferred_que_name = "Server1"
                     jockeyed_customer_server_one_dict.update({jockey:preferred_que_name})
                     
-            jockey_rate_in_curr_queue = get_jockeying_rate(jockeyed_customer_server_one_dict, global_arrivals_in_one, 
-                                                        curr_queue.qsize(), preferred_queue.qsize()) # len(still_in_queue), len(still_in_preferred_queue))
-            jockey_rate_in_other_queue = get_jockeying_rate(jockeyed_customer_server_two_dict, global_arrivals_in_two,
-                                        curr_queue.qsize(), preferred_queue.qsize()) # len(still_in_queue), len(still_in_preferred_queue))
-            save_jockey_details_to_file(jockeying_rates_with_threshold_in_one, customer_now_queued_in_server)
-            save_jockey_details_to_file(jockeying_rates_with_threshold_in_two, customer_now_queued_in_server)
-            save_jockeying_rate_queue_length(jockey_rate_in_curr_queue, still_in_queue, queueID)
-            save_jockeying_rate_queue_length(jockey_rate_in_other_queue, still_in_queue, queueID)
+                    
+            customers_with_arrivals_shuffled_curr = switch_customers_in_bulk_shuffled(jockey_candidates, preferred_queue, srv_lst_arrivals, queueID)
+            customers_with_arrivals_shuffled_curr = list(set(flatten(customers_with_arrivals_shuffled_curr)))
+            
+            return customers_with_arrivals_shuffled_curr
+            
+    elif len(still_in_preferred_queue) >= 1:
+        if customer_now_queued_in_server == "Server1":
+            customer_to_switch_in_curr_queue = get_max_waiting_times_list(still_in_queue, srv_one_cust_time_dict)        
+        else:
+            customer_to_switch_in_curr_queue = get_max_waiting_times_list(still_in_queue, srv_two_cust_time_dict)                
+        
+        if customer_to_switch_in_curr_queue:
+            # a count of how many times a customer is jockeying                    
+            if len(customer_to_switch_in_curr_queue) >= 1: 
+                customer_to_switch_in_curr_queue = list(set(customer_to_switch_in_curr_queue))
+                count = 1
+                for customer in customer_to_switch_in_curr_queue:
+                    customer = customer+"_jockey"                    
+                    jockey_candidates.append(customer)          
+                    if "_jockey" in customer:
+                        count = count + 1
+            
+        customer_to_switch_in_curr_queue_pose = in_curr_queue_at_pose(customer_to_switch_in_curr_queue, still_in_queue)                 
+
+        if jockey_candidates: 
+            for jockey in jockey_candidates:
+                if queueID == "Server1":
+                    preferred_que_name = "Server2"
+                    jockeyed_customer_server_two_dict.update({jockey:preferred_que_name})
+                else:
+                    preferred_que_name = "Server1"
+                    jockeyed_customer_server_one_dict.update({jockey:preferred_que_name})                    
                     
             customers_with_arrivals_shuffled_curr = switch_customers_in_bulk_shuffled(jockey_candidates, preferred_queue, srv_lst_arrivals, queueID)
             customers_with_arrivals_shuffled_curr = list(set(flatten(customers_with_arrivals_shuffled_curr)))
@@ -2189,14 +2548,9 @@ def get_arrivals_jockeys_given_jockeying_threshold(still_in_queue, still_in_pref
 def plot_results_3D(data_source_one, data_source_two):
     try:
         # set up a figure twice as wide as it is tall
-        fig = plt.figure(figsize=plt.figaspect(0.5))
-        
-        # set up the axes for the first plot
+        fig = plt.figure(figsize=plt.figaspect(0.5))        
         ax = Axes3D(fig)
-        #ax = fig.add_subplot(1, 2, 1, projection='3d')
-        
         df_one = pd.read_csv(data_source_one, sep=',') 
-        # df_two = pd.read_csv(data_source_two, sep=',')
         
         columns = list(df_one.columns.values)  
         # col_jockeying_threshold = columns[0]
@@ -2206,10 +2560,6 @@ def plot_results_3D(data_source_one, data_source_two):
         X, Y = np.meshgrid(np.array(df_one[col_jockeying_count].values.tolist()), np.array(df_one[col_service_rate_diff].values.tolist()))
         
         Z = np.sin(np.sqrt(X ** 2 + Y ** 2))
-        
-        # surf = ax.contour3D(X, Y, Z, 50, cmap='binary')
-        
-        # Z = np.reshape(df_one[col_service_rate_diff].values.tolist(), (-1, 2)) #len(df_one)))
         
         surf = ax.plot_surface(X, Y, Z, rstride=1, cstride=1, cmap=cm.coolwarm,
                        linewidth=0, antialiased=False)
@@ -2366,8 +2716,8 @@ if __name__ == "__main__":
                         help='When a customer is moved to another queue is controlled by this value')
     parser.add_argument('--num_of_queues', dest='num_of_queues', type=int, required=False ,nargs='?',
                         help='How many queues should be used in the simulation')
-    parser.add_argument('--hybrid_metrics', dest='hybrid', type=int, required=False, nargs='?',
-                        help='Use both the jockeying threshold and waiting time metrics to decide if to jockey')
+    parser.add_argument('--wait_time_diff_ratio', dest='ration', type=float, required=False, nargs='?',
+                        help='Jockeying trigger threshold based on difference in waiting times')
     parser.add_argument('--run_id', dest='run_id', type=int, required=True, nargs='?',
                         help='This value is picked up from the script wrapper and attached to every customer so as to diferentiate the simulation run ID')
 
@@ -2376,8 +2726,7 @@ if __name__ == "__main__":
     time_now = time.time()
     # The parameter below regulates the simulation time period t
     # Increasing on decreasing the it's value needs increasing the processing period
-    # Line 2394
-    time_end = time_now + 10 #0 # 0 # 0 20 #
+    time_end = time_now + 5 # 100 #0 # 0 # 0 20 #
     
     num_of_queues = args.num_of_queues
     diff_service_rates = []
@@ -2441,33 +2790,52 @@ if __name__ == "__main__":
             queue_1 = list(dict_queues.values())[0]
             queue_2 = list(dict_queues.values())[1]
             
-            # counter = 0
-            # for t in tqdm(range(num_arrivals), desc="Executed:"):        
             if num_arrivals > 0:
-                # jockeys_in_one = []
-                # jockeys_in_two = []
             
                 arrivals = generate_arrivals(num_arrivals, arrivals_batch_num, run)
 
                 serv_time_one = np.random.exponential(args.service_rate_one, num_arrivals)
                 serv_time_two = np.random.exponential(args.service_rate_two, num_arrivals)
-
-                # print("----------->", serv_time_one, serv_time_two, args.jockeying_threshold)
+                
                 t = random.randint(1, num_arrivals)
 
                 new_joins_in_one = 0
                 new_joins_in_two = 0
                 
                 shuffled = []
-
-                #if queue_1.qsize() > 0 or queue_2.qsize() > 0:
+    
                 if list(dict_queues.values())[0].qsize() > 0 or list(dict_queues.values())[1].qsize() > 0:
                     diff_queue_sizes = abs(int(list(dict_queues.values())[0].qsize() - list(dict_queues.values())[1].qsize()))                    
-                    
-                    if diff_queue_sizes >= args.jockeying_threshold:
+                    if args.jockeying_threshold is not None:
+                        if diff_queue_sizes >= args.jockeying_threshold:
+                            still_in_queue_one = list(list(dict_queues.values())[0].queue)
+                            still_in_queue_two = list(list(dict_queues.values())[1].queue)
+                                                                    
+                            if still_in_queue_one:
+                                queueID = list(dict_queues.keys())[0]
+                                
+                            if still_in_queue_two:
+                                queueID = list(dict_queues.keys())[1]
+                            
+                                
+                            if queueID == "Server1":
+                                jockeys = jockeys_in_one
+                                other_jockeys = jockeys_in_two
+                                
+                                shuffled = get_arrivals_jockeys_given_jockeying_threshold(still_in_queue_one, still_in_queue_two, queue_1, queue_2, queueID,
+                                                customer_processes_in_one, customer_processes_in_two, jockeys, other_jockeys, dict_server_customer_queue_one, 
+                                                dict_server_customer_queue_two, arrivals, srv_one_cust_time_dict, srv_two_cust_time_dict, serv_time_one, serv_time_one)
+                            else:
+                                jockeys = jockeys_in_two
+                                other_jockeys = jockeys_in_one
+                                
+                                shuffled = get_arrivals_jockeys_given_jockeying_threshold(still_in_queue_two, still_in_queue_one, queue_2, queue_1, queueID,
+                                                customer_processes_in_one, customer_processes_in_two, jockeys, other_jockeys, dict_server_customer_queue_one, 
+                                                dict_server_customer_queue_two, arrivals, srv_one_cust_time_dict, srv_two_cust_time_dict, serv_time_two, serv_time_two)
+                    else:
                         still_in_queue_one = list(list(dict_queues.values())[0].queue)
                         still_in_queue_two = list(list(dict_queues.values())[1].queue)
-                                                                
+                        
                         if still_in_queue_one:
                             queueID = list(dict_queues.keys())[0]
                             
@@ -2477,7 +2845,7 @@ if __name__ == "__main__":
                             
                         if queueID == "Server1":
                             jockeys = jockeys_in_one
-                            other_jockeys = jockeys_in_two
+                            other_jockeys = jockeys_in_two                                                    
                             
                             shuffled = get_arrivals_jockeys_given_jockeying_threshold(still_in_queue_one, still_in_queue_two, queue_1, queue_2, queueID,
                                             customer_processes_in_one, customer_processes_in_two, jockeys, other_jockeys, dict_server_customer_queue_one, 
@@ -2485,7 +2853,7 @@ if __name__ == "__main__":
                         else:
                             jockeys = jockeys_in_two
                             other_jockeys = jockeys_in_one
-                            
+                                                        
                             shuffled = get_arrivals_jockeys_given_jockeying_threshold(still_in_queue_two, still_in_queue_one, queue_2, queue_1, queueID,
                                             customer_processes_in_one, customer_processes_in_two, jockeys, other_jockeys, dict_server_customer_queue_one, 
                                             dict_server_customer_queue_two, arrivals, srv_one_cust_time_dict, srv_two_cust_time_dict, serv_time_two, serv_time_two)
@@ -2521,9 +2889,7 @@ if __name__ == "__main__":
                                 queueID = list(dict_queues.keys())[0]                                
                                 preferred_que_name = list(dict_queues.keys())[1]
                                 preferred_queue = queue_2
-                                #if len(list(queue_1.queue)) == 0:
-                                #    queue_size_now = len(list(queue_1.queue))+1
-                                #else:
+                            
                                 queue_size_now = len(list(queue_1.queue))
                                 alt_queue_size_now = len(list(queue_2.queue))
                                                                 
@@ -2545,14 +2911,13 @@ if __name__ == "__main__":
                                 jockey_flag: bool = jockey_selector(queue_1, processing_time, shuffled[i], queueID,
                                                                     preferred_queue, jockey_threshold, preferred_que_name)
                                 if jockey_flag:
-                                    jockeys_in_one.append(shuffled[i])
+                                    jockeyed_waits_two.update({shuffled[i]:processing_time})
+                                    jockeys_in_one.append(shuffled[i]+"_jockey")
                                     srv_two_cust_time_dict.update({shuffled[i]: processing_time})  # time_in})
                                     srv_two_cust_pose_dict.update({shuffled[i]: len(queue_1.queue)})
     
                                 if len(jockeys_in_one) > 1:
-                                    jockey_rate = get_jockeying_rate(jockeys_in_one, srv_one_lst_arrivals, len(list(set(queue_1.queue))), len(list(set(queue_2.queue)))) #queue_size_now, alt_queue_size_now)
-                                    print(colored("Customers jockeyed from %s at a rate of %6.4f", 'yellow',
-                                                attrs=["blink"]) % (queueID, jockey_rate))
+                                    jockey_rate = get_jockeying_rate(jockeys_in_one, srv_one_lst_arrivals, len(list(set(queue_1.queue))), len(list(set(queue_2.queue)))) 
                                     if jockey_threshold:
                                         jockeying_rates_with_threshold_in_one.update({jockey_threshold: jockey_rate})
                                     else:
@@ -2563,15 +2928,14 @@ if __name__ == "__main__":
                                 save_jockey_details_to_file(jockeying_rates_with_threshold_in_one, queueID)
                                 save_pose_waits_to_file(srv_one_pose_time_dict, queueID)
                                 new_joins_in_one += 1
-    
-                            # elif queue_2.qsize() <= queue_1.qsize():
+                                
                             elif len(list(queue_2.queue)) <= len(list(queue_1.queue)):
     
                                 time_in = time.time()
                                 task_list_two = populate_task_into_queue(queue_2, shuffled[i])
                                 # queueID = "Server2"
                                 queueID = list(dict_queues.keys())[1]
-                                #preferred_que_name = "Server1"
+                                
                                 preferred_que_name = list(dict_queues.keys())[0]
                                 preferred_queue = queue_1  
                                 queue_size_now = len(list(set(queue_2.queue)))
@@ -2579,7 +2943,7 @@ if __name__ == "__main__":
                                 alt_queue_size_now = len(list(set(queue_1.queue)))
                                     
                                 dict_server_customer_queue_two.update({shuffled[i]: queueID})
-                                # print("%s size ===>> %01d Wait::: %06.4f "%( queueID, alt_queue_size_now, float(alt_queue_size_now/args.arrival_rate)))
+                    
                                 processing_time = compute_time_spent_in_service(serv_time_two, queue_size_now,
                                                                                 all_serv_time_two)
                                 print(
@@ -2597,14 +2961,13 @@ if __name__ == "__main__":
                                 jockey_flag: bool = jockey_selector(queue_2, processing_time, shuffled[i], queueID,
                                                                     preferred_queue, jockey_threshold, preferred_que_name)
                                 if jockey_flag:
-                                    jockeys_in_two.append(shuffled[i])
+                                    jockeys_in_two.append(shuffled[i]+"_jockey")
+                                    jockeyed_waits_one.update({shuffled[i]:processing_time})
                                     srv_one_cust_time_dict.update({shuffled[i]: processing_time})  # time_in})
                                     srv_one_cust_pose_dict.update({shuffled[i]: len(queue_2.queue)})
     
                                 if len(jockeys_in_two) > 1:
-                                    jockey_rate = get_jockeying_rate(jockeys_in_two, srv_two_lst_arrivals, queue_size_now, alt_queue_size_now)
-                                    print(colored("Customers jockeyed from %s at a rate of %6.4f", 'yellow',
-                                                attrs=["blink"]) % (queueID, jockey_rate))
+                                    jockey_rate = get_jockeying_rate(jockeys_in_two, srv_two_lst_arrivals, queue_size_now, alt_queue_size_now)                                   
                                     if jockey_threshold:
                                         jockeying_rates_with_threshold_in_two.update({jockey_threshold: jockey_rate})
                                     else:
@@ -2620,9 +2983,8 @@ if __name__ == "__main__":
                     for i in range(len(arrivals)):
                         local_arrivals_in_one = []
                         local_arrivals_in_two = []
-
-                        # if queue_1.qsize() <= queue_2.qsize():
-                        if len(queue_1.queue) <= len(queue_2.queue):
+                        
+                        if len(list(queue_1.queue)) <= len(list(queue_2.queue)):
                             
                             queueID = list(dict_queues.keys())[0]                                
                             preferred_que_name = list(dict_queues.keys())[1]
@@ -2635,7 +2997,7 @@ if __name__ == "__main__":
 
                             task_list_one = populate_task_into_queue(queue_1, arrivals[i] )
                             dict_server_customer_queue_one.update({arrivals[i]:queueID})
-                            # print("%s size ===>> %01d Wait::: %06.4f "%( queueID, alt_queue_size_now, float(alt_queue_size_now/args.arrival_rate)))
+                   
                             processing_time = compute_time_spent_in_service(serv_time_one, queue_size_now, all_serv_time_one)
                             print("%s joined %s at position %01d. Queue2 one has %01d customers. %6.7f seconds will be needed to service completion."%(arrivals[i], queueID, queue_size_now+1, alt_queue_size_now, processing_time))
                             srv_one_cust_time_dict.update({arrivals[i]: processing_time})
@@ -2650,12 +3012,13 @@ if __name__ == "__main__":
                             jockey_flag: bool = jockey_selector(queue_1, processing_time, arrivals[i], queueID, preferred_queue, jockey_threshold, preferred_que_name)
                             if jockey_flag:
                                 jockeys_in_one.append(arrivals[i]+"_jockey")
+                                jockeyed_waits_two.update({arrivals[i]:processing_time})
                                 srv_two_cust_time_dict.update({arrivals[i]: processing_time}) # time_in})
                                 srv_two_cust_pose_dict.update({arrivals[i]: len(queue_1.queue)})
 
                             if len(jockeys_in_one) > 1:
                                 jockey_rate = get_jockeying_rate(jockeys_in_one, srv_one_lst_arrivals,  len(list(set(queue_1.queue))), len(list(set(queue_2.queue))))
-                                print(colored("Customers jockeyed from %s at a rate of %6.4f",'yellow', attrs=["blink"])%(queueID, jockey_rate))
+                                
                                 if jockey_threshold:
                                     jockeying_rates_with_threshold_in_one.update({jockey_threshold:jockey_rate})
                                 else:
@@ -2666,14 +3029,12 @@ if __name__ == "__main__":
                             save_jockey_details_to_file(jockeying_rates_with_threshold_in_one, queueID)
                             save_pose_waits_to_file(srv_one_pose_time_dict, queueID)
                             new_joins_in_one += 1
-
-                        #elif queue_2.qsize() <= queue_1.qsize():
-                        elif len(list(queue_2.queue)) <= len(list(queue_2.queue)):
+                        
+                        elif len(list(queue_2.queue)) <= len(list(queue_1.queue)):
 
                             time_in = time.time()
                             task_list_two = populate_task_into_queue(queue_2, arrivals[i] )
-                            #queueID = "Server2"
-                            #preferred_que_name = "Server1"
+                            
                             queueID = list(dict_queues.keys())[1]                                
                             preferred_que_name = list(dict_queues.keys())[0]
                             preferred_queue = queue_1
@@ -2683,8 +3044,7 @@ if __name__ == "__main__":
                             alt_queue_size_now = len(list(queue_1.queue))
                             # queue_size_now = len(list(queue_2.queue))
                             dict_server_customer_queue_two.update({arrivals[i]:queueID})
-                            # print("%s size ===>> %01d Wait::: %6.4f "%( queueID, alt_queue_size_now, float(alt_queue_size_now/args.arrival_rate)))
-                            processing_time = compute_time_spent_in_service(serv_time_two, queue_size_now, all_serv_time_two)
+                                                        processing_time = compute_time_spent_in_service(serv_time_two, queue_size_now, all_serv_time_two)
                             print("%s joined %s at position %01d. Queue1 has %01d customers. %6.7f seconds will be needed to service completion"
                                         %(arrivals[i], queueID, queue_size_now+1, alt_queue_size_now, processing_time))
 
@@ -2701,13 +3061,13 @@ if __name__ == "__main__":
                             jockey_flag: bool = jockey_selector(queue_2, processing_time, arrivals[i], queueID, preferred_queue, jockey_threshold, preferred_que_name)
                             if jockey_flag:
                                 jockeys_in_two.append(arrivals[i]+"_jockey")
+                                jockeyed_waits_one.update({arrivals[i]:processing_time})
                                 srv_two_cust_time_dict.update({arrivals[i]: processing_time}) #time_in})
                                 srv_two_cust_pose_dict.update({arrivals[i]: len(queue_2.queue)})
 
 
                             if len(jockeys_in_two) > 1:
-                                jockey_rate = get_jockeying_rate(jockeys_in_two, srv_two_lst_arrivals, len(list(set(queue_2.queue))), len(list(set(queue_1.queue)))) #queue_size_now, alt_queue_size_now)
-                                print(colored("Customers jockeyed from %s at a rate of %6.4f",'yellow', attrs=["blink"])%(queueID, jockey_rate))
+                                jockey_rate = get_jockeying_rate(jockeys_in_two, srv_two_lst_arrivals, len(list(set(queue_2.queue))), len(list(set(queue_1.queue)))) 
                                 if jockey_threshold:
                                     jockeying_rates_with_threshold_in_two.update({jockey_threshold:jockey_rate})
                                 else:
@@ -2736,11 +3096,10 @@ if __name__ == "__main__":
                 
                 count_processed_in_one = 0  
                 count_processed_in_two = 0
-                
-                for count in range(args.arrival_rate): # (t+(min(queue_1.qsize(), queue_2.qsize()))):
+                                
+                for count in range(args.arrival_rate):
                     q_selector = random.randint(1, 2)
-                    if q_selector == 1:
-                        # queueID = "Server1"
+                    if q_selector == 1:                
                         queueID = list(dict_queues.keys())[0]                                
                         preferred_queue = queue_2
                         current_user = start_processing_queues(queue_1, srv_one_cust_time_dict, srv_two_cust_time_dict,
@@ -2750,7 +3109,7 @@ if __name__ == "__main__":
                                                 all_serv_time_one, unused_waiting_times_in_one, local_arrivals_in_one)
                         count_processed_in_one += 1
                     else:
-                        # queueID = "Server2"
+                        
                         queueID = list(dict_queues.keys())[1]                                
                         preferred_queue = queue_1
                         current_user = start_processing_queues(queue_2, srv_two_cust_time_dict, srv_one_cust_time_dict,
@@ -2772,8 +3131,7 @@ if __name__ == "__main__":
 
             all_serv_time_one.extend(serv_time_one)
             all_serv_time_two.extend(serv_time_two)
-                        
-        # print("STATUS::----->> ", flag_no_jockeys)
+                                
         if flag_no_jockeys == False:
             jockey_count = 0
             no_jockeyed_thresh_count_diff = []
@@ -2788,15 +3146,13 @@ if __name__ == "__main__":
             
             if queueID == "Server1":
                 total_wait_time = srv_one_cust_time_dict.get(current_user)
-                if total_wait_time is not None:
-                # print("DUMP -->> ", total_wait_time, current_user)
+                if total_wait_time is not None:                
                     no_jockeyed_thresh_count_wait_diff.append([args.jockeying_threshold, jockey_count, total_wait_time ,abs(args.service_rate_one - args.service_rate_two)]) 
                     save_jockey_waiting_time(no_jockeyed_thresh_count_wait_diff, datasource_jockey_details_extra)
             else:
                 total_wait_time = srv_two_cust_time_dict.get(current_user)
                 if total_wait_time is not None:
-                    no_jockeyed_thresh_count_wait_diff.append([args.jockeying_threshold, jockey_count, total_wait_time ,abs(args.service_rate_one - args.service_rate_two)]) 
-                # print("DUMP ==>> ", total_wait_time, current_user)
+                    no_jockeyed_thresh_count_wait_diff.append([args.jockeying_threshold, jockey_count, total_wait_time ,abs(args.service_rate_one - args.service_rate_two)])                 
                            
                     save_jockey_waiting_time(no_jockeyed_thresh_count_wait_diff, datasource_jockey_details_extra)
 
@@ -2805,4 +3161,3 @@ if __name__ == "__main__":
         
         count_processed_in_one = 0  
         count_processed_in_two = 0
-
