@@ -3044,7 +3044,7 @@ if __name__ == "__main__":
                             alt_queue_size_now = len(list(queue_1.queue))
                             # queue_size_now = len(list(queue_2.queue))
                             dict_server_customer_queue_two.update({arrivals[i]:queueID})
-                                                        processing_time = compute_time_spent_in_service(serv_time_two, queue_size_now, all_serv_time_two)
+                            processing_time = compute_time_spent_in_service(serv_time_two, queue_size_now, all_serv_time_two)
                             print("%s joined %s at position %01d. Queue1 has %01d customers. %6.7f seconds will be needed to service completion"
                                         %(arrivals[i], queueID, queue_size_now+1, alt_queue_size_now, processing_time))
 
