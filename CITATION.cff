@@ -1,5 +1,5 @@
 @article{joc_simulator,
-  author = {Anthony Kiggundu, Bin Han, Dennis Krummacher, `Hans-D` Schotten},
+  author = {Anthony Kiggundu, Bin Han, Dennis Krummacker, `Hans-D` Schotten},
   title = {Resource Allocation in Communication Networks: A Decision Model Of Jockeying In Queues},
   journal = {},
   pages = {6},
