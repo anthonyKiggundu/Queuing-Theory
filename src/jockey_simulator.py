@@ -1,10 +1,17 @@
 #!/usr/bin/python3
 '''
+- Waiting Time Decision Model -
 M/M/C queue where C=2(simulates two servers providing resources to incoming customers)
-and at the beignning the selection of a queue to join is random assuming the customer
-does not posses prior knowledge about the queue.
-Then, jockeying behaviour based on the difference between the queues with the customer
-jockeying to the shorter queue if it is not the current queue.
+and at the beginning the selection of a queue to join the shorter one assuming the customer
+posses prior knowledge about the queue.
+The jockeying behaviour is based on the waiting time at the current position in the queue
+being greater than the waiting time in the alternative queue at whatever position the jockeying 
+task lands. 
+The customer assessess this decision to jockey every time there is a departure in either
+queues. The expected waiting time in the alternative queue is based on the position and this position 
+includes a portion of new customers (arrivals) that choose to join the alternative queue with the jockeyed customer.
+A shuffling process is used here to randomise and orchestrate some competitiveness.
+We prototyped an heterogeneous system where one queue is always faster than the other.
 
 ⓒ 2022 Anthony L. Kiggundu - Open6GHub, German Research Center for Aritificial Intelligence [DFKI]
 The code can be possibly extended to have more servers[c=num] for more queuing capacity
