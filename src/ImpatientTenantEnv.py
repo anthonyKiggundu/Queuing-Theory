@@ -1,68 +1,110 @@
+__credits__ = ["Anthony Kiggundu"]
+
+from collections import OrderedDict
+from enum import Enum
+#from gym import spaces
+from gymnasium.spaces import Text
+from RenegeJockey import RequestQueue, Queues, Observations
 import numpy as np
 import random
 
+#import gymnasium
 import gymnasium as gym
+from gymnasium import spaces
 import torch.optim as optim
-import Request
+import json
 
 
 LR = .01  # Learning rate
 SEED = None  # Random seed for reproducibility
 MAX_EPISODES = 10000  # Max number of episodes
 
-# Init actor-critic agent
-agent = A2C(gym.make('UngeduldigenKunden'), random_seed=SEED)
-
-# Init optimizers
-actor_optim = optim.Adam(agent.actor.parameters(), lr=LR)
-critic_optim = optim.Adam(agent.critic.parameters(), lr=LR)
-
 #
 # Train
 #
+
+class Actions(Enum):
+    RENEGE = 0
+    JOCKEY = 1
 
 
 class ImpatientTenantEnv(gym.Env):
     metadata = {"render_modes": ["ansi"], "render_fps": 4}
 
-    def __init__(self, render_mode=None, num_of_queues=2):
+    def __init__(self, render_mode=None):
         #self.size = size  # The size of the square grid
         #self.window_size = 512  # The size of the PyGame window
         # Environment is made of the queues with the apparent xteristics ()
-        self.dict_servers = {}
-        self.num_of_queues = num_of_queues
-        self.dict_queues = {}
-        self.arrival_rates = [3,5,7,9,11,13,15]
-        
-        rand_idx = random.randrange(len(self.arrival_rates))
-        self.sampled_arr_rate = self.arrival_rates[rand_idx]
-        # Observations are dictionaries with the agent's and the target's location.
-        # Each location is encoded as an element of {0, ..., `size`}^2, i.e. MultiDiscrete([size, size]).
-        self.observation_space = {
-                "currentQueue": "",
-                "ServRate": float,
-                "action": "",
-                "reward": 0.0,
-            }
-
-        # We have 4 actions, corresponding to "right", "up", "left", "down"
-        self.action_space = ["jockey", "renege"]
-        self.queue_state = None
+        self.queue_state = {}
         self.action = ""
-        self.reward = 0.0
+        self.reward = 0  
+        self.utility_basic = 1.0
+        self.discount_coef = 0.1
+        time_entrance = 0.0
+        pos_in_queue = 0
+        self.history = {}
+        self.queueObj = Queues()
+        self.Observations = Observations()
+
+        # Observations are dictionaries with information about the state of the servers.
+        # {EndUtility, Intensity, Jockey, QueueSize, Renege, Reward, ServRate, Waited}
+
+        # We have 2 actions, corresponding to "Renege", "Jockey"
+        # Since gym does not allow for space defns with string,
+        # Renege = 0, Jockey = 1
+        
+        self.requestObj = RequestQueue(self.utility_basic, self.discount_coef)
+        duration = 3
+        self.requestObj.run(duration)
+
+        self.queue_id = self.requestObj.get_curr_queue_id()
+
+        srv1, srv2 = self.requestObj.get_queue_sizes() #self.srvs.get("Server2")
+
+        if srv1 < srv2:
+            low = srv1
+            high = srv2
+        else:
+            low = srv2
+            high = srv1            
+
+        self.action_space = spaces.Discrete(2) #MultiBinary(2, seed=42)
+
+        serv_rate_one, serv_rate_two = self.requestObj.get_server_rates()
+         
+        queue_one_state = np.array([srv1, serv_rate_one, self.reward, self.action])
+        queue_two_state = np.array([srv2, serv_rate_two, self.reward, self.action])
+        
+        self.observation_space = spaces.Dict({
+                "ServerID": spaces.Text(7), 
+                "Status": spaces.Dict ({
+                    "Renege": spaces.Discrete(1),
+                    "ServRate": spaces.Text(5),
+                    "Intensity": spaces.Text(5),
+                    "Jockey": spaces.Discrete(1),
+                    "Waited": spaces.Text(7),
+                    "EndUtility": spaces.Text(8),
+                    "Reward": spaces.Text(1),
+                    "QueueSize": spaces.Text(5),
+                  })
+                }, seed=42
+            )        
+
 
         """
         The following dictionary maps abstract actions from `self.action_space` to
         the direction we will walk in if that action is taken.
         I.e. 0 corresponds to "right", 1 to "up" etc.
         """
+        # ToDo :: here dpending on the to_from mapping, set the right values
+        # For now we set the values as below
+
         self._action_to_state = {
-            "Reneged": [curr_queue, actual_latency, reward-1],
-            "Jockeyed": [curr_queue, actual_latency, exp_latency, reward],
+            Actions.RENEGE.value: self.requestObj.get_curr_obs_renege(),
+            Actions.JOCKEY.value: self.requestObj.get_curr_obs_jockey(),
         }
         
-        self.queue_setup_manager()
-        self.generate_queues()
+       
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
@@ -74,103 +116,101 @@ class ImpatientTenantEnv(gym.Env):
         human-mode. They will remain `None` until human-mode is used for the
         first time.
         """
-        #self.window = None
-        #self.clock = None
-        
-    def queue_setup_manager(self):
-                
-        # deltalambda controls the difference between the service rate of either queues    
-        deltaLambda=random.randint(1, 2)
-        
-        serv_rate_one=self.sampled_arr_rate + deltaLambda 
-        serv_rate_two=self.sampled_arr_rate - deltaLambda
 
-        _serv_rate_one=serv_rate_one / 2
-        _serv_rate_two=serv_rate_two / 2
-        
-        self.dict_servers["Server1"] = _serv_rate_one
-        self.dict_servers["Server2"] = _serv_rate_two
-        
-        print("\n Current Arrival Rate:", self.sampled_arr_rate, "ServerRate 1:", _serv_rate_one, "ServerRate 2:", _serv_rate_two) 
-        
-        return self.dict_servers        
-    
-    
-    def generate_queues(self):
-        
-        for i in range(self.num_of_queues):
-            code_string = "Server%01d" % (i+1)
-            queue_object = np.array([])
-            self.dict_queues.update({code_string: queue_object})
-
-        return self.dict_queues
     
     '''
         need to compute observations both in reset and step
         method _get_obs that translates the environment’s state into an observation
     '''
     # The agent was in a given queue at a time t, then took some action and received some reward
-    def _get_obs(self, customerID):
-        action = get_action_taken(customerID)
-        self.queue_state = get_current_sys_state(queueID)
-        reward = get_reward_from_action()
+
+    def _get_obs(self):
+        self.history = self.requestObj.get_history()
+        keys = []
+        values = []
+        observ = {}
+        print("\n ==============>> ", self.history)
+        for k, v in self.history.items():
+            if isinstance (v, OrderedDict):
+                for j, l in v.items():
+                    keys.append(keys, j)
+                    values.append(values, l[0])
         
-        return {"Action": action, "State": queue_state, "Reward": reward}
+        observ["ServerID"] = self.requestObj.get_curr_queue_id()
+        
+        observ["Status"] = dict(zip(keys, values))
+        
+        print("\n ******* ", observ)
+        
+        return observ # self.history
+
     
-    def get_current_sys_state(self):
-        curr_sys_state = {}
-        
-        for key in self.dict_servers:
-            serv_rate = self.dict_servers.values()
-            queue_intensity = self.sampled_arr_rate / serv_rate
-            estimated_latency = Request.estimateMarkovWaitingTime()
-            self.curr_sys_state = {queueID:[self.action, queue_intensity, estimated_latency,self.reward],
-                                   }
+    def _get_info(self):
+
+        return self._action_to_state 
             
-        return curr_sys_state
     
     def reset(self, seed=None, options=None):
         # We need the following line to seed self.np_random
-        # super().reset(seed=seed)
-        # Here we initialize the simulation with new arrival_rate and service_rates
-        self.queue_setup_manager()
-        # Choose the agent's location uniformly at random
-        #self._agent_location = self.np_random.integers(0, self.size, size=2, dtype=int)
-    
-        # We will sample the target's location randomly until it does not coincide with the agent's location
-        #self._target_location = self._agent_location
-        #while np.array_equal(self._target_location, self._agent_location):
-        #    self._target_location = self.np_random.integers(
-        #        0, self.size, size=2, dtype=int
-        #    )
-    
-        observation = self._get_obs()
+        super().reset(seed=seed)
+
+        _dict = {
+                "ServerID":self.queue_id,
+                "Status": {
+                    "Renege": False,
+                    "ServRate": 0.0,
+                    "Intensity": 0.0,
+                    "Jockey": False,
+                    "Waited": 0.0,
+                    "EndUtility": 0.0,
+                    "Reward": 0.0,
+                    "QueueSize": 0.0,
+                },
+            }
+        
+        # print("\n OBS::::::: ", self._get_obs()[0])
+        
+        observation =  _dict #self._get_obs() # [0]                
         info = self._get_info()
-    
-        #if self.render_mode == "ansi":
-        #   self._render_frame()
+                
     
         return observation, info
     
-    # ToDo:: Here action needs to be either renege or jockey
     
     def step(self, action):
         # Map the action (element of {0,1,2,3}) to the direction we walk in
-        direction = self._action_to_direction[action]
-        # We use `np.clip` to make sure we don't leave the grid
-        self._agent_location = np.clip(
-            self._agent_location + direction, 0, self.size - 1
-        )
+        # direction = self._action_to_direction[action]
+
+        hist = self.requestObj.get_curr_history()
+
+        counter = 1
+        for act in action:
+
+            result_from_action = self._action_to_state.get(act)
+          
         # An episode is done iff the agent has reached the target
-        terminated = np.array_equal(self._agent_location, self._target_location)
-        reward = 1 if terminated else 0  # Binary sparse rewards
-        observation = self._get_obs()
-        info = self._get_info()
+        # In our case, an episode is done if the customer has left the queue
+        # ** or when a new batch of arrivals is being admitted to the queue **
+        # ?? Decision for terminate: If time queue wait is greater than local wait
+        # such that the tenant reneges -> terminate is true and a reward is given
+
+        # terminated = np.array_equal(self._agent_location, self._target_location)
+            if (hist[counter].get("EndUtility") < hist[counter].get("Waited")):
+                # According to the network 1 is when terminated and 0 for still running simulation
+                terminated = False #  True
+            else:
+                terminated = True # False
+
+            reward = 1 if terminated else 0  # Binary sparse rewards
+            observation = self._get_obs()
+            info = self._get_info()
     
-        if self.render_mode == "human":
-            self._render_frame()
+            if self.render_mode == "human":
+                self._render_frame()
     
-        return observation, reward, terminated, False, info
-    
+            counter = counter + 1
+
+
+        return observation, reward, terminated, info  # False
     
 

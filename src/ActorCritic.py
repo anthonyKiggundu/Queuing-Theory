@@ -9,12 +9,11 @@ Decision to renege or jockey are guided by the experience from previous customer
 """
 
 ###############################################################################
-import numpy as np
-import tensorflow as tf
 from __future__ import annotations
 
 import os
-
+import numpy as np
+import tensorflow as tf
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -22,13 +21,32 @@ import torch.nn as nn
 from torch import optim
 from tqdm import tqdm
 from jockey import *
+from RenegeJockey import Observations
 
 import gymnasium as gym
 ###############################################################################
 
+# Init actor-critic agent
+# agent = A2C(gym.make('ImpatientTenantEnv-v1'), random_seed=SEED)
+
+# Init optimizers
+# actor_optim = optim.Adam(agent.actor.parameters(), lr=LR)
+# critic_optim = optim.Adam(agent.critic.parameters(), lr=LR)
+
 # Create the Impatient Customer Environment
-env = gym.make('UngeduldigenKunden', render_mode="human")
+'''
+gym.envs.register(
+     id='ImpatientTenantEnv-v1',
+     entry_point='gym-examples.gym_examples.envs:ImpatientTenantEnv',
+     max_episode_steps=300,
+)
+
+env = gym.make('ImpatientTenantEnv-v1') # , render_mode="human")
+
 observation, info = env.reset(seed=42)
+
+print("\n *****>>>>>> ", observation)
+'''
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -79,6 +97,8 @@ class A2C(nn.Module):
         # define optimizers for actor and critic
         self.critic_optim = optim.RMSprop(self.critic.parameters(), lr=critic_lr)
         self.actor_optim = optim.RMSprop(self.actor.parameters(), lr=actor_lr)
+        # We add this due to a runtime error -> mat1 and mat2 must have the same dtype
+        self.double()
 
     def forward(self, x: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -91,9 +111,12 @@ class A2C(nn.Module):
             state_values: A tensor with the state values, with shape [n_envs,].
             action_logits_vec: A tensor with the action logits, with shape [n_envs, n_actions].
         """
-        x = torch.Tensor(x).to(self.device)
+        # x = torch.Tensor(x).to(self.device)
+        x = torch.tensor(x).to(self.device)
+        
         state_values = self.critic(x)  # shape: [n_envs,]
         action_logits_vec = self.actor(x)  # shape: [n_envs, n_actions]
+        # print("What is tensor X? ", x, "State Values: ",state_values,"Actions Vectors: ",action_logits_vec)
         return (state_values, action_logits_vec)
 
     def select_action(self, x: np.ndarray) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -108,6 +131,13 @@ class A2C(nn.Module):
             action_log_probs: A tensor with the log-probs of the actions, with shape [n_steps_per_update, n_envs].
             state_values: A tensor with the state values, with shape [n_steps_per_update, n_envs].
         """
+        
+        # The args here we pick from the dict x -> the states we take here are
+        # size of queue, intensity, serv_rate,wait
+        #x_ = list(x.values())
+        
+        
+        # print("\n Who is X ---> ", list(x), np.shape(x))
         state_values, action_logits = self.forward(x)
         action_pd = torch.distributions.Categorical(logits=action_logits)  # implicitly uses softmax
         actions = action_pd.sample()
@@ -154,7 +184,7 @@ class A2C(nn.Module):
         critic_loss = advantages.pow(2).mean()
 
         # give a bonus for higher entropy to encourage exploration
-        actor_loss = (
+        actor_loss = (n_steps_per_update
             -(advantages.detach() * action_log_probs).mean() - ent_coef * entropy.mean()
         )
         return (critic_loss, actor_loss)
@@ -204,72 +234,106 @@ class A2C(nn.Module):
                                     reward and the estimated value (critic’s evaluation) to update the actor.
     '''
 
-    #def AdvantageFunction (self):
-    #    pass
+        
+    # We go through the entire state or history and 
+    # then extract only those states where the action(Jockey/Renege) == True    
+    def states_of_interest(self, states):
+        
+        #filtered = filter(lambda x: x['Jockey'], states.values())
+        
+        jockeyed_entries_filtered = []
+        renege_states_filtered  = []
+        
+        #for state in states:
+        #    jockeyed_entries_filtered = [x for x in state.values() if state['Jockey']]
+        #    renege_states_filtered = [x for x in state.values() if state['Renege']]
+            
+            #jockeyed_entries_filtered = filter(lambda x: x['Jockey'], state.values())
+            #renege_states_filtered = filter(lambda x: x['Renege'], state.values())
+        
+        #print("\n ALL STATE ========>>>> ", states)
+        for state in states: 
+            if len(state) == 0:
+                continue
+            else:
+                for key ,value in state.items():
+                    if "Jockey" in key and value:
+                        jockeyed_entries_filtered.append(list(state.values()))
+                    elif "Renege" in key and value:
+                        renege_states_filtered.append(list(state.values()))
+        
+        return (jockeyed_entries_filtered, renege_states_filtered)
     
-    def setup(self):
-        # environment hyperparams
-        n_envs = 10
-        n_updates = 1000
-        n_steps_per_update = 128
-        randomize_domain = False
+    
+    def change_listOfdict_listOflist(self, test_list):
+        # Convert List of Dictionaries to List of Lists
+        # Using list comprehension
+        # print("\n Before: ", test_list)
+        res = []
+        for idx, sub in enumerate(test_list, start = 0):
+            if idx == 0:
+                res.append(list(sub.keys()))
+                res.append(list(sub.values()))
+            else:
+                res.append(list(sub.values()))
+                
+        # Remove any empty lists
+        list2 = [x for x in res if x != []]  
+                      
+        # print("\n ---------------------> ", res, " ----------- ", list2)
+        return list2 # np.array(res)
+    
+
+    def train_agent(self, env, n_envs, n_updates, n_steps_per_update, agent):   
+                # environment hyperparams
+        #n_envs = 10
+        #n_updates = 1000
+        #n_steps_per_update = 128
+        #randomize_domain = False
         
         # agent hyperparams
         gamma = 0.999
         lam = 0.95  # hyperparameter for GAE
         ent_coef = 0.01  # coefficient for the entropy bonus (to encourage exploration)
-        actor_lr = 0.001
-        critic_lr = 0.005
+        #actor_lr = 0.001
+        #critic_lr = 0.005
         
         # Note: the actor has a slower learning rate so that the value targets become
         # more stationary and are theirfore easier to estimate for the critic
         
         # environment setup
-        if randomize_domain:
-            envs = gym.vector.AsyncVectorEnv(
-                [
-                    lambda: gym.make(
-                        "UngeduldigenKunden",
-                        gravity=np.clip(
-                            np.random.normal(loc=-10.0, scale=1.0), a_min=-11.99, a_max=-0.01
-                        ),
-                        enable_wind=np.random.choice([True, False]),
-                        wind_power=np.clip(
-                            np.random.normal(loc=15.0, scale=1.0), a_min=0.01, a_max=19.99
-                        ),
-                        turbulence_power=np.clip(
-                            np.random.normal(loc=1.5, scale=0.5), a_min=0.01, a_max=1.99
-                        ),
-                        max_episode_steps=600,
-                    )
-                    for i in range(n_envs)
-                ]
-            )
         
-        else:
-            envs = gym.vector.make("UngeduldigenKunden", num_envs=n_envs, max_episode_steps=600)
+        #envs = gym.vector.make("ImpatientTenantEnv-v1.0",critic_lr=critic_lr, actor_lr=actor_lr, random_seed=42,
+        #                   num_envs=n_envs, max_episode_steps=600)
+        
+        # env_fns = [lambda: gym.make("ImpatientTenantEnv-v1.0", max_episode_steps=600)] * n_envs # gym.make("ImpatientTenantEnv-v1.0")
+        
+        # envs = gym.vector.AsyncVectorEnv(env_fns, shared_memory=False)
         
         
-        obs_shape = envs.single_observation_space.shape[0]
-        action_shape = envs.single_action_space.n
+        #obs_shape = envs.single_observation_space.shape[0]
+        #action_shape = envs.single_action_space.n
         
         # set the device
-        use_cuda = False
-        if use_cuda:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-            device = torch.device("cpu")
+        #use_cuda = False
+        #if use_cuda:
+        #    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        #else:
+        #    device = torch.device("cpu")
         
         # init the agent
-        agent = A2C(obs_shape, action_shape, device, critic_lr, actor_lr, n_envs)
-
-    def train_agent(self):        
+        #agent = A2C(obs_shape, action_shape, device, critic_lr, actor_lr, n_envs)
+             
         # create a wrapper environment to save episode returns and episode lengths
-        envs_wrapper = gym.wrappers.RecordEpisodeStatistics(envs, deque_size=n_envs * n_updates)
+        envs_wrapper = gym.wrappers.RecordEpisodeStatistics(env, deque_size=n_envs * n_updates)
         
         critic_losses = []
         actor_losses = []
         entropies = []
+        lst_new_state = []
+        # curr_state = RequestQueues.get_obs()
+        #curr_observ = Observations.get_obs()
+        
         
         # use tqdm to get a progress bar for training
         for sample_phase in tqdm(range(n_updates)):
@@ -278,29 +342,60 @@ class A2C(nn.Module):
         
             # reset lists that collect experiences of an episode (sample phase)
             ep_value_preds = torch.zeros(n_steps_per_update, n_envs, device=device)
+            # print("\n --------------->>>>>> ", ep_value_preds, len(ep_value_preds))
             ep_rewards = torch.zeros(n_steps_per_update, n_envs, device=device)
             ep_action_log_probs = torch.zeros(n_steps_per_update, n_envs, device=device)
+            #print("\n ++++++++++++++++++++++++++++++ ", ep_value_preds, len(ep_value_preds[0]), ep_rewards, len(ep_rewards), 
+            #      ep_action_log_probs, len(ep_action_log_probs))
             masks = torch.zeros(n_steps_per_update, n_envs, device=device)
         
             # at the start of training reset all envs to get an initial state
             if sample_phase == 0:
                 states, info = envs_wrapper.reset(seed=42)
-        
+                #if len(states[0]) == 0:
+                #    lst_new_state.append(states[1:])
+                #else:
+                #    lst_new_state.append(states[0:])
+                # print("\n ****** The STATES:", states[1])
+            
+            #print("\n States Original: ",states, "\n ======================> ",self.change_listOfdict_listOflist(states))
+            
+            # jockey_states, renege_states = self.states_of_interest(states)
+                
+            #print("\n ****** The FILTERED STATES: ",jockey_states, renege_states)
+            #if len(jockey_states) > 0:
+            #    states_in_true = jockey_states # [jockey_states, renege_states]
+            #else:
+            #   states_in_true = renege_states
+            
+            new_states = self.change_listOfdict_listOflist(states)
+            n_envs = new_states
+            # lst_new_state = self.change_listOfdict_listOflist(lst_new_state)
             # play n steps in our parallel environments to collect data
+            counter_ep_value = 0 
+            counter_action_value = 0
             for step in range(n_steps_per_update):
                 # select an action A_{t} using S_{t} as input for the agent
-                actions, action_log_probs, state_value_preds, entropy = agent.select_action(states)
+                actions, action_log_probs, state_value_preds, entropy = agent.select_action(new_states)
         
+                #print("\n ..... Actions: ", ep_value_preds[step] , state_value_preds[:len(ep_value_preds[step])] ,
+                #      len(state_value_preds), "\n ======== STATES ========== : ",new_states,len(new_states)) # "States: ",states
                 # perform the action A_{t} in the environment to get S_{t+1} and R_{t+1}
+                # truncated, -> removed this from below because it was not  needed and 
+                # throws an error from the base code in ../../wrappers/time_limits.py
                 states, rewards, terminated, truncated, infos = envs_wrapper.step(actions.cpu().numpy())
+                
         
-                ep_value_preds[step] = torch.squeeze(state_value_preds)
+                ep_value_preds[step] = torch.squeeze(state_value_preds[:len(ep_value_preds[step])]) # counter:len(ep_value_preds[step])] ...expand( len(ep_value_preds[step]), 1)) #
                 ep_rewards[step] = torch.tensor(rewards, device=device)
-                ep_action_log_probs[step] = action_log_probs
+                ep_action_log_probs[step] = action_log_probs[:len(ep_action_log_probs[step])]
         
                 # add a mask (for the return calculation later);
                 # for each env the mask is 1 if the episode is ongoing and 0 if it is terminated (not by truncation!)
-                masks[step] = torch.tensor([not term for term in terminated])
+                masks[step] = torch.tensor(terminated) #[not term for term in terminated])
+                counter_ep_value = counter_ep_value + len(ep_value_preds[step])
+                counter_action_value = counter_action_value + len(ep_action_log_probs[step])
+                print("\n ********************* End iterations ****************** ", counter_ep_value, counter_action_value)
         
             # calculate the losses for actor and critic
             critic_loss, actor_loss = agent.get_losses(ep_rewards, ep_action_log_probs, ep_value_preds,
@@ -314,6 +409,7 @@ class A2C(nn.Module):
             actor_losses.append(actor_loss.detach().cpu().numpy())
             entropies.append(entropy.detach().mean().cpu().numpy())
             
+            
     def run (self):
         
         """ play a couple of showcase episodes """
@@ -324,24 +420,28 @@ class A2C(nn.Module):
             print(f"starting episode {episode}...")
         
             # create a new sample environment to get new random parameters
-            if randomize_domain:
-                env = gym.make(
-                    "UngeduldigenKunden",
-                    render_mode="human",
-                    gravity=np.clip(np.random.normal(loc=-10.0, scale=2.0), a_min=-11.99,
-                        a_max=-0.01),
-                        enable_wind=np.random.choice([True, False]
-                    ),
-                    wind_power=np.clip(
-                        np.random.normal(loc=15.0, scale=2.0), a_min=0.01, a_max=19.99
-                    ),
-                    turbulence_power=np.clip(
-                        np.random.normal(loc=1.5, scale=1.0), a_min=0.01, a_max=1.99
-                    ),
-                    max_episode_steps=500,
-                )
-            else:
-                env = gym.make("UngeduldigenKunden", render_mode="human", max_episode_steps=500)
+            # Here we need new arrival rates and service rates for the different episodes
+            
+            #if randomize_domain:
+            #    env = gym.make(
+            #        "ImpatientTenantEnv-v1",
+            #        render_mode="human",
+            #        gravity=np.clip(np.random.normal(loc=-10.0, scale=2.0), a_min=-11.99,
+            #            a_max=-0.01),
+            #            enable_wind=np.random.choice([True, False]
+            #        ),
+            #        wind_power=np.clip(
+            #            np.random.normal(loc=15.0, scale=2.0), a_min=0.01, a_max=19.99
+            #        ),
+            
+            #        turbulence_power=np.clip(
+            #            np.random.normal(loc=1.5, scale=1.0), a_min=0.01, a_max=1.99
+            #        ),
+            #        max_episode_steps=500,
+            #                )
+            #else:
+            
+            env = gym.make("ImpatientTenantEnv-v1", render_mode="human", max_episode_steps=500)
         
             # get an initial state
             state, info = env.reset()
