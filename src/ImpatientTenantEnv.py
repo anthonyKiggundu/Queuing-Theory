@@ -5,6 +5,7 @@ from enum import Enum
 #from gym import spaces
 from gymnasium.spaces import Text
 from RenegeJockey import RequestQueue, Queues, Observations
+from gymnasium.core import ActType, ObsType
 import numpy as np
 import random
 
@@ -15,7 +16,7 @@ import torch.optim as optim
 import json
 
 
-LR = .01  # Learning rate
+LR = .001  # Learning rate
 SEED = None  # Random seed for reproducibility
 MAX_EPISODES = 10000  # Max number of episodes
 
@@ -36,15 +37,23 @@ class ImpatientTenantEnv(gym.Env):
         #self.window_size = 512  # The size of the PyGame window
         # Environment is made of the queues with the apparent xteristics ()
         self.queue_state = {}
-        self.action = ""
-        self.reward = 0  
+        self.action = ""  
         self.utility_basic = 1.0
         self.discount_coef = 0.1
         time_entrance = 0.0
         pos_in_queue = 0
         self.history = {}
         self.queueObj = Queues()
-        self.Observations = Observations()
+        self.Observations = Observations()        
+        
+        self.endutil = 0.0 
+        self.intensity = 0.0
+        self.jockey = False
+        self.queuesize = 0.0
+        self.renege = False
+        self.reward = 0.0 
+        self.servrate = 0.0
+        self.waitingtime = 0.0
 
         # Observations are dictionaries with information about the state of the servers.
         # {EndUtility, Intensity, Jockey, QueueSize, Renege, Reward, ServRate, Waited}
@@ -69,27 +78,36 @@ class ImpatientTenantEnv(gym.Env):
             high = srv1            
 
         self.action_space = spaces.Discrete(2) #MultiBinary(2, seed=42)
+        
+        self.history = self.requestObj.get_history()
 
         serv_rate_one, serv_rate_two = self.requestObj.get_server_rates()
          
         queue_one_state = np.array([srv1, serv_rate_one, self.reward, self.action])
         queue_two_state = np.array([srv2, serv_rate_two, self.reward, self.action])
         
-        self.observation_space = spaces.Dict({
-                "ServerID": spaces.Text(7), 
-                "Status": spaces.Dict ({
+        #self.observation_space = spaces.Dict({
+         #       "ServerID": spaces.Text(7), 
+         #       "Status": 
+        self.observation_space = spaces.Dict ({
+		            "ServerID": spaces.Text(8),
                     "Renege": spaces.Discrete(1),
-                    "ServRate": spaces.Text(5),
-                    "Intensity": spaces.Text(5),
+                    "ServRate": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
+                    "Intensity": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
                     "Jockey": spaces.Discrete(1),
-                    "Waited": spaces.Text(7),
-                    "EndUtility": spaces.Text(8),
-                    "Reward": spaces.Text(1),
-                    "QueueSize": spaces.Text(5),
-                  })
-                }, seed=42
-            )        
-
+                    "Waited": spaces.Box(low=-1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(7),
+                    "EndUtility": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), # spaces.Text(8),
+                    "Reward": spaces.Box(low=0.0,high=1.0, shape=(1,), dtype=np.float32), #spaces.Text(1),
+                    "QueueSize": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
+                })
+                
+         #       }, seed=42
+         #   )        
+	
+        #self.observation_space = spaces.Dict({ str(spaces.Text(7)): spaces.Dict ({"EndUtility": spaces.Text(8), "Intensity": spaces.Text(5), "Jockey": spaces.Discrete(1),												
+		#										"QueueSize": spaces.Text(5), "Renege": spaces.Discrete(1), "Reward": spaces.Text(1), "ServRate": spaces.Text(5),
+		#										"Waited": spaces.Text(7), 
+		#									})}, seed=42 )       
 
         """
         The following dictionary maps abstract actions from `self.action_space` to
@@ -125,24 +143,29 @@ class ImpatientTenantEnv(gym.Env):
     # The agent was in a given queue at a time t, then took some action and received some reward
 
     def _get_obs(self):
-        self.history = self.requestObj.get_history()
-        keys = []
-        values = []
-        observ = {}
-        print("\n ==============>> ", self.history)
-        for k, v in self.history.items():
-            if isinstance (v, OrderedDict):
-                for j, l in v.items():
-                    keys.append(keys, j)
-                    values.append(values, l[0])
-        
-        observ["ServerID"] = self.requestObj.get_curr_queue_id()
-        
-        observ["Status"] = dict(zip(keys, values))
-        
-        print("\n ******* ", observ)
-        
-        return observ # self.history
+		
+	    return {"ServerID": self.queue_id, "EndUtility": self.endutil, "Intensity": self.intensity, "Jockey": self.jockey,
+                    "QueueSize": self.queuesize, "Renege": self.renege, "Reward": self.reward,  "ServRate": self.servrate, "Waited": self.waitingtime
+               }
+		
+#        self.history = self.requestObj.get_history()
+#        keys = []
+#        values = []
+#        observ = {}
+#        print("\n ==============>> ", self.history)
+#        for k, v in self.history.items():
+#            if isinstance (v, OrderedDict):
+#                for j, l in v.items():
+#                    keys.append(keys, j)
+#                    values.append(values, l[0])
+#        
+#        observ["ServerID"] = self.requestObj.get_curr_queue_id()
+#        
+#        observ["Status"] = dict(zip(keys, values))
+#        
+#        print("\n ******* ", observ)
+#        
+#        return observ # self.history
 
     
     def _get_info(self):
@@ -150,31 +173,33 @@ class ImpatientTenantEnv(gym.Env):
         return self._action_to_state 
             
     
-    def reset(self, seed=None, options=None):
+    def reset(self, seed=None, options=None): # -> tuple[ObsType, dict[str, any]] :
         # We need the following line to seed self.np_random
-        super().reset(seed=seed)
-
-        _dict = {
-                "ServerID":self.queue_id,
-                "Status": {
-                    "Renege": False,
-                    "ServRate": 0.0,
-                    "Intensity": 0.0,
-                    "Jockey": False,
-                    "Waited": 0.0,
-                    "EndUtility": 0.0,
-                    "Reward": 0.0,
-                    "QueueSize": 0.0,
-                },
-            }
+        super().reset(seed=42)
         
-        # print("\n OBS::::::: ", self._get_obs()[0])
+        #_dict = {"ServerID": self.queue_id, "EndUtility": 0.0, "Intensity": 0.0, "Jockey": False,
+        #            "QueueSize": 0.0, "Renege": False, "Reward": 0.0,  "ServRate": 0.0, "Waited": 0.0
+        #		}  
         
-        observation =  _dict #self._get_obs() # [0]                
+        #_dict = {"ServerID": spaces.Text(8), "EndUtility": 0.0, "Intensity": 0.0, "Jockey": False,
+        #            "QueueSize": 0.0, "Renege": False, "Reward": 0.0,  "ServRate": 0.0, "Waited": 0.0
+        #		}        
+        
+        #observation =  dict(random.choices(list(self.history.items()),k=1)) #_dict # self._get_obs() # [0]
+        
+        if len(self.requestObj.get_curr_obs_jockey()) > 0:
+            print("\n HISTORY JOCKEY =====> ", self.requestObj.get_curr_obs_jockey(), len(self.requestObj.get_curr_obs_jockey()))
+            observation =  dict(random.choices(list(self.requestObj.get_curr_obs_jockey().items()),k=1)) 
+        elif len(self.requestObj.get_curr_obs_renege()) > 0:
+            print("\n HISTORY RENEGED =====> ", self.requestObj.get_curr_obs_renege(), len(self.requestObj.get_curr_obs_renege()))
+            observation =  dict(random.choices(list(self.requestObj.get_curr_obs_renege().items()),k=1))
+			
+        # print("\n ----> ", observation) #, type(observation))                
         info = self._get_info()
-                
-    
-        return observation, info
+                 
+        #if isinstance(observation, dict):
+               
+        return observation, info              
     
     
     def step(self, action):
