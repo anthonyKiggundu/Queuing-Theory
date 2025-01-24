@@ -305,8 +305,9 @@ class Observations:
         return
 
 
-    def set_obs (self, reneged, serv_rate, intensity, jockeyed, time_in_serv, utility, rewarded, curr_pose):
+    def set_obs (self, queue_id, reneged, serv_rate, intensity, jockeyed, time_in_serv, utility, rewarded, curr_pose):
         self.obs = {
+			        "ServerID": queue_id,
                     "EndUtility":utility,
                     "Intensity":intensity,
                     "Jockey":jockeyed,
@@ -894,26 +895,23 @@ class RequestQueue:
         # req = self.queue[index]
         reward = self.getRenegeRewardPenalty()
         #hstr_entry = self.objObserve(True,False,self.time-req.time_entrance,self.generateLocalCompUtility(req), reward, curr_pose)
-        self.objObserv.set_obs(True, serv_rate, queue_intensity, False,self.time-req.time_entrance,self.generateLocalCompUtility(req), reward, len(self.queue))
+        self.objObserv.set_obs(queueid, True, serv_rate, queue_intensity, False,self.time-req.time_entrance,self.generateLocalCompUtility(req), reward, len(self.queue))
 
         for t in range(len(self.queue)):
             if self.queue[t].customerid == customerid:
                 curr_pose = t
         
-        self.history.update({"ServerID":queueid,
-                            "Status":self.objObserv.get_obs()                                 
-                        })
+        #self.history.update({"ServerID":queueid,
+        #                    "Status":self.objObserv.get_obs()                                 
+        #                })
         
-        #to_be_appended = {"ServerID":queueid,
-        #                  "Status": self.objObserv.get_obs()
-        #                }
-        
-        #self.history = np.append(self.history, to_be_appended)
+        self.history.update({queueid:self.objObserv.get_obs()})
         
         self.queue = np.delete(self.queue, curr_pose) # index)
         
         
         self.curr_obs_renege.update({
+			"ServerID": queueid, #self.queue,
             "EndUtility": time_local_service,
             "Intensity": queue_intensity,                                            
             "Jockey": False,
@@ -962,24 +960,22 @@ class RequestQueue:
             np.delete(curr_queue, curr_pose) # np.where(id_queue==req_id)[0][0])
             reward = 1.0
             dest_queue = np.append( dest_queue, req)
-            decision = True
-            print("\n I have moved ", customerid, " to ", alt_queue_id)
-            self.objObserv.set_obs(False, self.dict_servers_info[curr_queue_id], queue_intensity, decision,self.time-req.time_entrance,expectedJockeyWait, reward, len(curr_queue))
+            decision = True            
+            self.objObserv.set_obs(curr_queue_id, False, self.dict_servers_info[curr_queue_id], queue_intensity, decision,self.time-req.time_entrance, expectedJockeyWait, reward, len(curr_queue))
+            
+            print("\n I have moved ", customerid, " from ",curr_queue_id, " to ", alt_queue_id ,"\n Observation: ", self.objObserv.get_obs())
+            
             #obs_entry = self.objObserve(False,self.dict_servers_info[curr_queue_id], queue_intensity, decision,self.time-req.time_entrance, expectedJockeyWait, reward, curr_pose)
             
             #self.history = np.append(self.history,self.objObserve.get_obs()) #obs_entry)
-            self.history.update({"ServerID":curr_queue_id,
-                                "Status":self.objObserv.get_obs()
-                            })
-            
-            #to_be_appended = {"ServerID":curr_queue_id,
-            #              "Status": self.objObserv.get_obs()
-            #            }
+            #self.history.update({"ServerID":curr_queue_id,
+            #                    "Status":self.objObserv.get_obs()
+            #                })
         
-            #self.history = np.append(self.history, to_be_appended)
-        
+            self.history.update({curr_queue_id:self.objObserv.get_obs()})
             
             self.curr_obs_jockey.update({
+				"ServerID": curr_queue_id,
                 "EndUtility": expectedJockeyWait,
                 "Intensity": queue_intensity,                                            
                 "Jockey": True,
@@ -1003,21 +999,21 @@ class RequestQueue:
             #        Do not use the local cloud delay
 
             reward = 0.0
-            self.objObserv.set_obs(False, self.dict_servers_info[curr_queue_id], queue_intensity, decision,self.time-req.time_entrance,expectedJockeyWait, reward, len(curr_queue))
+            self.objObserv.set_obs(curr_queue_id, False, self.dict_servers_info[curr_queue_id], queue_intensity, decision, self.time-req.time_entrance, expectedJockeyWait, reward, len(curr_queue))
+            
+            # print("\n", customerid," has RENEGED ", "\n Observation: ", self.objObserv.get_obs())
+            
             #obs_entry = self.objObserve.get_obs()
             # self.history = np.append(self.history,self.objObserve.get_obs()) # obs_entry)
             
-            self.history.update({"ServerID":curr_queue_id,
-                                "Status":self.objObserv.get_obs()
-                            })
-            
-            #to_be_appended = {"ServerID": curr_queue_id,
-            #              "Status": self.objObserv.get_obs()
-            #            }
-        
-            #self.history = np.append(self.history, to_be_appended)
+            #self.history.update({"ServerID":curr_queue_id,
+            #                    "Status":self.objObserv.get_obs()
+            #                })
+
+            self.history.update({curr_queue_id:self.objObserv.get_obs()})
             
             self.curr_obs_jockey.update({
+				"ServerID": curr_queue_id,
                 "EndUtility": expectedJockeyWait,
                 "Intensity": queue_intensity,                                            
                 "Jockey": False,

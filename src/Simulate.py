@@ -61,6 +61,7 @@ class Queues(object):
 
         return self.dict_queues
 
+
     def get_arrivals_rates(self):
 
         return self.sampled_arr_rate
@@ -72,6 +73,7 @@ def main():
     LR = .01  # Learning rate
     SEED = None  # Random seed for reproducibility
     MAX_EPISODES = 10000  # Max number of episodes
+
     
     n_envs = 10
     n_updates = 1000
@@ -80,6 +82,7 @@ def main():
 
     # agent hyperparams
     gamma = 0.999
+
     lam = 0.95  # hyperparameter for GAE
     ent_coef = 0.01  # coefficient for the entropy bonus (to encourage exploration)
     actor_lr = 0.001
@@ -112,16 +115,19 @@ def main():
 
     else:
         gym.envs.register(
-            id='ImpatientTenantEnv-v1',
+            id='ImpatientTenantEnv-v1.0',
             entry_point='gym-examples.gym_examples.envs:ImpatientTenantEnv',
             max_episode_steps=300,
         )
-        print("\n *************** Making environment **************** ")
-        env = gym.vector.make('ImpatientTenantEnv-v1', num_envs=n_envs) 
+        
+        env = gym.vector.make('ImpatientTenantEnv-v1.0', num_envs=n_envs)
+        #env = gym.make_vec('ImpatientTenantEnv-v1.0', num_envs=n_envs)
         
         check_env(env, skip_render_check=True)
         
         observation, info = env.reset(seed=42)
+        
+        #print("\n *************** Making environment **************** ", observation)
 
     #    envs = gym.vector.make("ImpatientTenantEnv-v1",critic_lr=critic_lr, actor_lr=actor_lr, random_seed=SEED,
     #                                num_envs=n_envs, max_episode_steps=600)

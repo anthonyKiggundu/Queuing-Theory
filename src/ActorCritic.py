@@ -441,7 +441,7 @@ class A2C(nn.Module):
             #                )
             #else:
             
-            env = gym.make("ImpatientTenantEnv-v1", render_mode="human", max_episode_steps=500)
+            env = gym.make("ImpatientTenantEnv-v1.0", render_mode="human", max_episode_steps=500)
         
             # get an initial state
             state, info = env.reset()
