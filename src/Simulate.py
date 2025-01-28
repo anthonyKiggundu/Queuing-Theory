@@ -146,7 +146,7 @@ def main():
     # init the agent
     agent = a2c(obs_shape, action_shape, device, critic_lr, actor_lr, n_envs)
 
-    #OrderedDict
+    # OrderedDict
     #RequestQueue.run()    
     
     # Run one episode to get

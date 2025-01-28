@@ -174,30 +174,29 @@ class ImpatientTenantEnv(gym.Env):
             
     
     def reset(self, seed=None, options=None): # -> tuple[ObsType, dict[str, any]] :
+        # import secrets
+		
         # We need the following line to seed self.np_random
         super().reset(seed=42)
         
-        #_dict = {"ServerID": self.queue_id, "EndUtility": 0.0, "Intensity": 0.0, "Jockey": False,
-        #            "QueueSize": 0.0, "Renege": False, "Reward": 0.0,  "ServRate": 0.0, "Waited": 0.0
-        #		}  
-        
+       
         #_dict = {"ServerID": spaces.Text(8), "EndUtility": 0.0, "Intensity": 0.0, "Jockey": False,
         #            "QueueSize": 0.0, "Renege": False, "Reward": 0.0,  "ServRate": 0.0, "Waited": 0.0
         #		}        
         
         #observation =  dict(random.choices(list(self.history.items()),k=1)) #_dict # self._get_obs() # [0]
         
-        if len(self.requestObj.get_curr_obs_jockey()) > 0:
-            print("\n HISTORY JOCKEY =====> ", self.requestObj.get_curr_obs_jockey(), len(self.requestObj.get_curr_obs_jockey()))
-            observation =  dict(random.choices(list(self.requestObj.get_curr_obs_jockey().items()),k=1)) 
-        elif len(self.requestObj.get_curr_obs_renege()) > 0:
-            print("\n HISTORY RENEGED =====> ", self.requestObj.get_curr_obs_renege(), len(self.requestObj.get_curr_obs_renege()))
-            observation =  dict(random.choices(list(self.requestObj.get_curr_obs_renege().items()),k=1))
+        #if len(self.requestObj.get_curr_obs_jockey()) > 0:
+        #    print("\n HISTORY JOCKEY =====> ", self.requestObj.get_curr_obs_jockey(), len(self.requestObj.get_curr_obs_jockey()))
+        #    observation =  dict(random.choices(list(self.requestObj.get_curr_obs_jockey().items()),k=1)) 
+        #elif len(self.requestObj.get_curr_obs_renege()) > 0:
+        #    print("\n HISTORY RENEGED =====> ", self.requestObj.get_curr_obs_renege(), len(self.requestObj.get_curr_obs_renege()))
+        #    observation =  dict(random.choices(list(self.requestObj.get_curr_obs_renege().items()),k=1))
 			
-        # print("\n ----> ", observation) #, type(observation))                
+        observation = random.choice(self.requestObj.get_history()) # secrets
         info = self._get_info()
                  
-        #if isinstance(observation, dict):
+        print("\n OBSERVED: ",observation)
                
         return observation, info              
     
@@ -206,7 +205,7 @@ class ImpatientTenantEnv(gym.Env):
         # Map the action (element of {0,1,2,3}) to the direction we walk in
         # direction = self._action_to_direction[action]
 
-        hist = self.requestObj.get_curr_history()
+        hist = self.requestObj.get_history() # _curr
 
         counter = 1
         for act in action:

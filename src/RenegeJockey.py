@@ -107,9 +107,6 @@ class Request:
         self.certainty=1.0-float(outage_risk)
         self.certainty=float(outage_risk)
 
-        # self.arr_prev_times = np.array([])
-        # print("\n TIME ENTERED: ", self.time_entrance, time_entrance, self.arr_prev_times)
-        # arr_prev_times = np.append(arr_prev_times,  self.time_entrance)
 
         if (self.certainty<=0) or (self.certainty>=1):
             raise ValueError('Invalid outage risk threshold! Please select between (0,1)')
@@ -126,10 +123,6 @@ class Request:
         #else:
         #   self.serv_rate=float(serv_rate)
         queueObj = Queues()
-        #queue_srv_rates = queueObj.queue_setup_manager()
-
-        #queueObj.generate_queues()
-        #queueObj.queue_setup_manager()
 
         queue_srv_rates = queueObj.get_dict_servers()
 
@@ -137,13 +130,6 @@ class Request:
             self.serv_rate = queue_srv_rates.get("Server1")
         else:
             self.serv_rate = queue_srv_rates.get("Server2")
-              # srv1 = queueObjs.get("Server1")
-
-        #if len(self.arr_prev_times) <= 0:
-        #    diff = self.time_entrance #arr_prev_times[0]
-        #    print("\n Diff: ", diff)
-        #elif len(self.arr_prev_times) > 0:
-        #    print("\n Rates --> ",  self.arr_prev_times, " ------  ",  self.arr_prev_times[len(self.arr_prev_times)-1])
 
         self.dist_local_delay=dist_local_delay
         self.loc_local_delay=np.random.uniform(low=float(para_local_delay[0]),high=(para_local_delay[1]))
@@ -155,8 +141,6 @@ class Request:
         self.observations=np.array([])
         self.error_loss=1
         self.optimal_learning_achieved=False
-
-        # arr_prev_times = np.append(arr_prev_times,  self.time_entrance)
 
         return
 
@@ -358,7 +342,7 @@ class RequestQueue:
         self.time_res=float(time_res)
         self.dict_queues_obj = {}
         self.dict_servers_info = {}
-        self.history = {}
+        self.history = [] #{}
         self.curr_obs_jockey = {}
         self.curr_obs_renege = {}
 
@@ -376,7 +360,7 @@ class RequestQueue:
 
         self.arr_rate = self.objQueues.get_arrivals_rates()
 
-        self.objObserve = Observations()
+        # self.objObserve = Observations()
         self.all_times = []
         self.all_serv_times = []
         self.queueID = ""
@@ -895,17 +879,16 @@ class RequestQueue:
         # req = self.queue[index]
         reward = self.getRenegeRewardPenalty()
         #hstr_entry = self.objObserve(True,False,self.time-req.time_entrance,self.generateLocalCompUtility(req), reward, curr_pose)
+        print("\n INSIDE REQRENGE QUEUE IS ->", queueid)
         self.objObserv.set_obs(queueid, True, serv_rate, queue_intensity, False,self.time-req.time_entrance,self.generateLocalCompUtility(req), reward, len(self.queue))
 
         for t in range(len(self.queue)):
             if self.queue[t].customerid == customerid:
-                curr_pose = t
+                curr_pose = t        
         
-        #self.history.update({"ServerID":queueid,
-        #                    "Status":self.objObserv.get_obs()                                 
-        #                })
+        # self.history.update(self.objObserv.get_obs()) #{queueid:self.objObserv.get_obs()})
         
-        self.history.update({queueid:self.objObserv.get_obs()})
+        self.history.append(self.objObserv.get_obs())
         
         self.queue = np.delete(self.queue, curr_pose) # index)
         
@@ -923,6 +906,7 @@ class RequestQueue:
             })    
         
         return
+        
     
     def reqJockey(self, id_queue, req, which_customer, serv_rate):
         #id_queue=np.array([req.id for req in self.queue])
@@ -955,7 +939,7 @@ class RequestQueue:
             if curr_queue[t].customerid == customerid:
                 curr_pose = t
 
-
+		
         if expectedJockeyWait < self.estimateMarkovWaitingTime(len(dest_queue)+1, queue_intensity, req.time_entrance):
             np.delete(curr_queue, curr_pose) # np.where(id_queue==req_id)[0][0])
             reward = 1.0
@@ -965,14 +949,11 @@ class RequestQueue:
             
             print("\n I have moved ", customerid, " from ",curr_queue_id, " to ", alt_queue_id ,"\n Observation: ", self.objObserv.get_obs())
             
-            #obs_entry = self.objObserve(False,self.dict_servers_info[curr_queue_id], queue_intensity, decision,self.time-req.time_entrance, expectedJockeyWait, reward, curr_pose)
+            #obs_entry = self.objObserve(False,self.dict_servers_info[curr_queue_id], queue_intensity, decision,self.time-req.time_entrance, expectedJockeyWait, reward, curr_pose)        
             
-            #self.history = np.append(self.history,self.objObserve.get_obs()) #obs_entry)
-            #self.history.update({"ServerID":curr_queue_id,
-            #                    "Status":self.objObserv.get_obs()
-            #                })
-        
-            self.history.update({curr_queue_id:self.objObserv.get_obs()})
+            self.history.append(self.objObserv.get_obs())
+            
+            # print(" ********************** CURR HISTORY ************************** \n ", self.history)
             
             self.curr_obs_jockey.update({
 				"ServerID": curr_queue_id,
@@ -999,18 +980,13 @@ class RequestQueue:
             #        Do not use the local cloud delay
 
             reward = 0.0
-            self.objObserv.set_obs(curr_queue_id, False, self.dict_servers_info[curr_queue_id], queue_intensity, decision, self.time-req.time_entrance, expectedJockeyWait, reward, len(curr_queue))
-            
-            # print("\n", customerid," has RENEGED ", "\n Observation: ", self.objObserv.get_obs())
-            
-            #obs_entry = self.objObserve.get_obs()
+            self.objObserv.set_obs(curr_queue_id, False, self.dict_servers_info[curr_queue_id], queue_intensity, decision, self.time-req.time_entrance, expectedJockeyWait, reward, len(curr_queue))                       
+                      
             # self.history = np.append(self.history,self.objObserve.get_obs()) # obs_entry)
-            
-            #self.history.update({"ServerID":curr_queue_id,
-            #                    "Status":self.objObserv.get_obs()
-            #                })
 
-            self.history.update({curr_queue_id:self.objObserv.get_obs()})
+            # self.history.update(self.objObserv.get_obs()) #{curr_queue_id:self.objObserv.get_obs()})
+            
+            self.history.append(self.objObserv.get_obs())
             
             self.curr_obs_jockey.update({
 				"ServerID": curr_queue_id,
