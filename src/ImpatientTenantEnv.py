@@ -85,29 +85,38 @@ class ImpatientTenantEnv(gym.Env):
          
         queue_one_state = np.array([srv1, serv_rate_one, self.reward, self.action])
         queue_two_state = np.array([srv2, serv_rate_two, self.reward, self.action])
-        
+        			       
         #self.observation_space = spaces.Dict({
-         #       "ServerID": spaces.Text(7), 
-         #       "Status": 
-        self.observation_space = spaces.Dict ({
-		            "ServerID": spaces.Text(8),
-                    "Renege": spaces.Discrete(1),
-                    "ServRate": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
-                    "Intensity": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
-                    "Jockey": spaces.Discrete(1),
-                    "Waited": spaces.Box(low=-1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(7),
-                    "EndUtility": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), # spaces.Text(8),
-                    "Reward": spaces.Box(low=0.0,high=1.0, shape=(1,), dtype=np.float32), #spaces.Text(1),
-                    "QueueSize": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
-                })
+        #       "ServerID": spaces.Text(7), 
+        #       "Status":
+          
+        self.observation_space = spaces.Dict ({                                                               
+		    "ServerID": spaces.Box(low=1,high=2, shape=(1,), dtype=np.int16), #spaces.Text(8),
+            "Renege": spaces.Discrete(1),
+            "ServRate": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
+            "Intensity": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
+            "Jockey": spaces.Discrete(1),
+            "Waited": spaces.Box(low=-1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(7),
+            "EndUtility": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), # spaces.Text(8),
+            "Reward": spaces.Box(low=0.0,high=1.0, shape=(1,), dtype=np.float32), #spaces.Text(1),
+            "QueueSize": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
+        })
+       
                 
-         #       }, seed=42
-         #   )        
-	
-        #self.observation_space = spaces.Dict({ str(spaces.Text(7)): spaces.Dict ({"EndUtility": spaces.Text(8), "Intensity": spaces.Text(5), "Jockey": spaces.Discrete(1),												
-		#										"QueueSize": spaces.Text(5), "Renege": spaces.Discrete(1), "Reward": spaces.Text(1), "ServRate": spaces.Text(5),
-		#										"Waited": spaces.Text(7), 
-		#									})}, seed=42 )       
+       #self.observation_space = spaces.Dict ({
+	   #	                "ServerID": spaces.Text(8), 
+	   #	                "Status": spaces.Dict ({
+       #                     "Renege": spaces.Discrete(1),        
+       #                     "ServRate": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
+       #                     "Intensity": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
+       #                     "Jockey": spaces.Discrete(1),
+       #                     "Waited": spaces.Box(low=-1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(7),
+       #                     "EndUtility": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), # spaces.Text(8),
+       #                     "Reward": spaces.Box(low=0.0,high=1.0, shape=(1,), dtype=np.float32), #spaces.Text(1),
+       #                     "QueueSize": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
+       #                 })
+       #         })
+        
 
         """
         The following dictionary maps abstract actions from `self.action_space` to
@@ -173,12 +182,11 @@ class ImpatientTenantEnv(gym.Env):
         return self._action_to_state 
             
     
-    def reset(self, seed=None, options=None): # -> tuple[ObsType, dict[str, any]] :
-        # import secrets
+    def reset(self, seed=None, options=None): # -> tuple[ObsType, dict[str, any]] :       
 		
         # We need the following line to seed self.np_random
-        super().reset(seed=42)
-        
+        super().reset(seed=seed)
+        # print("\n COMPARED STUFF: ", self.requestObj.get_history())
        
         #_dict = {"ServerID": spaces.Text(8), "EndUtility": 0.0, "Intensity": 0.0, "Jockey": False,
         #            "QueueSize": 0.0, "Renege": False, "Reward": 0.0,  "ServRate": 0.0, "Waited": 0.0
@@ -193,10 +201,10 @@ class ImpatientTenantEnv(gym.Env):
         #    print("\n HISTORY RENEGED =====> ", self.requestObj.get_curr_obs_renege(), len(self.requestObj.get_curr_obs_renege()))
         #    observation =  dict(random.choices(list(self.requestObj.get_curr_obs_renege().items()),k=1))
 			
-        observation = random.choice(self.requestObj.get_history()) # secrets
+        observation = random.choice(self.history) # self.requestObj.get_history()) # secrets
         info = self._get_info()
                  
-        print("\n OBSERVED: ",observation)
+        # print("\n OBSERVED: ",observation, "\n HISTORY: ", self.history)
                
         return observation, info              
     

@@ -75,7 +75,7 @@ def main():
     MAX_EPISODES = 10000  # Max number of episodes
 
     
-    n_envs = 10
+    n_envs = 9 # 10
     n_updates = 1000
     n_steps_per_update = 128
     randomize_domain = False

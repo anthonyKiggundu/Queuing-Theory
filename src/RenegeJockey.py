@@ -200,7 +200,7 @@ class Request:
                 self.max_cloud_delay=stats.erlang.ppf(self.certainty,loc=0,scale=mean_interval,a=self.pos_in_queue)
         #if self.learning_mode=='truncation':
         #    decision=False
-        #elif self.learning_mode=='preemption':
+        # elif self.learning_mode=='preemption':
         #    decision=False
         #elif self.learning_mode=='transparent':
         #    decision=(self.max_local_delay<=self.max_cloud_delay)
@@ -248,7 +248,7 @@ class Request:
             reward = 1.0 
             dest_queue = np.append( dest_queue, req)
             obs_entry = self.objObserve(False,True,self.time-req.time_entrance, self.end_utility, len(curr_queue))#reward,req.min_amount_observations)
-            self.history = np.append(self.history,obs_entry)
+            # self.history = np.append(self.history,obs_entry)
             decision = True
             
         # ToDo:: There is also the case of the customer willing to take the risk
@@ -290,8 +290,14 @@ class Observations:
 
 
     def set_obs (self, queue_id, reneged, serv_rate, intensity, jockeyed, time_in_serv, utility, rewarded, curr_pose):
+        		
+        if queue_id == "Server1":
+            _id_ = 1
+        else:
+            _id_ = 2
+			
         self.obs = {
-			        "ServerID": queue_id,
+			        "ServerID": _id_, #queue_id,
                     "EndUtility":utility,
                     "Intensity":intensity,
                     "Jockey":jockeyed,
@@ -301,11 +307,27 @@ class Observations:
                     "ServRate":serv_rate,
                     "Waited":time_in_serv,
                 }
+              
+        
+			
+        """self.obs = [{
+			    "ServerID": _id_, #queue_id,
+			    "Status":{
+					"EndUtility":utility,
+					"Intensity":intensity,
+                    "Jockey":jockeyed,
+                    "QueueSize":curr_pose,
+                    "Renege":reneged,
+                    "Reward":rewarded,
+                    "ServRate":serv_rate,
+                    "Waited":time_in_serv,
+				}  
+			}] """      
 
 
     def get_obs (self):
         
-        return self.obs
+        return dict(self.obs)
 
 
 class RequestQueue:
@@ -333,8 +355,7 @@ class RequestQueue:
         self.min_amount_observations=int(min_amount_observations)
         self.dist_local_delay=dist_local_delay
         self.para_local_delay=list(para_local_delay)
-        # (False, serv_rate, queue_intensity, False,self.time-time_entrance,self.generateLocalCompUtility(req), reward, req.min_amount_observations)
-        # self.history = np.array([])
+        # (False, serv_rate, queue_intensity, False,self.time-time_entrance,self.generateLocalCompUtility(req), reward, req.min_amount_observations)       
         self.decision_rule=str(decision_rule)
         self.truncation_length=float(truncation_length)
         self.preempt_timeout=float(preempt_timeout)
@@ -552,7 +573,7 @@ class RequestQueue:
             else:
                 # print("\n Entry: ", entry[0])
                 q_selector = random.randint(1, 2)
-                print("  Serving a pending request...in queue ", q_selector)
+                # print("  Serving a pending request...in queue ", q_selector)
                 if q_selector == 1:
                     self.queueID = "Server1"
                     self.serveOneRequest(self.dict_queues_obj["Server1"][0], entry[0], self.queueID)
@@ -560,7 +581,7 @@ class RequestQueue:
                     self.queueID = "Server2"
                     self.serveOneRequest(self.dict_queues_obj["Server2"][0], entry[0], self.queueID)
 
-                print("  Wait to Broadcasting the updated queue information...")
+                # print("  Wait to Broadcasting the updated queue information...")
                 # print("\n ************* Times Entered ************** ", self.arr_prev_times)
                 # self.broadcastQueueInfo()
         return
@@ -879,7 +900,7 @@ class RequestQueue:
         # req = self.queue[index]
         reward = self.getRenegeRewardPenalty()
         #hstr_entry = self.objObserve(True,False,self.time-req.time_entrance,self.generateLocalCompUtility(req), reward, curr_pose)
-        print("\n INSIDE REQRENGE QUEUE IS ->", queueid)
+        # print("\n INSIDE REQRENGE QUEUE IS ->", queueid)
         self.objObserv.set_obs(queueid, True, serv_rate, queue_intensity, False,self.time-req.time_entrance,self.generateLocalCompUtility(req), reward, len(self.queue))
 
         for t in range(len(self.queue)):
@@ -893,17 +914,17 @@ class RequestQueue:
         self.queue = np.delete(self.queue, curr_pose) # index)
         
         
-        self.curr_obs_renege.update({
-			"ServerID": queueid, #self.queue,
-            "EndUtility": time_local_service,
-            "Intensity": queue_intensity,                                            
-            "Jockey": False,
-            "QueueSize": curr_pose,
-            "Renege": True,
-            "Reward": reward,
-            "ServRate": serv_rate,
-            "Waited": self.time-req.time_entrance  
-            })    
+        #self.curr_obs_renege.update({
+	    #	"ServerID": queueid, #self.queue,
+        #   "EndUtility": time_local_service,
+        #   "Intensity": queue_intensity,                                            
+        #    "Jockey": False,
+        #    "QueueSize": curr_pose,
+        #    "Renege": True,
+        #    "Reward": reward,
+        #    "ServRate": serv_rate,
+        #    "Waited": self.time-req.time_entrance  
+        #    })    
         
         return
         
@@ -947,25 +968,23 @@ class RequestQueue:
             decision = True            
             self.objObserv.set_obs(curr_queue_id, False, self.dict_servers_info[curr_queue_id], queue_intensity, decision,self.time-req.time_entrance, expectedJockeyWait, reward, len(curr_queue))
             
-            print("\n I have moved ", customerid, " from ",curr_queue_id, " to ", alt_queue_id ,"\n Observation: ", self.objObserv.get_obs())
+            # print("\n I have moved ", customerid, " from ",curr_queue_id, " to ", alt_queue_id ,"\n Observation: ", self.objObserv.get_obs())
             
             #obs_entry = self.objObserve(False,self.dict_servers_info[curr_queue_id], queue_intensity, decision,self.time-req.time_entrance, expectedJockeyWait, reward, curr_pose)        
             
-            self.history.append(self.objObserv.get_obs())
+            self.history.append(self.objObserv.get_obs())                      
             
-            # print(" ********************** CURR HISTORY ************************** \n ", self.history)
-            
-            self.curr_obs_jockey.update({
-				"ServerID": curr_queue_id,
-                "EndUtility": expectedJockeyWait,
-                "Intensity": queue_intensity,                                            
-                "Jockey": True,
-                "QueueSize": curr_pose,
-                "Renege": False,
-                "Reward": reward,
-                "ServRate": serv_rate,
-                "Waited": self.time-req.time_entrance  
-            }) 
+            #self.curr_obs_jockey.update({
+			#	"ServerID": curr_queue_id,
+            #    "EndUtility": expectedJockeyWait,
+            #    "Intensity": queue_intensity,                                            
+            #    "Jockey": True,
+            #    "QueueSize": curr_pose,
+            #    "Renege": False,
+            #    "Reward": reward,
+            #    "ServRate": serv_rate,
+            #    "Waited": self.time-req.time_entrance  
+            #}) 
             
             #print("\n Current Observation in Jockey: ", self.objObserve.get_obs())
 
@@ -986,19 +1005,21 @@ class RequestQueue:
 
             # self.history.update(self.objObserv.get_obs()) #{curr_queue_id:self.objObserv.get_obs()})
             
-            self.history.append(self.objObserv.get_obs())
+            self.history.append(self.objObserv.get_obs())                        
             
-            self.curr_obs_jockey.update({
-				"ServerID": curr_queue_id,
-                "EndUtility": expectedJockeyWait,
-                "Intensity": queue_intensity,                                            
-                "Jockey": False,
-                "QueueSize": len(dest_queue),
-                "Renege": False,
-                "Reward": reward,
-                "ServRate": serv_rate,
-                "Waited": self.time-req.time_entrance  
-            })
-
+            #self.curr_obs_jockey.update({
+			#	"ServerID": curr_queue_id,
+            #    "EndUtility": expectedJockeyWait,
+            #    "Intensity": queue_intensity,                                            
+            #    "Jockey": False,
+            #    "QueueSize": len(dest_queue),
+            #    "Renege": False,
+            #    "Reward": reward,
+            #    "ServRate": serv_rate,
+            #    "Waited": self.time-req.time_entrance  
+            #})
+        
+        # print(" ============================ CURR HISTORY ============================ \n ", self.history)
+        
         return decision
 
