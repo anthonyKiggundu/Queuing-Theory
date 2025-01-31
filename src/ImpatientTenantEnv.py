@@ -91,7 +91,7 @@ class ImpatientTenantEnv(gym.Env):
         #       "Status":
           
         self.observation_space = spaces.Dict ({                                                               
-		    "ServerID": spaces.Box(low=1,high=2, shape=(1,), dtype=np.int16), #spaces.Text(8),
+		    "ServerID": spaces.Box(low=1,high=2, shape=(1,), dtype=np.float32), #spaces.Text(8),
             "Renege": spaces.Discrete(1),
             "ServRate": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
             "Intensity": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
