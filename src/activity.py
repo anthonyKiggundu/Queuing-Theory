@@ -534,7 +534,7 @@ class RequestQueue:
         return self.customerid
 		
 
-    def estimateMarkovWaitingTimeOriginal(self, pos_in_queue): # Original
+    def estimateMarkovWaitingTime(self, pos_in_queue): # Original
         # print("   Estimating Markov waiting time...")
         # queue_indices=np.arange(pos_in_queue-1)+1
         
@@ -545,7 +545,7 @@ class RequestQueue:
         cdf=0        
         while cdf<=self.certainty:
             eff_srv=self.markov_model.integratedEffectiveFeature(samples, start_belief, self.get_server_rates())
-            print("\n ***** ", type(eff_srv), eff_srv)
+            # print("\n ***** ", type(eff_srv), eff_srv)
             cdf=1-sum((eff_srv**i*np.exp(-eff_srv)/np.math.factorial(i) for i in queue_indices))
             # print([eff_srv,cdf])
             samples+=1
@@ -556,7 +556,7 @@ class RequestQueue:
         return self.avg_delay
 
 
-    def estimateMarkovWaitingTime(self, pos_in_queue, queue_intensity, time_entered):
+    def estimateMarkovWaitingTimeVer2(self, pos_in_queue, queue_intensity, time_entered):
         """Calculate the amount after a certain time with exponential decay."""
         
         #print("\n WHY THE ZEROS: ", pos_in_queue, " *** " ,queue_intensity, " *** ", time_entered)
@@ -677,10 +677,12 @@ class RequestQueue:
     
     def get_renege_rate(self, curr_queue_id):
 		
-		history=results[0]
-		reneging_rate=len(np.where([(entry.reneged) for entry in self.history])[0])/len(self.history)
+        history=self.history[0]
+        print("\n RENEGES: ", self.curr_obs_renege)
+        print("\n HISTORY: ", self.history)
+        #reneging_rate=len(np.where([(entry.reneged) for entry in self.history])[0])/len(self.history)
 		
-		return reneging_rate
+        #return reneging_rate
 
 
     def processEntries(self,entries=np.array([]), batchid=np.int16):
@@ -827,7 +829,7 @@ class RequestQueue:
             self.customerid = self.get_customer_id()
             self.customerid = "Batch"+str(self.get_batch_id())+"_"+self.customerid
             queue_intensity = self.arr_rate/rate_srv1
-            expected_time_to_service_end = self.estimateMarkovWaitingTime(float(pose) , queue_intensity, time_entered)
+            expected_time_to_service_end = self.estimateMarkovWaitingTime(float(pose)) # , queue_intensity, time_entered)
             #time_local_service = self.generateLocalCompUtility(req)
 
         else:
@@ -837,7 +839,7 @@ class RequestQueue:
             self.customerid = "Batch"+str(self.get_batch_id())+"_"+self.customerid
             time_entered = self.time #self.estimateMarkovWaitingTime(lengthQueTwo)
             queue_intensity = self.arr_rate/rate_srv2
-            expected_time_to_service_end = self.estimateMarkovWaitingTime(float(pose), queue_intensity, time_entered)
+            expected_time_to_service_end = self.estimateMarkovWaitingTime(float(pose)) #, queue_intensity, time_entered)
             #time_local_service = self.generateLocalCompUtility(req)
             # time_entered, self.time
             
@@ -908,7 +910,7 @@ class RequestQueue:
         else:
             alt_queue_id = "1"
             curr_queue_state = self.get_queue_state(alt_queue_id)
-            renege_rate = self.get_renege_rate(self, curr_queue_id)
+            # renege_rate = self.get_renege_rate(self, curr_queue_id)
 			
             for client in range(len(curr_queue)):
                 req =  self.dict_queues_obj["2"][client]
@@ -916,7 +918,27 @@ class RequestQueue:
         
         return 
     
-
+    
+    def get_long_run_avg_service_time(self, queue_id):
+		
+        total_service_time = 0
+        total_served_requests = 0
+    
+        if queue_id == "1":
+            for req in self.dict_queues_obj["1"]:
+                total_service_time += req.exp_time_service_end
+                total_served_requests += 1
+        else:
+            for req in self.dict_queues_obj["2"]:
+                total_service_time += req.exp_time_service_end
+                total_served_requests += 1
+    
+        if total_served_requests == 0:
+            return 0
+    
+        return total_service_time / total_served_requests
+        
+        
     def get_queue_state(self, queueid):
 		
         rate_srv1,rate_srv2 = self.get_server_rates()        
@@ -924,12 +946,12 @@ class RequestQueue:
         if queueid == "1":		
             queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv1    
             customers_in_queue = self.dict_queues_obj["1"]   
-            renege_rate = self.get_renege_rate(self, queueid)                
+            renege_rate = self.get_renege_rate( queueid)                
             
             state = {
                 "total_customers": len(customers_in_queue),
                 "intensity": queue_intensity,
-                "capacity": self.capacity
+                "capacity": self.capacity,
                 "renege_rate": renege_rate
             }
         else:
@@ -937,7 +959,7 @@ class RequestQueue:
             queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv2            
 			#customers_in_queue = list(queue.queue)
             customers_in_queue = self.dict_queues_obj["2"]
-            renege_rate = self.get_renege_rate(self, queueid)
+            renege_rate = self.get_renege_rate( queueid)
 			
             state = {
                 "total_customers": len(customers_in_queue),
@@ -988,7 +1010,7 @@ class RequestQueue:
             self.objQueues.update_queue_status(queueID)
             # req, curr_queue_id, alt_queue_id, customerid, serv_rate
             # Any Customers interested in jockeying or reneging when a request is processed get_curr_obs_jockey
-            print("\n Inside Server 1, calling the  decision procedures")
+            #print("\n Inside Server 1, calling the  decision procedures")
             self.makeJockeyingDecision(req, self.queueID, "2", req.customerid, serv_rate)
             self.makeRenegingDecision(req, self.queueID)
 
@@ -1025,7 +1047,7 @@ class RequestQueue:
             self.objQueues.update_queue_status(queueID)
             
             # Any Customers interested in jockeying or reneging when a request is processed
-            print("\n Inside Server 2, calling the  decision procedures")
+            #print("\n Inside Server 2, calling the  decision procedures")
             self.makeJockeyingDecision(req, self.queueID, "1", req.customerid, serv_rate)# Server1
             self.makeRenegingDecision(req, self.queueID)
         
@@ -1214,7 +1236,7 @@ class RequestQueue:
         self.objObserv.set_renege_obs(curr_pose, queue_intensity, decision,time_local_service, time_to_service_end, reward, queueid, 0.0)
         
         self.curr_obs_renege.append(self.objObserv.get_renege_obs(queueid, queue_intensity, curr_pose))
-        # print("\n RENEGED OSERVED: => ", self.curr_obs_renege)
+        print("\n RENEGED OSERVED: => ", self.curr_obs_renege)
         
         self.curr_req = req
         
@@ -1229,13 +1251,14 @@ class RequestQueue:
             self.queue = self.dict_queues_obj["2"]
             
         for t in range(len(self.queue)):
-            print("\n ==> ", self.queue[t].customerid, customerid)
+            #print("\n ==> ", self.queue[t].customerid, customerid)
             
             if self.queue[t].customerid == customerid:
             #if req.customerid  # self.arr_rate
                 curr_pose = t
             else:
-                return
+                continue
+                #return
         
         np.delete(curr_queue_id, curr_pose) # np.where(id_queue==req_id)[0][0])
         reward = 1.0
@@ -1256,7 +1279,7 @@ class RequestQueue:
         reward = self.get_jockey_reward(req)
         
         
-        time_alt_queue = self.estimateMarkovWaitingTime(float(len(dest_queue)+1), queue_intensity, req.time_entrance)
+        time_alt_queue = self.estimateMarkovWaitingTime(float(len(dest_queue)+1)) #, queue_intensity, req.time_entrance)
                    
         # self.objObserv.set_obs(curr_queue_id, False, self.dict_servers_info[curr_queue_id], queue_intensity, decision,self.time-req.time_entrance, expectedJockeyWait, reward, len(dest_queue))            
         print("\n I have moved ", customerid, " from ",curr_queue_id, " to ", dest_queue_id ,"\n Time checks: expected vs. actual ", self.avg_delay ," ==== ",self.time-req.time_entrance) #self.objObserv.get_obs())                 
@@ -1301,7 +1324,7 @@ class RequestQueue:
                 curr_pose = t
 		
         #if expectedJockeyWait < self.estimateMarkovWaitingTime(len(dest_queue)+1, queue_intensity, req.time_entrance):
-        self.avg_delay = self.estimateMarkovWaitingTime(len(dest_queue)+1, queue_intensity, req.time_entrance)
+        self.avg_delay = self.estimateMarkovWaitingTime(len(dest_queue)+1) #, queue_intensity, req.time_entrance)
         
         self.curr_req = req
         # print("\n Jockeys Avg Delay: ", self.avg_delay)
