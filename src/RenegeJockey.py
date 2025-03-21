@@ -1478,20 +1478,120 @@ class RequestQueue:
         
 
 def main():
-	
-    utility_basic = 1.0
-    discount_coef = 0.1
-    requestObj = RequestQueue(utility_basic, discount_coef)
-    duration = 10
+    LR = .01  # Learning rate
+    SEED = None  # Random seed for reproducibility
+    MAX_EPISODES = 10000  # Max number of episodes
+
+    
+    n_envs = 9 # 10
+    n_updates = 1000
+    n_steps_per_update = 128
+    randomize_domain = False
+
+    # agent hyperparams
+    gamma = 0.999
+
+    lam = 0.95  # hyperparameter for GAE
+    ent_coef = 0.01  # coefficient for the entropy bonus (to encourage exploration)
+    actor_lr = 0.001
+    critic_lr = 0.005
+
+        # Note: the actor has a slower learning rate so that the value targets become
+        # more stationary and are theirfore easier to estimate for the critic
+
+        # environment setup
+    if randomize_domain:
+        env = gym.vector.AsyncVectorEnv(
+            [
+                lambda: gym.make(
+                    "ImpatientTenantEnv-v1",
+                    gravity=np.clip(
+                        np.random.normal(loc=-10.0, scale=1.0), a_min=-11.99, a_max=-0.01
+                    ),
+                    enable_wind=np.random.choice([True, False]),
+                    wind_power=np.clip(
+                        np.random.normal(loc=15.0, scale=1.0), a_min=0.01, a_max=19.99
+                    ),
+                    turbulence_power=np.clip(
+                        np.random.normal(loc=1.5, scale=0.5), a_min=0.01, a_max=1.99
+                    ),
+                    max_episode_steps=600,
+                )
+                for i in range(n_envs)
+            ]
+        )
+
+    else:	    
+        #if 'ImpatientTenantEnv-v1.0' in gym.registry.env_specs:
+        #    del gym.registry.env_specs['ImpatientTenantEnv-v1.0']
+        gym.envs.register(
+            id='ImpatientTenantEnv-v1.0',
+            entry_point='gym-examples.gym_examples.envs:ImpatientTenantEnv',
+            max_episode_steps=300,
+        )
+        
+        env = gym.vector.make('ImpatientTenantEnv-v1.0', num_envs=n_envs)
+        #env = gym.make_vec('ImpatientTenantEnv-v1.0', num_envs=n_envs)
+        
+        check_env(env, skip_render_check=True)
+        
+        observation, info = env.reset(seed=42)
+        
+        #print("\n *************** Making environment **************** ", observation)
+
+    #    envs = gym.vector.make("ImpatientTenantEnv-v1",critic_lr=critic_lr, actor_lr=actor_lr, random_seed=SEED,
+    #                                num_envs=n_envs, max_episode_steps=600)
+
+    
+    obs_shape = len(env.observation_space) #.shape[0]
+    action_shape = len(env.action_space.n)
+
+    # set the device
+    use_cuda = False
+    if use_cuda:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device("cpu")
+
+    # init the agent
+    agent = a2c(obs_shape, action_shape, device, critic_lr, actor_lr, n_envs)
+
+    # OrderedDict
+    #RequestQueue.run()    
+    
+    # Run one episode to get
+    # the model would need to be "run" in the environment.
+
+    # Init actor-critic agent
+    #agent = a2c() #gym.make('ImpatientTenantEnv-v1'), critic_lr=LR, actor_lr=LR, random_seed=SEED)
+    #a2c.setup()
+    agent.train_agent(env, n_envs, n_updates, n_steps_per_update, agent)
+    agent.run()
+    agent.update_parameters()
+
+    # Init optimizers
+    actor_optim = optim.Adam(agent.actor.parameters(), lr=LR)
+    critic_optim = optim.Adam(agent.critic.parameters(), lr=LR)
+
+    '''
+    r = []  # Array containing total rewards
+    avg_r = 0  # Value storing average reward over last 100 episodes
+    
+    '''
+
+    #utility_basic = 1.0
+    #discount_coef = 0.1
+    #requestObj = RequestQueue(utility_basic, discount_coef)
+    #duration = 10
     
     # Start the scheduler
-    scheduler_thread = threading.Thread(target=requestObj.run_scheduler)
-    scheduler_thread.start()
+    #scheduler_thread = threading.Thread(target=requestObj.run_scheduler)
+    #scheduler_thread.start()
     
-    requestObj.run(duration)   
+    #requestObj.run(duration)   
     
     # Plot the rates after the simulation
-    requestObj.plot_rates()             
+    #requestObj.plot_rates()             
 	 
 if __name__ == "__main__":
     main()
