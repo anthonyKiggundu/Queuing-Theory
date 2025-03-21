@@ -43,17 +43,20 @@ class ImpatientTenantEnv(gym.Env):
         time_entrance = 0.0
         pos_in_queue = 0
         self.history = {}
+        # self.exp_time_service_end = 
         self.queueObj = Queues()
         self.Observations = Observations()        
         
         self.endutil = 0.0 
         self.intensity = 0.0
-        self.jockey = False
+        self.jockey = 0.0 #False
         self.queuesize = 0.0
-        self.renege = False
+        self.renege = 0.0 #False
         self.reward = 0.0 
         self.servrate = 0.0
         self.waitingtime = 0.0
+        self.ren_state_after_action = {}
+        self.jock_state_after_action = {}
 
         # Observations are dictionaries with information about the state of the servers.
         # {EndUtility, Intensity, Jockey, QueueSize, Renege, Reward, ServRate, Waited}
@@ -65,6 +68,8 @@ class ImpatientTenantEnv(gym.Env):
         self.requestObj = RequestQueue(self.utility_basic, self.discount_coef)
         duration = 3
         self.requestObj.run(duration)
+        
+        self.QueueObj = Queues()
 
         self.queue_id = self.requestObj.get_curr_queue_id()
 
@@ -77,46 +82,27 @@ class ImpatientTenantEnv(gym.Env):
             low = srv2
             high = srv1            
 
-        self.action_space = spaces.Discrete(2) #MultiBinary(2, seed=42)
+        self.action_space = spaces.Discrete(2) # spaces.Box(low=0.0,high=1.0, shape=(1,), dtype=np.float32) # spaces.Discrete(2)
         
         self.history = self.requestObj.get_history()
 
         serv_rate_one, serv_rate_two = self.requestObj.get_server_rates()
          
-        queue_one_state = np.array([srv1, serv_rate_one, self.reward, self.action])
-        queue_two_state = np.array([srv2, serv_rate_two, self.reward, self.action])
-        			       
-        #self.observation_space = spaces.Dict({
-        #       "ServerID": spaces.Text(7), 
-        #       "Status":
+        #queue_one_state = np.array([srv1, serv_rate_one, self.reward, self.action])
+        #queue_two_state = np.array([srv2, serv_rate_two, self.reward, self.action])
           
         self.observation_space = spaces.Dict ({                                                               
 		    "ServerID": spaces.Box(low=1,high=2, shape=(1,), dtype=np.float32), #spaces.Text(8),
-            "Renege": spaces.Discrete(1),
-            "ServRate": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
-            "Intensity": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
-            "Jockey": spaces.Discrete(1),
+            "Renege": spaces.Box(low=0.0,high=1.0, shape=(1,), dtype=np.float32), # [true=1, false= 0] # spaces.Discrete(1), # 
+            "ServRate": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5), self.QueueObj.get_arrivals_rates()
+            "Intensity": spaces.Box(low=0.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
+            "Jockey": spaces.Box(low=0.0,high=1.0, shape=(1,), dtype=np.float32), # [true=1, false= 0] spaces.Discrete(1), spaces.Discrete(1), #
             "Waited": spaces.Box(low=-1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(7),
             "EndUtility": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), # spaces.Text(8),
             "Reward": spaces.Box(low=0.0,high=1.0, shape=(1,), dtype=np.float32), #spaces.Text(1),
             "QueueSize": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
         })
-       
-                
-       #self.observation_space = spaces.Dict ({
-	   #	                "ServerID": spaces.Text(8), 
-	   #	                "Status": spaces.Dict ({
-       #                     "Renege": spaces.Discrete(1),        
-       #                     "ServRate": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
-       #                     "Intensity": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
-       #                     "Jockey": spaces.Discrete(1),
-       #                     "Waited": spaces.Box(low=-1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(7),
-       #                     "EndUtility": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), # spaces.Text(8),
-       #                     "Reward": spaces.Box(low=0.0,high=1.0, shape=(1,), dtype=np.float32), #spaces.Text(1),
-       #                     "QueueSize": spaces.Box(low=1.0,high=np.inf, shape=(1,), dtype=np.float32), #spaces.Text(5),
-       #                 })
-       #         })
-        
+
 
         """
         The following dictionary maps abstract actions from `self.action_space` to
@@ -127,11 +113,9 @@ class ImpatientTenantEnv(gym.Env):
         # For now we set the values as below
 
         self._action_to_state = {
-            Actions.RENEGE.value: self.requestObj.get_curr_obs_renege(),
-            Actions.JOCKEY.value: self.requestObj.get_curr_obs_jockey(),
+            Actions.RENEGE.value: self.get_renege_action_outcome(), 
+            Actions.JOCKEY.value: self.get_jockey_action_outcome()
         }
-        
-       
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
@@ -153,96 +137,142 @@ class ImpatientTenantEnv(gym.Env):
 
     def _get_obs(self):
 		
-	    return {"ServerID": self.queue_id, "EndUtility": self.endutil, "Intensity": self.intensity, "Jockey": self.jockey,
-                    "QueueSize": self.queuesize, "Renege": self.renege, "Reward": self.reward,  "ServRate": self.servrate, "Waited": self.waitingtime
-               }
+        from gymnasium.vector.utils import create_empty_array
 		
-#        self.history = self.requestObj.get_history()
-#        keys = []
-#        values = []
-#        observ = {}
-#        print("\n ==============>> ", self.history)
-#        for k, v in self.history.items():
-#            if isinstance (v, OrderedDict):
-#                for j, l in v.items():
-#                    keys.append(keys, j)
-#                    values.append(values, l[0])
-#        
-#        observ["ServerID"] = self.requestObj.get_curr_queue_id()
-#        
-#        observ["Status"] = dict(zip(keys, values))
-#        
-#        print("\n ******* ", observ)
-#        
-#        return observ # self.history
+        n_envs = 9
+		
+        obs = create_empty_array(self.observation_space, n=n_envs, fn=np.zeros )        
 
-    
+        return obs
+	
+	
     def _get_info(self):
 
         return self._action_to_state 
+        
+        
+    def get_matched_dict(self):
+		
+        jockeyed_matched_dict = []           
+        reneged_matched_dict = []   
+                            
+        if "Server1" in self.queue_id:
+            _id_ = 1
+            self.queuesize = len(self.requestObj.get_curr_queue())
+        else:
+            _id_ = 2
+            self.queuesize = len(self.requestObj.get_curr_queue())
+		
+        #for item in self.history:
+        for item in self.requestObj.get_curr_obs_renege():
+            hist_id = item.get("ServerID")
+            size = item.get("QueueSize")           
+            #reneged = item.get("Renege")
+                                 
+            if "_reneged" in self.requestObj.customerid:
+                if size == self.queuesize and hist_id == _id_: # and reneged:
+                    reneged_matched_dict.append(item)
+                   
+        
+        for item in self.requestObj.get_curr_obs_jockey():
+            hist_id = item.get("ServerID")
+            size = item.get("QueueSize")
+            #jockeyed = item.get("Jockey")             
+            
+            if "_jockeyed" in self.requestObj.customerid:      
+                if size == self.queuesize and hist_id == _id_: # and jockeyed:            
+                    jockeyed_matched_dict.update(item)                
+                    
+        return reneged_matched_dict, jockeyed_matched_dict
             
     
-    def reset(self, seed=None, options=None): # -> tuple[ObsType, dict[str, any]] :       
+    def reset(self, seed=None, options=None): # -> tuple[ObsType, dict[str, any]] :    action_to_state    
 		
         # We need the following line to seed self.np_random
-        super().reset(seed=seed)
-        # print("\n COMPARED STUFF: ", self.requestObj.get_history())
-       
-        #_dict = {"ServerID": spaces.Text(8), "EndUtility": 0.0, "Intensity": 0.0, "Jockey": False,
-        #            "QueueSize": 0.0, "Renege": False, "Reward": 0.0,  "ServRate": 0.0, "Waited": 0.0
-        #		}        
+        super().reset(seed=seed) # seed  
+           			                             
+        observation = self.observation_space.sample()         
+        info = self._get_info()                                 
+                       
+        return observation, info
         
-        #observation =  dict(random.choices(list(self.history.items()),k=1)) #_dict # self._get_obs() # [0]
-        
-        #if len(self.requestObj.get_curr_obs_jockey()) > 0:
-        #    print("\n HISTORY JOCKEY =====> ", self.requestObj.get_curr_obs_jockey(), len(self.requestObj.get_curr_obs_jockey()))
-        #    observation =  dict(random.choices(list(self.requestObj.get_curr_obs_jockey().items()),k=1)) 
-        #elif len(self.requestObj.get_curr_obs_renege()) > 0:
-        #    print("\n HISTORY RENEGED =====> ", self.requestObj.get_curr_obs_renege(), len(self.requestObj.get_curr_obs_renege()))
-        #    observation =  dict(random.choices(list(self.requestObj.get_curr_obs_renege().items()),k=1))
-			
-        observation = random.choice(self.history) # self.requestObj.get_history()) # secrets
-        info = self._get_info()
-                 
-        # print("\n OBSERVED: ",observation, "\n HISTORY: ", self.history)
-               
-        return observation, info              
     
+    def get_renege_action_outcome(self):
+	    	
+        curr_state = self.requestObj.get_queue_curr_state()
+        # print("\n CURRENT STATE: ", curr_state, " TYPED =? ", type(curr_state))        
+        
+        srv = curr_state.get('ServerID')
+        # print("\n -----> ", self.requestObj.get_curr_obs_renege(srv))
+        # observed_srv = 
+        if srv == 1:
+            #outcome_jockey_action
+            if len(self.requestObj.get_curr_obs_renege(srv)) > 0:
+                curr_state['QueueSize'] = self.queuesize-1
+			    #queue_intensity = self.QueueObj.get_arrivals_rates()/srv1
+                curr_state["Reward"] = self.requestObj.get_curr_obs_renege(srv)['reward']
+			    #curr_state["Waited"] = requestObj.estimateMarkovWaitingTime(float(pose), queue_intensity, self.time)
+        else:
+            if len(self.requestObj.get_curr_obs_renege(srv)) > 0:		            
+                curr_state['QueueSize'] = self.queuesize-1
+			    #queue_intensity = self.QueueObj.get_arrivals_rates()/srv2
+                curr_state["Reward"] = self.requestObj.get_curr_obs_renege(srv)['reward']
+			    #requestObj.estimateMarkovWaitingTime(float(pose), queue_intensity, self.time)
+        
+        return curr_state
+        
+		
+    def get_jockey_action_outcome(self):                    
+    
+        curr_state = self.requestObj.get_queue_curr_state()        
+        
+        srv = curr_state.get('ServerID')
+        if srv == 1:
+            #outcome_jockey_action
+            if len(self.requestObj.get_curr_obs_jockey(srv)) > 0:
+                curr_state['QueueSize'] = self.queuesize+1
+                # queue_intensity = self.QueueObj.get_arrivals_rates()/srv1
+                curr_state["Reward"] = self.requestObj.get_curr_obs_jockey(srv)['reward']
+			    #curr_state["Waited"] = requestObj.estimateMarkovWaitingTime(float(pose), queue_intensity, self.time)
+        else:
+            if len(self.requestObj.get_curr_obs_jockey(srv)) > 0:		            
+                curr_state['QueueSize'] = self.queuesize+1
+                #queue_intensity = self.QueueObj.get_arrivals_rates()/srv2
+                curr_state["Reward"] = self.requestObj.get_curr_obs_jockey(srv)['reward'] 
+			    #requestObj.estimateMarkovWaitingTime(float(pose), queue_intensity, self.time),
+        
+        return curr_state
+        
     
     def step(self, action):
         # Map the action (element of {0,1,2,3}) to the direction we walk in
         # direction = self._action_to_direction[action]
-
-        hist = self.requestObj.get_history() # _curr
-
-        counter = 1
-        for act in action:
-
-            result_from_action = self._action_to_state.get(act)
-          
+                
         # An episode is done iff the agent has reached the target
         # In our case, an episode is done if the customer has left the queue
-        # ** or when a new batch of arrivals is being admitted to the queue **
-        # ?? Decision for terminate: If time queue wait is greater than local wait
-        # such that the tenant reneges -> terminate is true and a reward is given
-
+        
         # terminated = np.array_equal(self._agent_location, self._target_location)
-            if (hist[counter].get("EndUtility") < hist[counter].get("Waited")):
-                # According to the network 1 is when terminated and 0 for still running simulation
-                terminated = False #  True
-            else:
-                terminated = True # False
+        
+        # According to the network 1 is when terminated and 0 for still running simulation
+        
+        new_state = self._action_to_state[action] 
+        # Terminal state is if the next action returns a reward
+        # and that action leads to an empty queue.
+         
+        if new_state("QueueSize") > 0.0:
+            terminated = False #  True
+        else:
+            terminated = True # False
 
-            reward = 1 if terminated else 0  # Binary sparse rewards
-            observation = self._get_obs()
-            info = self._get_info()
+        #reward = 1 if terminated else 0  # Binary sparse rewards
+        reward = new_state['reward']
+        observation = self._get_obs()
+        info = self._get_info()
     
-            if self.render_mode == "human":
-                self._render_frame()
+        if self.render_mode == "human":
+            self._render_frame()
     
-            counter = counter + 1
+        counter = counter + 1
 
 
         return observation, reward, terminated, info  # False
-    
-
