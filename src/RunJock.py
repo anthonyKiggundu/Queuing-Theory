@@ -15,14 +15,258 @@ import gymnasium as gym
 import threading
 from tqdm import tqdm
 import MarkovStateMachine as msm
-from ImpTenEnv import ImpatientTenantEnv
+# from ImpTenEnv import ImpatientTenantEnv
 from a2c import ActorCritic, A2CAgent
 from timeit import default_timer as timer
 import matplotlib.pyplot as plt
 from gymnasium.utils.env_checker import check_env
-#from stable_baselines3.common.env_checker import check_env
-
+from enum import Enum
+import torch
+import torch.nn as nn
+import torch.optim as optim
 ###############################################################################
+
+#from RenegeJockey import RequestQueue, Queues, Observations
+
+
+class ActorCritic(nn.Module):
+    def __init__(self, state_dim, action_dim):
+        super(ActorCritic, self).__init__()
+        self.actor = nn.Sequential(
+            nn.Linear(state_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, action_dim),
+            nn.Softmax(dim=-1)
+        )
+        self.critic = nn.Sequential(
+            nn.Linear(state_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+
+    def forward(self, state):
+        action_probs = self.actor(state)
+        state_value = self.critic(state)
+        return action_probs, state_value
+        
+
+class A2CAgent:
+    def __init__(self, state_dim, action_dim, lr=0.001, gamma=0.99):
+        self.gamma = gamma
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")        
+        self.model = ActorCritic(state_dim, action_dim).to(self.device)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        self.log_probs = []
+        self.values = []
+        self.rewards = []
+
+    def select_action(self, state):
+		
+        if isinstance(state, dict):
+            state = np.concatenate([state[key].flatten() for key in state.keys()])
+            
+        state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        action_probs, state_value = self.model(state)
+        action_dist = torch.distributions.Categorical(action_probs)
+        action = action_dist.sample()
+        self.log_probs.append(action_dist.log_prob(action))
+        self.values.append(state_value)
+        return action.item()
+
+    def store_reward(self, reward):
+        self.rewards.append(reward)
+
+    def update(self):
+        R = 0
+        returns = []
+        for r in reversed(self.rewards):
+            R = r + self.gamma * R
+            returns.insert(0, R)
+
+        returns = torch.tensor(returns).to(self.device)
+        log_probs = torch.stack(self.log_probs).to(self.device)
+        values = torch.cat(self.values).to(self.device)
+        advantage = returns - values
+
+        actor_loss = -(log_probs * advantage.detach()).mean()
+        critic_loss = advantage.pow(2).mean()
+        loss = actor_loss + critic_loss
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        self.log_probs = []
+        self.values = []
+        self.rewards = []
+
+
+
+class Actions(Enum):
+    RENEGE = 0
+    JOCKEY = 1
+
+class ImpatientTenantEnv:
+    metadata = {"render_modes": ["ansi"], "render_fps": 4}
+
+    def __init__(self, render_mode=None):
+        self.queue_state = {}
+        self.action = ""  
+        self.utility_basic = 1.0
+        self.discount_coef = 0.1
+        self.history = {}
+        self.queueObj = Queues()
+        self.Observations = Observations()        
+        self.endutil = 0.0 
+        self.intensity = 0.0
+        self.jockey = 0.0
+        self.queuesize = 0.0
+        self.renege = 0.0
+        self.reward = 0.0 
+        self.servrate = 0.0
+        self.waitingtime = 0.0
+        self.ren_state_after_action = {}
+        self.jock_state_after_action = {}
+        self.requestObj = RequestQueue(self.utility_basic, self.discount_coef)
+        duration = 3
+        self.requestObj.run(duration)
+        self.QueueObj = Queues()
+        self.queue_id = self.requestObj.get_curr_queue_id()
+        srv1, srv2 = self.requestObj.get_queue_sizes()
+
+        if srv1 < srv2:
+            low = srv1
+            high = srv2
+        else:
+            low = srv2
+            high = srv1            
+
+        self.action_space = 2  # Number of discrete actions
+        self.history = self.requestObj.get_history()
+        serv_rate_one, serv_rate_two = self.requestObj.get_server_rates()
+
+        self.observation_space = {
+            "ServerID": (1, 2),
+            "Renege": (0.0, 1.0),
+            "ServRate": (1.0, np.inf),
+            "Intensity": (0.0, np.inf),
+            "Jockey": (0.0, 1.0),
+            "Waited": (-1.0, np.inf),
+            "EndUtility": (1.0, np.inf),
+            "Reward": (0.0, 1.0),
+            "QueueSize": (1.0, np.inf),
+        }
+
+        self._action_to_state = {
+            Actions.RENEGE.value: self.get_renege_action_outcome(), 
+            Actions.JOCKEY.value: self.get_jockey_action_outcome()
+        }
+
+        assert render_mode is None or render_mode in self.metadata["render_modes"]
+        self.render_mode = render_mode
+
+    def _get_obs(self):
+        obs = {key: np.zeros(1) for key in self.observation_space.keys()}
+        return obs
+
+    def _get_info(self):
+        return self._action_to_state 
+
+    def get_matched_dict(self):
+        jockeyed_matched_dict = []           
+        reneged_matched_dict = []   
+                             
+        if "Server1" in self.queue_id:
+            _id_ = 1
+            self.queuesize = len(self.requestObj.get_curr_queue())
+        else:
+            _id_ = 2
+            self.queuesize = len(self.requestObj.get_curr_queue())
+        
+        for item in self.requestObj.get_curr_obs_renege():
+            hist_id = item.get("ServerID")
+            size = item.get("QueueSize")           
+            if "_reneged" in self.requestObj.customerid:
+                if size == self.queuesize and hist_id == _id_:
+                    reneged_matched_dict.append(item)
+                    
+        for item in self.requestObj.get_curr_obs_jockey():
+            hist_id = item.get("ServerID")
+            size = item.get("QueueSize")
+            if "_jockeyed" in self.requestObj.customerid:      
+                if size == self.queuesize and hist_id == _id_:            
+                    jockeyed_matched_dict.update(item)                
+                    
+        return reneged_matched_dict, jockeyed_matched_dict
+
+    def reset(self, seed=None, options=None):
+        random.seed(seed)
+        np.random.seed(seed)
+        observation = self._get_obs()         
+        info = self._get_info()                                 
+        return observation, info
+
+    def get_renege_action_outcome(self):
+        curr_state = self.requestObj.get_queue_curr_state()
+        srv = curr_state.get('ServerID')
+        
+        if srv == 1:
+            if len(self.Observations.get_curr_obs_renege(srv)) > 0:
+                curr_state['QueueSize'] = self.queuesize - 1
+                curr_state["Reward"] = self.Observations.get_curr_obs_renege(srv)[0]['reward']
+        else:
+            if len(self.Observations.get_curr_obs_renege(srv)) > 0:
+                curr_state['QueueSize'] = self.queuesize - 1
+                curr_state["Reward"] = self.Observations.get_curr_obs_renege[0]['reward']
+        return curr_state
+        
+
+    def get_jockey_action_outcome(self):
+        curr_state = self.requestObj.get_queue_curr_state()
+        srv = curr_state.get('ServerID')
+        
+        if srv == 1:
+            if len(self.Observations.get_curr_obs_jockey(srv)) > 0:
+                curr_state['QueueSize'] = self.queuesize + 1
+                curr_state["Reward"] = self.Observations.get_curr_obs_jockey(srv)[0]['reward']
+        else:
+            if len(self.Observations.get_curr_obs_jockey(srv)) > 0:
+                curr_state['QueueSize'] = self.queuesize + 1
+                curr_state["Reward"] = self.Observations.get_curr_obs_jockey(srv)[0]['reward']
+        return curr_state
+        
+
+    def step(self, action):
+        new_state = self._action_to_state[action]
+        terminated = new_state["QueueSize"] <= 0.0
+        reward = new_state['Reward']
+        observation = self._get_obs()
+        info = self._get_info()
+        flattened_observation = np.concatenate([observation[key].flatten() for key in observation.keys()])
+
+        if self.render_mode == "human":
+            self._render_frame()
+        
+        return flattened_observation, reward, terminated, info        
+
+ 
+    def get_state_action_info(self):
+        state_action_info = {
+            "state": self._get_obs(),
+            "action_to_state": self._action_to_state
+        }
+        return state_action_info
+        
+
+    def get_raw_server_status(self):
+        raw_server_status = {
+            "queue_id": self.queue_id,
+            "queuesize": self.queuesize,
+            "servrate": self.servrate,
+            "waitingtime": self.waitingtime
+        }
+        return raw_server_status
+
 
 class Queues(object):
     def __init__(self):
@@ -379,11 +623,11 @@ class Observations:
         
     def get_renege_obs(self, queueid, queue): # , intensity, pose): # get_curr_obs_renege
 		
-        # renegs = sum(1 for req in queue if '_reneged' in req.customerid)
+        renegs = sum(1 for req in queue if '_reneged' in req.customerid)
         			    
         # print("\n Num Reneged in ", queueid, "is =", renegs)
 	    
-        return self.curr_obs_renege 
+        return renegs #self.curr_obs_renege 
   
         
     def set_jockey_obs(self, curr_pose, queue_intensity, jockeyed, time_alt_queue, time_to_service_end, reward, queueid, activity):
@@ -506,18 +750,16 @@ class RequestQueue:
         
         return
     
-    
     def enqueue(self, request, use_nn=False):
-        """Adds a request to the queue and subscribes it to NN or queue states."""
         if len(self.queue) < self.capacity:
             self.queue.append(request)
             if use_nn:
-                self.nn_subscribers.append(request)  # NN-based decision-making
+                self.nn_subscribers.append(request)
             else:
-                self.state_subscribers.append(request)  # Only queue state updates
+                self.state_subscribers.append(request)
             return True
         return False
-    
+        
         
     def compute_reneging_rate(self, queue):
         """Compute the reneging rate for a given queue."""
@@ -623,11 +865,11 @@ class RequestQueue:
         if progress_bar!=None:
             loop=tqdm(range(steps),leave=False,desc='     Current run')
         else:
-            loop=range(steps)
-         
-        self.arr_rate = self.objQueues.get_arrivals_rates()
+            loop=range(steps)                 
         
         for i in loop:
+            self.arr_rate = self.objQueues.get_arrivals_rates()
+			
             if progress_log:
                 print("Step",i,"/",steps)
             # ToDo:: is line below the same as the update_parameters() in the a2c.py    
@@ -941,7 +1183,37 @@ class RequestQueue:
         action, _, _, _ = self.select_action(state_tensor)
         
         return {"action": action.cpu().numpy(), "nn_based": True}
-        
+    
+    
+    def dispatch(self, use_nn):
+        """
+        Dispatch state-action information or raw server status based on the use_nn flag.
+        """
+        if use_nn:
+            self.dispatch_nn_based_requests()
+        else:
+            self.dispatch_raw_server_status_requests()
+            
+
+    def dispatch_nn_based_requests(self):
+        """
+        Dispatch state-action information to NN-based subscribers.
+        """
+        for req in self.nn_subscribers:
+            state_action_info = env.get_state_action_info()
+            # Add logic to send state_action_info to the request
+            print(f"Dispatching state-action info to request {req.customerid}: {state_action_info}")
+            
+
+    def dispatch_raw_server_status_requests(self):
+        """
+        Dispatch raw server status information to state-based subscribers.
+        """
+        for req in self.state_subscribers:
+            raw_server_status = env.get_raw_server_status()
+            # Add logic to send raw_server_status to the request
+            print(f"Dispatching raw server status to request {req.customerid}: {raw_server_status}")
+       
     
     def dispatch_all_queues(self):
         """
@@ -960,9 +1232,21 @@ class RequestQueue:
             self.dispatch_data[f"server_{queue_id}"]["reneging_rate"].append(reneging_rate)
             self.dispatch_data[f"server_{queue_id}"]["service_rate"].append(serv_rate)
             
-            print(f"Server {queue_id} - Num requests: {num_requests}, Jockeying rate: {jockeying_rate}, Reneging rate: {reneging_rate}, Service rate: {serv_rate}")                
+            print(f"Server {queue_id} - Num requests: {num_requests}, Jockeying rate: {jockeying_rate}, Reneging rate: {reneging_rate}, Service rate: {serv_rate}")   
             
-
+        self.dispatch(use_nn=True)  # Dispatch NN-based information
+        self.dispatch(use_nn=False)  # Dispatch raw server status information             
+            
+        
+    def setup_dispatch_intervals(self):
+        """
+        Set up the intervals for dispatching the queue status information.
+        """
+        # schedule.every(10).seconds.do(self.dispatch_all_queues)
+        # schedule.every(30).seconds.do(self.dispatch_all_queues)
+        schedule.every(60).seconds.do(self.dispatch_all_queues)       
+            
+            
     def plot_rates(self):
         """
         Plot the jockeying and reneging rates over time.
@@ -1064,13 +1348,6 @@ class RequestQueue:
             
         return state
 
-
-    # Run the scheduler in the background
-    #def run_scheduler(self):
-    #    while True:
-    #        schedule.run_pending()
-    #        time.sleep(1)
-  
 
     def serveOneRequest(self, queueID): # to_delete, serv_time, 
         #randomly select which queue to process at a time t+1
@@ -1505,18 +1782,28 @@ class RequestQueue:
 
 def main():       
 	
-    # Example usage
+    utility_basic = 1.0
+    discount_coef = 0.1
+    requestObj = RequestQueue(utility_basic, discount_coef)
     env = ImpatientTenantEnv()
+    duration = 10
+    
+    # Start the scheduler
+    scheduler_thread = threading.Thread(target=requestObj.run_scheduler)
+    scheduler_thread.start()
+        
+    requestObj.run(duration)
+    
     state_dim = len(env.observation_space)
     action_dim = env.action_space
 
     agent = A2CAgent(state_dim, action_dim)
 
-    for episode in range(1000):
+    for episode in range(100):
         state, info = env.reset(seed=42)
         total_reward = 0
 
-        for t in range(1000):
+        for t in range(100):
             action = agent.select_action(state)
             next_state, reward, done, info = env.step(action)
             agent.store_reward(reward)
