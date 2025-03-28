@@ -1,5 +1,5 @@
 ###############################################################################
-# Author: anthony.kiggundu@dfki.de
+# Author: anthony.kiggundu
 ###############################################################################
 from collections import OrderedDict
 import numpy as np
