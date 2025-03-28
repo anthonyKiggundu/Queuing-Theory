@@ -38,7 +38,10 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+################################## Globals ####################################
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+global actor_critic
+
 
 class ActorCritic(nn.Module):
     def __init__(self, state_dim, action_dim):
@@ -139,22 +142,22 @@ class ImpatientTenantEnv:
         self.ren_state_after_action = {}
         self.jock_state_after_action = {}
         self.requestObj = RequestQueue(self.utility_basic, self.discount_coef)
-        duration = 3
-        self.requestObj.run(duration)
+        #duration = 3
+        #self.requestObj.run(duration)
         self.QueueObj = Queues()
         self.queue_id = self.requestObj.get_curr_queue_id()
-        srv1, srv2 = self.requestObj.get_queue_sizes()
+        # srv1, srv2 = self.requestObj.get_queue_sizes()
 
-        if srv1 < srv2:
-            low = srv1
-            high = srv2
-        else:
-            low = srv2
-            high = srv1            
+        #if srv1 < srv2:
+        #    low = srv1
+        #    high = srv2
+        #else:
+        #    low = srv2
+        #    high = srv1            
 
         self.action_space = 2  # Number of discrete actions
         self.history = self.requestObj.get_history()
-        serv_rate_one, serv_rate_two = self.requestObj.get_server_rates()
+        #serv_rate_one, serv_rate_two = self.requestObj.get_server_rates()
 
         self.observation_space = {
             "ServerID": (1, 2),
@@ -183,36 +186,9 @@ class ImpatientTenantEnv:
         
 
     def _get_info(self):
+		
         return self._action_to_state 
         
-
-    def get_matched_dict(self):
-        jockeyed_matched_dict = []           
-        reneged_matched_dict = []   
-                             
-        if "Server1" in self.queue_id:
-            _id_ = 1
-            self.queuesize = len(self.requestObj.get_curr_queue())
-        else:
-            _id_ = 2
-            self.queuesize = len(self.requestObj.get_curr_queue())
-        
-        for item in self.requestObj.get_curr_obs_renege():
-            hist_id = item.get("ServerID")
-            size = item.get("QueueSize")           
-            if "_reneged" in self.requestObj.customerid:
-                if size == self.queuesize and hist_id == _id_:
-                    reneged_matched_dict.append(item)
-                    
-        for item in self.requestObj.get_curr_obs_jockey():
-            hist_id = item.get("ServerID")
-            size = item.get("QueueSize")
-            if "_jockeyed" in self.requestObj.customerid:      
-                if size == self.queuesize and hist_id == _id_:            
-                    jockeyed_matched_dict.update(item)                
-                    
-        return reneged_matched_dict, jockeyed_matched_dict
-
 
     def reset(self, seed=None, options=None):
         random.seed(seed)
@@ -736,10 +712,14 @@ class RequestQueue:
         self.uses_nn = random.choice([True, False])
 
         self.arr_prev_times = np.array([])
+        
 
         self.objQueues = Queues()
         self.objRequest = Request(self.uses_nn,time)
         self.objObserv = Observations()
+        # self.env = ImpatientTenantEnv()
+        #state_dim, action_dim = self.getStateActionDims()
+        #self.actor_critic = ActorCritic(state_dim, action_dim).to(device)
 
         self.dict_queues_obj = self.objQueues.get_dict_queues()
         self.dict_servers_info = self.objQueues.get_dict_servers()
@@ -796,7 +776,20 @@ class RequestQueue:
             return True
         return False
         
+    
+    #def getActCritNet(self):
+		
+    #    return self.actor_critic
+		
+		
+    #def getStateActionDims(self):
+		
+    #    state_dim = len(ImpatientTenantEnv().observation_space)
+    #    action_dim = ImpatientTenantEnv().action_space
         
+    #    return state_dim, action_dim
+		
+       
     def compute_reneging_rate(self, queue):
         """Compute the reneging rate for a given queue."""
         renegs = sum(1 for req in queue if '_reneged' in req.customerid)
@@ -820,7 +813,7 @@ class RequestQueue:
         lst_srv2 = []        
         
         for hist in self.history:
-            #print("\n ID => ", hist.get('ServerID'), " GIVEN ID: ",queueid) integratedEffectiveFeature
+            
             if str(hist.get('ServerID')) == str(queueid):
                 lst_srv1.append(hist)
                 #print("\n +++++ ", list(lst_srv1))
@@ -1237,7 +1230,7 @@ class RequestQueue:
         #state = self.get_queue_observation(req.queue_id)
         """Uses AI model to decide whether to renege or jockey."""
         state_tensor = torch.tensor(list(queue_state.values()), dtype=torch.float32).to(device)
-        action, _, _, _ = actor_critic.select_action(state_tensor)                  
+        action, _, _, _ = self.actor_critic.select_action(state_tensor)                  
         
         return {"action": action.cpu().numpy(), "nn_based": True}
     
@@ -1622,10 +1615,10 @@ class RequestQueue:
         return max_cloud_delay
         
         
-    def log_action(self, action):
+    def log_action(self, action, req, queueid):
         """Logs the request action to the file."""
         
-        logging.info("", extra={"request_id": self.request_id, "queue_id": self.queue_id, "action": action})
+        logging.info("", extra={"request_id": req.customerid, "queue_id": queueid, "action": action})
         
         
     def makeRenegingDecision(self, req, queueid):
@@ -1725,7 +1718,7 @@ class RequestQueue:
         
             req.customerid = req.customerid+"_reneged"
             
-            self.log_action("Reneged")
+            self.log_action("Reneged", req, queueid)
 
         # In the case of reneging, you only get a reward if the time.entrance plus
         # the current time minus the time _to_service_end is greater than the time_local_service
@@ -1795,7 +1788,7 @@ class RequestQueue:
             # print("\n Moving ", customerid," from Server ",curr_queue_id, " to Server ", dest_queue_id ) 
             print(colored("%s", 'green') % (req.customerid) + " in Server %s" %(curr_queue_id) + " jockeying now, to Server %s" % (colored(dest_queue_id,'green')))                      
             
-            self.log_action(f"Jockeyed to Queue {dest_queue_id}")
+            self.log_action(f"Jockeyed", req, dest_queue_id)
             
             self.objObserv.set_jockey_obs(curr_pose, queue_intensity, decision, exp_delay, req.exp_time_service_end, reward, 1.0, "jockeyed") # time_alt_queue        
             # self.curr_obs_jockey.append(self.objObserv.get_jockey_obs(curr_queue_id, queue_intensity, curr_pose))
@@ -1867,8 +1860,13 @@ def main():
     
     state_dim = len(env.observation_space)
     action_dim = env.action_space
+    # state_dim, action_dim = requestObj.getStateActionDims()
 
-    agent = A2CAgent(state_dim, action_dim)
+    agent = A2CAgent(state_dim, action_dim)    
+    
+    # Instantiate the ActorCritic class
+    # actor_critic = requestObj.getActCritNet()    
+    actor_critic = ActorCritic(state_dim, action_dim).to(device)
 
     for episode in range(100):
         state, info = env.reset(seed=42)
