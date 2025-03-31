@@ -1,5 +1,5 @@
 ###############################################################################
-# Author: anthony.kiggundu
+# Author: anthony.kiggundu@dfki.de
 ###############################################################################
 from collections import OrderedDict
 import numpy as np
@@ -15,7 +15,7 @@ import gymnasium as gym
 import threading
 from tqdm import tqdm
 import MarkovStateMachine as msm
-# from ImpTenEnv import ImpatientTenantEnv
+from ImpTenEnv import ImpatientTenantEnv
 from a2c import ActorCritic, A2CAgent
 from timeit import default_timer as timer
 import matplotlib.pyplot as plt
@@ -40,7 +40,10 @@ logging.basicConfig(
 
 ################################## Globals ####################################
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-global actor_critic
+env = ImpatientTenantEnv()
+
+state_dim = len(env.observation_space)
+action_dim = env.action_space
 
 
 class ActorCritic(nn.Module):
@@ -73,6 +76,7 @@ class A2CAgent:
         self.log_probs = []
         self.values = []
         self.rewards = []
+        
 
     def select_action(self, state):
 		
@@ -89,6 +93,7 @@ class A2CAgent:
 
     def store_reward(self, reward):
         self.rewards.append(reward)
+        
 
     def update(self):
         R = 0
@@ -115,10 +120,10 @@ class A2CAgent:
         self.rewards = []
 
 
-
 class Actions(Enum):
     RENEGE = 0
     JOCKEY = 1
+    
 
 class ImpatientTenantEnv:
     metadata = {"render_modes": ["ansi"], "render_fps": 4}
@@ -143,9 +148,8 @@ class ImpatientTenantEnv:
         self.jock_state_after_action = {}
         self.requestObj = RequestQueue(self.utility_basic, self.discount_coef)
         #duration = 3
-        #self.requestObj.run(duration)
-        self.QueueObj = Queues()
-        self.queue_id = self.requestObj.get_curr_queue_id()
+        #self.requestObj.run(duration)        
+        # self.queue_id = self.requestObj.get_curr_queue_id()
         # srv1, srv2 = self.requestObj.get_queue_sizes()
 
         #if srv1 < srv2:
@@ -247,6 +251,7 @@ class ImpatientTenantEnv:
             "state": self._get_obs(),
             "action_to_state": self._action_to_state
         }
+        
         return state_action_info
         
 
@@ -377,6 +382,7 @@ class Request:
         self.uses_nn = uses_nn
         self.reneged = False
         self.jockeyed = False
+        self.actor_critic = None # ""
 
         if (self.certainty<=0) or (self.certainty>=1):
             raise ValueError('Invalid outage risk threshold! Please select between (0,1)')
@@ -727,9 +733,15 @@ class RequestQueue:
         self.reward = 0.0
         self.curr_state = {} # ["Busy","Empty"]
 
-        self.arr_rate = 0.0 #self.objQueues.get_arrivals_rates()
-
-        # self.objObserve = Observations()
+        self.arr_rate = self.objQueues.get_arrivals_rates()
+        # self.arr_rate = self.objQueues.get_arrivals_rates()
+        
+        self.setActCritNet(state_dim, action_dim)
+        self.actor_critic = self.getActCritNet()
+        
+        self.setAgent(state_dim, action_dim)
+        self.agent = self.getAgent()
+        
         self.all_times = []
         self.all_serv_times = []
         self.queueID = ""
@@ -774,20 +786,27 @@ class RequestQueue:
             else:
                 self.state_subscribers.append(request)
             return True
-        return False
+        return False        
+		
+	
+    def setActCritNet(self, state_dim, action_dim):
+		
+        self.actor_critic = ActorCritic(state_dim, action_dim).to(device)
+        
+        
+    def setAgent(self, state_dim, action_dim):
+		    
+        self.agent =  A2CAgent(state_dim, action_dim)
+        
+		
+    def getActCritNet(self):		       
+        
+        return self.actor_critic
         
     
-    #def getActCritNet(self):
-		
-    #    return self.actor_critic
-		
-		
-    #def getStateActionDims(self):
-		
-    #    state_dim = len(ImpatientTenantEnv().observation_space)
-    #    action_dim = ImpatientTenantEnv().action_space
+    def getAgent(self):		       
         
-    #    return state_dim, action_dim
+        return self.agent 
 		
        
     def compute_reneging_rate(self, queue):
@@ -815,23 +834,23 @@ class RequestQueue:
         for hist in self.history:
             
             if str(hist.get('ServerID')) == str(queueid):
-                lst_srv1.append(hist)
-                #print("\n +++++ ", list(lst_srv1))
+                lst_srv1.append(hist)                
                 return lst_srv1
             else:
-                lst_srv2.append(hist)
-                #print("\n **** ", list(lst_srv2)) position
+                lst_srv2.append(hist)                
                 return lst_srv2
 		
 		   
     def get_queue_curr_state(self):
-		
-        if self.queueID == "1":
-			# if len(self.get_matching_entries(self.queueID) > 0):
-            self.curr_state = self.get_matching_entries(self.queueID)[-1]
+        matching_entries = self.get_matching_entries(self.queueID)
+        print(f"Matching entries for queueID {self.queueID}: {matching_entries}")
+
+        if not matching_entries:
+            print("No matching entries found.")
+            self.curr_state = {}
         else:
-            self.curr_state = self.get_matching_entries(self.queueID)[-1]
-						
+            self.curr_state = matching_entries[-1]
+    
         return self.curr_state
 		
 		
@@ -888,7 +907,7 @@ class RequestQueue:
         return new_history
 
 
-    def run(self,duration,progress_bar=True,progress_log=False):
+    def run(self,duration, progress_bar=True,progress_log=False):
         steps=int(duration/self.time_res)
     
         if progress_bar!=None:
@@ -897,7 +916,7 @@ class RequestQueue:
             loop=range(steps)                 
         
         for i in loop:
-            self.arr_rate = self.objQueues.get_arrivals_rates()
+            # 
 			
             if progress_log:
                 print("Step",i,"/",steps)
@@ -964,10 +983,15 @@ class RequestQueue:
 		
     def get_all_service_times(self):
         
-        return self.all_serv_times        
+        return self.all_serv_times  
+        
+        
+    def set_curr_state_of_queues(self, queueid):
+		
+        pass     
 		
 
-    def processEntries(self,entries=np.array([]), batchid=np.int16): # =np.int16
+    def processEntries(self,entries=np.array([]), batchid=np.int16): # =np.int16 , actor_critic=actor_critic
         
         num_iterations = random.randint(1, 5)  # Random number of iterations between 1 and 5
         
@@ -1230,7 +1254,7 @@ class RequestQueue:
         #state = self.get_queue_observation(req.queue_id)
         """Uses AI model to decide whether to renege or jockey."""
         state_tensor = torch.tensor(list(queue_state.values()), dtype=torch.float32).to(device)
-        action, _, _, _ = self.actor_critic.select_action(state_tensor)                  
+        action, _, _, _ = self.agent.select_action(state_tensor)  # self.actor_critic.select_action(state_tensor)                  
         
         return {"action": action.cpu().numpy(), "nn_based": True}
     
@@ -1418,11 +1442,11 @@ class RequestQueue:
 
         # Store the experience for RL training
         state = self.get_queue_observation(queueID)
-        action = self.actor_critic.select_action(state)
-        self.actor_critic.store_reward(reward)
+        action = actor_critic.select_action(state)
+        actor_critic.store_reward(reward)
 
         # Train RL model after each request is processed
-        self.actor_critic.update()
+        actor_critic.update()
 
         # Dispatch updated queue state
         self.dispatch_queue_state(queue, queueID, self.dict_queues_obj["1" if queueID == "2" else "2"])
@@ -1842,31 +1866,32 @@ class RequestQueue:
         #        such that reneging returns more loss than the jockeying decision
 
         return decision
-        
+       
 
 def main():       
 	
     utility_basic = 1.0
     discount_coef = 0.1
     requestObj = RequestQueue(utility_basic, discount_coef)
-    env = ImpatientTenantEnv()
+    # env = ImpatientTenantEnv()
     duration = 10
     
     # Start the scheduler
     scheduler_thread = threading.Thread(target=requestObj.run_scheduler)
     scheduler_thread.start()
+    
+    actor_critic = requestObj.getActCritNet() 
         
     requestObj.run(duration)
     
-    state_dim = len(env.observation_space)
-    action_dim = env.action_space
-    # state_dim, action_dim = requestObj.getStateActionDims()
+    #state_dim = len(env.observation_space)
+    #action_dim = env.action_space            
 
     agent = A2CAgent(state_dim, action_dim)    
     
     # Instantiate the ActorCritic class
-    # actor_critic = requestObj.getActCritNet()    
-    actor_critic = ActorCritic(state_dim, action_dim).to(device)
+    
+    #actor_critic = ActorCritic(state_dim, action_dim).to(device)
 
     for episode in range(100):
         state, info = env.reset(seed=42)
