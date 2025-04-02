@@ -79,17 +79,23 @@ class A2CAgent:
         
 
     def select_action(self, state):
-		
+        print("\n -->> ", state)
         if isinstance(state, dict):
             state = np.concatenate([state[key].flatten() for key in state.keys()])
             
-        state = torch.FloatTensor(state).unsqueeze(0).to(device)
+        # If state is not a tensor, create one; otherwise, use it as is.
+        if not isinstance(state, torch.Tensor):
+            state = torch.FloatTensor(state)
+            
+        # state = torch.FloatTensor(state).unsqueeze(0).to(device)
+        state = state.unsqueeze(0).to(device)
         action_probs, state_value = self.model(state)
         action_dist = torch.distributions.Categorical(action_probs)
         action = action_dist.sample()
         self.log_probs.append(action_dist.log_prob(action))
         self.values.append(state_value)
         return action.item()
+        
 
     def store_reward(self, reward):
         self.rewards.append(reward)
@@ -149,7 +155,7 @@ class ImpatientTenantEnv:
         self.requestObj = RequestQueue(self.utility_basic, self.discount_coef)
         #duration = 3
         #self.requestObj.run(duration)        
-        # self.queue_id = self.requestObj.get_curr_queue_id()
+        self.queue_id = self.requestObj.get_curr_queue_id()
         # srv1, srv2 = self.requestObj.get_queue_sizes()
 
         #if srv1 < srv2:
@@ -176,8 +182,8 @@ class ImpatientTenantEnv:
         }
 
         self._action_to_state = {
-            Actions.RENEGE.value: self.get_renege_action_outcome(), 
-            Actions.JOCKEY.value: self.get_jockey_action_outcome()
+            Actions.RENEGE.value: self.get_renege_action_outcome(self.queue_id), 
+            Actions.JOCKEY.value: self.get_jockey_action_outcome(self.queue_id)
         }
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
@@ -186,6 +192,7 @@ class ImpatientTenantEnv:
 
     def _get_obs(self):
         obs = {key: np.zeros(1) for key in self.observation_space.keys()}
+        print("\n Observed: ", obs)
         return obs
         
 
@@ -202,33 +209,33 @@ class ImpatientTenantEnv:
         return observation, info
 
 
-    def get_renege_action_outcome(self):
-        curr_state = self.requestObj.get_queue_curr_state()
+    def get_renege_action_outcome(self, queue_id):
+        curr_state = self.requestObj.get_queue_state(queue_id) # get_queue_curr_state()
         srv = curr_state.get('ServerID')
         
         if srv == 1:
-            if len(self.Observations.get_curr_obs_renege(srv)) > 0:
-                curr_state['QueueSize'] = self.queuesize - 1
-                curr_state["Reward"] = self.Observations.get_curr_obs_renege(srv)[0]['reward']
+            if len(self.Observations.get_obs()) > 0: #get_curr_obs_renege(srv)) > 0:
+                curr_state['apt_pose'] = self.queuesize - 1
+                curr_state["reward"] = self.Observations.get_curr_obs_renege(srv)[0]['reward']
         else:
-            if len(self.Observations.get_curr_obs_renege(srv)) > 0:
-                curr_state['QueueSize'] = self.queuesize - 1
-                curr_state["Reward"] = self.Observations.get_curr_obs_renege[0]['reward']
+            if len(self.Observations.get_obs()) > 0: # get_curr_obs_renege(srv)) > 0:
+                curr_state['apt_pose'] = self.queuesize - 1
+                curr_state["reward"] = self.Observations.get_curr_obs_renege[0]['reward']
         return curr_state
         
 
-    def get_jockey_action_outcome(self):
-        curr_state = self.requestObj.get_queue_curr_state()
+    def get_jockey_action_outcome(self, queue_id):
+        curr_state = self.requestObj.get_queue_state(queue_id) # get_queue_curr_state()
         srv = curr_state.get('ServerID')
         
         if srv == 1:
-            if len(self.Observations.get_curr_obs_jockey(srv)) > 0:
-                curr_state['QueueSize'] = self.queuesize + 1
-                curr_state["Reward"] = self.Observations.get_curr_obs_jockey(srv)[0]['reward']
+            if len(self.Observations.get_obs()) > 0: #get_curr_obs_jockey(srv)) > 0:
+                curr_state['apt_pose'] = self.queuesize + 1
+                curr_state["reward"] = self.Observations.get_curr_obs_jockey(srv)[0]['reward']
         else:
-            if len(self.Observations.get_curr_obs_jockey(srv)) > 0:
-                curr_state['QueueSize'] = self.queuesize + 1
-                curr_state["Reward"] = self.Observations.get_curr_obs_jockey(srv)[0]['reward']
+            if len(self.Observations.get_obs()) > 0: # get_curr_obs_jockey(srv)) > 0:
+                curr_state['at_pose'] = self.queuesize + 1
+                curr_state["reward"] = self.Observations.get_curr_obs_jockey(srv)[0]['reward']
         return curr_state
         
 
@@ -364,7 +371,7 @@ class Request:
 
     def __init__(self,uses_nn, time_entrance,pos_in_queue=0,utility_basic=0.0,service_time=0.0,discount_coef=0.0, outage_risk=0.1, # =timer()
                  customerid="", learning_mode='online',min_amount_observations=1,time_res=1.0,markov_model=msm.StateMachine(orig=None),
-                 exp_time_service_end=0.0, serv_rate=1.0, dist_local_delay=stats.expon,para_local_delay=[1.0,2.0,10.0], batchid=0 ):  #markov_model=a2c.A2C, 
+                 exp_time_service_end=0.0, serv_rate=1.0, dist_local_delay=stats.expon,para_local_delay=[1.0,2.0,10.0], batchid=0):  #markov_model=a2c.A2C, 
         
         # self.id=id #uuid.uuid1()
         self.customerid = "Batch"+str(batchid)+"_Customer_"+str(pos_in_queue+1)
@@ -580,23 +587,26 @@ class Request:
 
 
 class Observations:
-    def __init__(self, reneged=False, serv_rate=0.0, queue_intensity=0.0, jockeyed=False, time_waited=0.0,end_utility=0.0, reward=0.0, queue_size=0): # reward=0.0, 
+    def __init__(self, reneged=False, curr_pose=0, intensity=0.0, jockeying_rate=0.0, reneging_rate=0.0, jockeyed=False, time_waited=0.0,end_utility=0.0, reward=0.0, long_avg_serv_time=0): # reward=0.0, 
         self.reneged=reneged
-        self.serv_rate = serv_rate
-        self.queue_intensity = queue_intensity
+        #self.serv_rate = serv_rate
+        self.queue_intensity = intensity
         self.jockeyed=jockeyed
         self.time_waited=float(time_waited)
         self.end_utility=float(end_utility)
         self.reward= reward # id_queue
-        self.queue_size=int(queue_size)
-        self.obs = {} # OrderedDict() #{} # self.get_obs()  
+        self.queue_size=curr_pose
+        self.obs = OrderedDict() #{} # self.get_obs()  
         self.curr_obs_jockey = []
-        self.curr_obs_renege = [] 
+        self.curr_obs_renege = []
+        self.long_avg_serv_time = long_avg_serv_time 
+        self. jockeying_rate = jockeying_rate
+        self.reneging_rate = reneging_rate
 
         return
 
 
-    def set_obs (self, queue_id,  serv_rate, intensity, time_in_serv, activity, rewarded, curr_pose): # reneged, jockeyed,
+    def set_obs (self, queue_id,  curr_pose, intensity, jockeying_rate, reneging_rate, time_in_serv, time_to_service_end, reward, activity, long_avg_serv_time): 
         		
         if queue_id == "1": # Server1
             _id_ = 1
@@ -605,73 +615,62 @@ class Observations:
 			
         self.obs = {
 			        "ServerID": _id_, #queue_id,
-                    #"EndUtility":utility,
-                    "Intensity":intensity,
-                    #"Jockey":jockeyed,
-                    "QueueSize": curr_pose,
-                    #"Renege":reneged,
-                    "Reward":rewarded,
-                    "ServRate":serv_rate,
-                    "Waited":time_in_serv,
-                    "Action":activity,
+                    "at_pose": curr_pose,
+                    "rate_jockeyed": jockeying_rate,
+                    "rate_reneged": reneging_rate,                    
+                    "this_busy": intensity,
+                    "expected_service_time":time_in_serv,
+                    "time_service_took": time_to_service_end,
+                    "reward": reward,
+                    "action":activity,
+                    "long_avg_serv_time": long_avg_serv_time
                 }
               
 
     def get_obs (self):
         
-        return dict(self.obs)
+        return self.obs
         
         
-    def set_renege_obs(self, curr_pose, queue_intensity, reneged,time_local_service, time_to_service_end, reward, queueid, activity):		
+    #def set_renege_obs(self, curr_pose, queue_intensity, perc_reneged,time_local_service, time_to_service_end, reward, queueid, activity):		
 
-        self.curr_obs_renege.append(
-            {   
-                "queue": queueid,
-                "at_pose": curr_pose,
-                "reneged": reneged,
-                "this_busy": queue_intensity,
-                "expected_local_service":time_local_service,
-                "time_service_took": time_to_service_end,
-                "reward": reward,
-                "action":activity
-            }
-        )
+    #    self.curr_obs_renege.append(
+    #        {   
+    #            "queue": queueid,
+    #            "at_pose": curr_pose,
+    #            "rate_jockeyed": jockeying_rate ,
+    #            "rate_reneged": perc_reneged,
+    #            "this_busy": queue_intensity,
+    #            "expected_service_time":time_local_service,
+    #            "time_service_took": time_to_service_end,
+    #           "reward": reward,
+    #            "action":activity
+    #        }
+    #    )
         
         
     def get_renege_obs(self, queueid, queue): # , intensity, pose): # get_curr_obs_renege
 		
-        renegs = sum(1 for req in queue if '_reneged' in req.customerid)
-        			    
-        # print("\n Num Reneged in ", queueid, "is =", renegs)
+        renegs = sum(1 for req in queue if '_reneged' in req.customerid)        			       
 	    
         return renegs #self.curr_obs_renege 
   
         
-    def set_jockey_obs(self, curr_pose, queue_intensity, jockeyed, time_alt_queue, time_to_service_end, reward, queueid, activity):
+    #def set_jockey_obs(self, curr_pose, queue_intensity, perc_jockeyed, time_alt_queue, time_to_service_end, reward, queueid, activity):
         
-        self.curr_obs_jockey.append(
-            {
-                "queue": queueid,
-                "at_pose": curr_pose,
-                "this_busy": queue_intensity,
-                "jockeyed": jockeyed,
-                "expected_local_service":time_alt_queue,
-                "time_service_took": time_to_service_end,
-                "reward": reward,
-                "action":activity   			
-            }
-        )
-        
-    
-    def get_curr_obs_jockey(self, queueid): #, intensity, pose):
-		
-        return self.curr_obs_jockey
-        
-    
-    def get_curr_obs_renege(self, queueid): #, intensity, pose):
-		
-        return self.curr_obs_renege
-        
+    #    self.curr_obs_jockey.append(
+    #        {
+    #            "queue": queueid,
+    #            "at_pose": curr_pose,
+    #            "this_busy": queue_intensity,
+    #            "perc_jockeyed": perc_jockeyed,
+    #            "expected_service_time":time_alt_queue,
+    #            "time_service_took": time_to_service_end,
+    #            "reward": reward,
+    #            "action":activity   			
+    #        }
+    #    )
+
 
 class RequestQueue:
 
@@ -680,7 +679,7 @@ class RequestQueue:
     def __init__(self, utility_basic, discount_coef, markov_model=msm.StateMachine(orig=None),
                  time=0.0, outage_risk=0.1, customerid="",learning_mode='online', decision_rule='risk_control',
                  alt_option='fixed_revenue', min_amount_observations=1, dist_local_delay=stats.expon, exp_time_service_end=0.0,
-                 para_local_delay=[1.0,2.0,10.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, batchid=np.int16):
+                 para_local_delay=[1.0,2.0,10.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, batchid=np.int16, uses_nn=False):
                  
         
         self.dispatch_data = {
@@ -715,7 +714,7 @@ class RequestQueue:
         self.history = [] 
         self.curr_obs_jockey = [] 
         self.curr_obs_renege = [] 
-        self.uses_nn = random.choice([True, False])
+        self.uses_nn = uses_nn 
 
         self.arr_prev_times = np.array([])
         
@@ -730,7 +729,8 @@ class RequestQueue:
         self.dict_queues_obj = self.objQueues.get_dict_queues()
         self.dict_servers_info = self.objQueues.get_dict_servers()
         self.jockey_threshold = 1
-        self.reward = 0.0
+        self.renege_reward = 0.0
+        self.jockey_reward = 0.0
         self.curr_state = {} # ["Busy","Empty"]
 
         self.arr_rate = self.objQueues.get_arrivals_rates()
@@ -777,6 +777,7 @@ class RequestQueue:
         BROADCAST_INTERVAL = 5
         
         return
+        
     
     def enqueue(self, request, use_nn=False):
         if len(self.queue) < self.capacity:
@@ -796,7 +797,7 @@ class RequestQueue:
         
     def setAgent(self, state_dim, action_dim):
 		    
-        self.agent =  A2CAgent(state_dim, action_dim)
+        self.agent =  A2CAgent(state_dim, action_dim) # .to(device)
         
 		
     def getActCritNet(self):		       
@@ -807,6 +808,21 @@ class RequestQueue:
     def getAgent(self):		       
         
         return self.agent 
+        
+                
+    def setNormalReward(self, reward):
+		
+        self.reward = reward
+		
+		
+    def setRewardJockey(self, reward):
+		
+        self.jockey_reward = reward
+	
+	
+    def setRewardRenege(self, reward):
+		
+        self.renege_reward = reward
 		
        
     def compute_reneging_rate(self, queue):
@@ -916,7 +932,7 @@ class RequestQueue:
             loop=range(steps)                 
         
         for i in loop:
-            # 
+            uses_nn = random.choice([True, False]) 
 			
             if progress_log:
                 print("Step",i,"/",steps)
@@ -959,12 +975,13 @@ class RequestQueue:
             self.all_serv_times = serv_times
             # print("\n Times: ", np.random.exponential(2, len(all_entries)), "\n Arranged: ",serv_times)
             time.sleep(2)
-            self.processEntries(all_entries, i)
+            self.processEntries(all_entries, i, uses_nn)
             self.time+=self.time_res
             
             
             # Ensure dispatch data is updated at each step
-            self.dispatch_all_queues()
+            #self.dispatch_all_queues()
+            self.run_scheduler(duration)
             
             self.set_batch_id(i)
             
@@ -985,28 +1002,20 @@ class RequestQueue:
         
         return self.all_serv_times  
         
-        
-    def set_curr_state_of_queues(self, queueid):
-		
-        pass     
-		
 
-    def processEntries(self,entries=np.array([]), batchid=np.int16): # =np.int16 , actor_critic=actor_critic
+    def processEntries(self,entries=np.array([]), batchid=np.int16, uses_nn): # =np.int16 , actor_critic=actor_critic
         
         num_iterations = random.randint(1, 5)  # Random number of iterations between 1 and 5
         
-        for entry in entries:
-            # print("Processing a new request entry...")
-            #self.time=entry[0]            
+        for entry in entries:           
             if entry[1]==True:
                 # print("  Adding a new request into task queue...")                
 
-                req = self.addNewRequest(entry[0], batchid)
+                req = self.addNewRequest(entry[0], batchid, uses_nn)
                 self.arr_prev_times = np.append(self.arr_prev_times, entry[0])
                 
             else:                
                 q_selector = random.randint(1, 2)
-                # observer = {}
                 
                 if q_selector == 1:					
                     self.queueID = "1" # Server1
@@ -1014,35 +1023,16 @@ class RequestQueue:
                     """
                          Run the serveOneRequest function a random number of times before continuing.
                     """
-                    
-                    #for _ in range(num_iterations):
-                        #self.serveOneRequest(to_delete, time_entrance, queueID)
                         # Introduce a short delay to simulate processing time            
                     self.serveOneRequest(self.queueID) # Server1 = self.dict_queues_obj["1"][0], entry[0],                                                                  
                     ## self.dispatch_queue_state(self.dict_queues_obj["1"], self.queueID, self.dict_queues_obj["2"]) #, req)
                     time.sleep(random.uniform(0.1, 0.5))  # Random delay between 0.1 and 0.5 seconds
-                        # time.sleep(1)
-                    
-                    #if self.capacity is not None and len(self.dict_queues_obj["1"]) >= self.capacity:
-                    #    raise Exception("Queue has reached its capacity limit")
-                        # sys.exit(1)
-                        #return 
-                        
+                                               
                 else:
-					#req = self.dict_queues_obj["2"][0]
                     self.queueID = "2"
-                    #for _ in range(num_iterations):
                     self.serveOneRequest(self.queueID) # Server2 = self.dict_queues_obj["2"][0], entry[0],                                       
                     ## self.dispatch_queue_state(self.dict_queues_obj["2"], self.queueID, self.dict_queues_obj["1"]) #, req)
-                    time.sleep(random.uniform(0.1, 0.5))
-                    
-                    #if self.capacity is not None and len(self.dict_queues_obj["2"]) >= self.capacity:
-                    #    raise Exception("Queue has reached its capacity limit")
-                        # sys.exit(1)
-                        #return 
-                        
-                # print("  Wait to Broadcasting the updated queue information...")                
-                #self.broadcastQueueInfo()
+                    time.sleep(random.uniform(0.1, 0.5))                                        
                     
                     
         return
@@ -1107,14 +1097,12 @@ class RequestQueue:
         return total_jockey_delay
                
 
-    def addNewRequest(self, expected_time_to_service_end, batchid): #, time_entered):
+    def addNewRequest(self, expected_time_to_service_end, batchid, uses_nn): #, time_entered):
         # Join the shorter of either queues
                
         lengthQueOne = len(self.dict_queues_obj["1"]) # Server1
         lengthQueTwo = len(self.dict_queues_obj["2"]) # Server1 
-        rate_srv1,rate_srv2 = self.get_server_rates()
-        
-        # self.set_customer_id()       
+        rate_srv1,rate_srv2 = self.get_server_rates()                
 
         if lengthQueOne < lengthQueTwo:
             time_entered = self.time   #self.estimateMarkovWaitingTime(lengthQueOne) ID
@@ -1136,13 +1124,23 @@ class RequestQueue:
             #expected_time_to_service_end = self.estimateMarkovWaitingTime(float(pose)) #, queue_intensity, time_entered)
             #time_local_service = self.generateLocalCompUtility(req)
                     
-            
-        req=Request(self.uses_nn, time_entrance=time_entered, pos_in_queue=pose, utility_basic=self.utility_basic, service_time=expected_time_to_service_end,
+        
+        if uses_nn:
+            req=Request(uses_nn, time_entrance=time_entered, pos_in_queue=pose, utility_basic=self.utility_basic, service_time=expected_time_to_service_end,
                     discount_coef=self.discount_coef,outage_risk=self.outage_risk,customerid=self.customerid, learning_mode=self.learning_mode,
                     min_amount_observations=self.min_amount_observations,time_res=self.time_res, #exp_time_service_end=expected_time_to_service_end, 
-                    dist_local_delay=self.dist_local_delay,para_local_delay=self.para_local_delay, batchid=batchid) # =self.batchid
+                    dist_local_delay=self.dist_local_delay,para_local_delay=self.para_local_delay, batchid=batchid)
                     
-        # #markov_model=self.markov_model,  
+            self.nn_subscribers.append(req)
+            
+        else:
+            req=Request(uses_nn, time_entrance=time_entered, pos_in_queue=pose, utility_basic=self.utility_basic, service_time=expected_time_to_service_end,
+                    discount_coef=self.discount_coef,outage_risk=self.outage_risk,customerid=self.customerid, learning_mode=self.learning_mode,
+                    min_amount_observations=self.min_amount_observations,time_res=self.time_res, #exp_time_service_end=expected_time_to_service_end, 
+                    dist_local_delay=self.dist_local_delay,para_local_delay=self.para_local_delay, batchid=batchid)
+                    
+            self.state_subscribers.append(req)      
+  
         self.dict_queues_obj[server_id] = np.append(self.dict_queues_obj[server_id], req)
         
         self.queueID = server_id
@@ -1179,11 +1177,13 @@ class RequestQueue:
         return self.curr_state
         
     
-    def get_queue_observation(self, queue_id):
+    def get_queue_observation(self, queue_id, queue):
         """Returns queue observations formatted for Actor-Critic training."""
         
-        state = self.get_queue_state(queue_id)
+        state = self.get_queue_state(queue_id) # , queue)
+        
         observation = {
+			"server_id": state['queue_id'],
             "total_customers": state["total_customers"],
             "intensity": state["intensity"],
             "capacity": state["capacity"],
@@ -1204,17 +1204,8 @@ class RequestQueue:
             alt_queue_id = "1"
             serv_rate = rate_srv2
 
-        curr_queue_state = self.get_queue_state(alt_queue_id)
+        curr_queue_state = self.get_queue_state(alt_queue_id) # , curr_queue)
 
-        # Compute reneging rate and jockeying rate
-        reneging_rate = self.compute_reneging_rate(curr_queue)
-        jockeying_rate = self.compute_jockeying_rate(curr_queue)
-
-        # Append these rates to the state
-        curr_queue_state['reneging_rate'] = reneging_rate
-        curr_queue_state['jockeying_rate'] = jockeying_rate
-
-        
         # Dispatch queue state to requests and allow them to act
         for req in curr_queue:
             if req.uses_nn:  # NN-based requests
@@ -1223,37 +1214,17 @@ class RequestQueue:
                     #req.renege()  # NN-based decision to leave
                     self.makeRenegingDecision(req, curr_queue_id)                    
                 elif action == 1:
-                    #req.jockey(alt_queue)  # NN-based decision to switch queue
                     self.makeJockeyingDecision(req, curr_queue_id, alt_queue_id, req.customerid, serv_rate)
-            else:  # Raw queue-state requests use probability-based decisions
-                #if random.random() < reneging_rate:
-                    #req.renege()
-                self.makeRenegingDecision(req, curr_queue_id)
-                #elif random.random() < jockeying_rate:
-                    #req.jockey(alt_queue)
+            else:  
+                self.makeRenegingDecision(req, curr_queue_id)                
                 self.makeJockeyingDecision(req, curr_queue_id, alt_queue_id, req.customerid, serv_rate)
-        
-            # req.receive_update(curr_queue_state)  # Send updated state
-            
-         #for client in range(len(curr_queue)):
-            #req = self.dict_queues_obj[curr_queue_id][client]
-            # print(f"Dispatching state of server {alt_queue_id} to client {req.customerid} : {curr_queue_state}.")
-            
-            #if curr_queue_id == "1":
-            #    self.makeJockeyingDecision(req, curr_queue_id, "2", req.customerid, serv_rate)
-            #    self.makeRenegingDecision(req, curr_queue_id)
-            #else:
-            #    self.makeJockeyingDecision(req, curr_queue_id, "1", req.customerid, serv_rate)
-            #    self.makeRenegingDecision(req, curr_queue_id)
 
-        return reneging_rate, jockeying_rate
-        
     
     def get_nn_optimized_decision(self, queue_state):
         
         #state = self.get_queue_observation(req.queue_id)
         """Uses AI model to decide whether to renege or jockey."""
-        state_tensor = torch.tensor(list(queue_state.values()), dtype=torch.float32).to(device)
+        state_tensor = torch.tensor(list(queue_state), dtype=torch.float32).to(device) # .values()
         action, _, _, _ = self.agent.select_action(state_tensor)  # self.actor_critic.select_action(state_tensor)                  
         
         return {"action": action.cpu().numpy(), "nn_based": True}
@@ -1297,7 +1268,9 @@ class RequestQueue:
             curr_queue = self.dict_queues_obj[queue_id]
             alt_queue_id = "2" if queue_id == "1" else "1"
             alt_queue = self.dict_queues_obj[alt_queue_id]
-            reneging_rate, jockeying_rate = self.dispatch_queue_state(curr_queue, queue_id, alt_queue)
+            self.dispatch_queue_state(curr_queue, queue_id, alt_queue)
+            jockeying_rate = self.compute_jockeying_rate(curr_queue)
+            reneging_rate = self.compute_jockeying_rate(curr_queue)
             serv_rate = self.dict_servers_info[queue_id]
             num_requests = len(curr_queue)
 
@@ -1316,9 +1289,9 @@ class RequestQueue:
         """
         Set up the intervals for dispatching the queue status information.
         """
-        # schedule.every(10).seconds.do(self.dispatch_all_queues)
+        schedule.every(10).seconds.do(self.dispatch_all_queues)
         # schedule.every(30).seconds.do(self.dispatch_all_queues)
-        schedule.every(60).seconds.do(self.dispatch_all_queues)       
+        # schedule.every(60).seconds.do(self.dispatch_all_queues)       
             
             
     def plot_rates(self):
@@ -1354,12 +1327,12 @@ class RequestQueue:
         plt.show()            
             
 
-    def run_scheduler(self):
+    def run_scheduler(self, duration):
         """
         Run the scheduler to dispatch queue status at different intervals.
         """
         self.setup_dispatch_intervals()
-        while True:
+        while duration: #True:
             schedule.run_pending()
             time.sleep(1)
     
@@ -1381,40 +1354,36 @@ class RequestQueue:
             return 0
     
                        
-    def get_queue_state(self, queueid):
+    def get_queue_state(self, queueid): # , queueobj): #, action):      
 		
-        rate_srv1,rate_srv2 = self.get_server_rates()        
-		
-        if queueid == "1":		
-            queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv1    
-            customers_in_queue = self.dict_queues_obj["1"]   
-            #renege_rate = self.get_renege_rate( queueid)                
-            
-            state = {
-                "total_customers": len(customers_in_queue),
-                "intensity": queue_intensity,
-                "capacity": self.capacity,
-                #"renege_rate": renege_rate,
-                #"jockey_rate": jockey_rate,
-                "long_avg_serv_time": self.get_long_run_avg_service_time(queueid)
-            }
+        observed = self.get_history()
+        print("\n --> ", observed, len(observed), " ---- Queue: ", queueid)
+        
+        if len(observed) > 0:
+            for hist in reversed(observed):
+                if hist['ServerID'] == queueid:
+                    print("\n MATCH:", hist , " ---- Queue: ", queueid )
+                    state = hist
         else:
-			#serv_rate = self.get_server_rates()[1] #dict_servers_info["2"] 
-            queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv2            
-            customers_in_queue = self.dict_queues_obj["2"]
-            #renege_rate = self.get_renege_rate( queueid)
-			
-            state = {
-                "total_customers": len(customers_in_queue),
-                "intensity": queue_intensity,
-                "capacity": self.capacity,
-                #"renege_rate": renege_rate,
-                #"jockey_rate": jockey_rate,
-                "long_avg_serv_time": self.get_long_run_avg_service_time(queueid)
-                
-            }
+            return # continue
+				
+        # the dictionary where the first match is found, enqueue
+        # next(d for i,d in enumerate(lod) if 1 in d)
+		
+        #if len(observed) > 0:
+	#		last_entry_in_history = observed[-1]
+    #        key_id = list(observed.keys())[-1]
+		
+     #       if queueid == key_id:		                      
+     #           state = list(observed.values())[-1]
+      
+     #       else:			
+     #           state = list(observed.values())[-1]
+                       
+     #       return state
             
-        return state
+     #   else:
+     #       return 
 
 
     def serveOneRequest(self, queueID): # to_delete, serv_time, 
@@ -1432,97 +1401,46 @@ class RequestQueue:
 
         if len(queue) == 0:
             return  # No request to process
-
+        
+        queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate
         req = queue[0]  # Process the first request
         queue = queue[1:]  # Remove it from the queue
+        req.time_exit = self.time
 
         # Compute reward based on actual waiting time vs. expected time
-        time_in_queue = self.time - req.time_entrance
+        time_in_queue = req.time_exit-req.time_entrance # self.time - req.time_entrance
         reward = 1.0 if time_in_queue < req.service_time else -1.0
+ 
+        self.setNormalReward(reward)
+        
+        # Store the experience for RL training        
+        state = self.get_queue_state(queueID) 
+        if not isinstance(None, state):
+            action = self.agent.select_action(state)
+            self.agent.store_reward(reward)
 
-        # Store the experience for RL training
-        state = self.get_queue_observation(queueID)
-        action = actor_critic.select_action(state)
-        actor_critic.store_reward(reward)
-
-        # Train RL model after each request is processed
-        actor_critic.update()
+            # Train RL model after each request is processed
+            self.agent.update()
 
         # Dispatch updated queue state
         self.dispatch_queue_state(queue, queueID, self.dict_queues_obj["1" if queueID == "2" else "2"])
     
-        ## len_queue_1,len_queue_2 = self.get_queue_sizes()
+        len_queue_1,len_queue_2 = self.get_queue_sizes()
+        long_avg_serv_time = self.get_long_run_avg_service_time(queueID)
         
-        ## if "1" in queueID:   # Server1               
-        ##    req =  self.dict_queues_obj["1"][0] # Server1
-        ##    serv_rate = self.dict_servers_info["1"] # Server1
-        ##    queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate
-        ##    queueID = "1" # Server1
-    
-            ## reward = self.get_jockey_reward(req)       
-            # serve request in queue            
-                    
-        ##    self.queueID = queueID
+        if "1" in queueID:  
+            self.total_served_requests_srv1+=1  
+            self.objObserv.set_obs(queueID, len_queue_1, queue_intensity, jockeying_rate, reneging_rate, time_in_queue, req.exp_time_service_end, reward, "served", long_avg_serv_time )
+            self.history.append(self.objObserv.get_obs())
+            print("State of queue 1: ", self.history)
+
+        else:
+            self.total_served_requests_srv2+=1
+            self.objObserv.set_obs(queueID, len_queue_2, queue_intensity, jockeying_rate, reneging_rate, time_in_queue, req.exp_time_service_end, reward, "served", long_avg_serv_time) 
+            self.history.append(self.objObserv.get_obs())
+            print("State of queue 2: ", self.history)		    
         
-        ##    self.dict_queues_obj["1"] = self.dict_queues_obj["1"][1:self.dict_queues_obj["1"].size]       # Server1 
-        ##    self.total_served_requests_srv2+=1                       
-            
-            # Set the exit time
-            ## req.time_exit = self.time              
-            
-            # take note of the observation ... self.time  queue_id,  serv_rate, intensity, time_in_serv, activity, rewarded, curr_pose
-            ## self.objObserv.set_obs(self.queueID, serv_rate, queue_intensity, req.time_exit-req.time_entrance, reward, len_queue_1, 2)   # req.exp_time_service_end,                                    
-            ## self.history.append(self.objObserv.get_obs())
-                
-            #time_to_service_end = self.estimateMarkovWaitingTime(float(curr_pose), queue_intensity, reqObj.time_entrance)
-            #time_local_service = self.generateLocalCompUtility(req)				                           
-                                
-            ## self.arr_prev_times = self.arr_prev_times[1:self.arr_prev_times.size]                                           
-            
-            # self.makeJockeyingDecision(req, self.queueID, "2", req.customerid, serv_rate)
-            # self.makeRenegingDecision(req, self.queueID)
-
-        ## else:                        
-        ##    req = self.dict_queues_obj["2"][0] # Server2
-        ##    serv_rate = self.dict_servers_info["2"] # Server2
-        ##    queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate
-        ##    queueid = "2"   # Server2  
-            
-            #req.service_time = serv_time   
-            #print("\n SERV T IN SERV 2: ", req.service_time)    
-                        
-        ##   self.dict_queues_obj["2"] = self.dict_queues_obj["2"][1:self.dict_queues_obj["2"].size] # Server2
-            
-        ##    reward = self.get_jockey_reward(req)
-         
-        ##    self.queueID = queueID 
-        ##    self.dict_queues_obj["S2"] = self.dict_queues_obj["2"][1:self.dict_queues_obj["2"].size]      # Server2 
-        ##    self.total_served_requests_srv1+=1
-   
-        ##    req.time_exit = self.time                 
-            
-        ##    self.objObserv.set_obs(self.queueID, serv_rate, queue_intensity, req.time_exit-req.time_entrance, reward, len_queue_2, 2)    # req.exp_time_service_end,                                  
-        ##    self.history.append(self.objObserv.get_obs())                   
-               
-            #if time_local_service < time_to_service_end:   
-		    #   reqObj.customerid = reqObj.customerid+"_reneged"                 
-            #    self.reqRenege(reqObj, queueID, curr_pose, serv_rate, queue_intensity, time_local_service, reqObj.customerid) #, time_to_service_end) #self.queue[0].id)
-            #    self.queueID = queueID
-            #    self.setCurrQueueState(self.queueID, serv_rate, reward, time_local_service)                                                       
-                                    
-        ##    self.arr_prev_times = self.arr_prev_times[1:self.arr_prev_times.size]  
-        ##    self.objQueues.update_queue_status(queueID)
-            
-            # Any Customers interested in jockeying or reneging when a request is processed
-            #print("\n Inside Server 2, calling the  decision procedures")
-            # self.makeJockeyingDecision(req, self.queueID, "1", req.customerid, serv_rate)# Server1
-            # self.makeRenegingDecision(req, self.queueID)
-        
-        ## self.curr_req = req
-                                                                  
-        # return
-
-
+			
     def get_jockey_reward(self, req):
 		
         reward = 0.0
@@ -1618,6 +1536,7 @@ class RequestQueue:
         
         return remaining_time
         
+        
     def calculate_max_cloud_delay(self, position, queue_intensity, req):
         """
         Calculate the max cloud delay based on the position in the queue and the current queue intensity.
@@ -1677,10 +1596,7 @@ class RequestQueue:
                 queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate
                 self. max_cloud_delay = self.calculate_max_cloud_delay(req.pos_in_queue, queue_intensity, req)
                 ## self.max_cloud_delay=stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=1/serv_rate)
-                #self.max_cloud_delay=stats.erlang.ppf(self.certainty,loc=0,scale=mean_interval,a=req.pos_in_queue)
-                
-                
-            #print("\n ==>> LOCAL and CLOUD: ", self.max_local_delay," ==== ",self.max_cloud_delay)
+                #self.max_cloud_delay=stats.erlang.ppf(self.certainty,loc=0,scale=mean_interval,a=req.pos_in_queue)                                            
             
             if "Server1" in queueid:
                 self.queue = self.dict_queues_obj["1"]            
@@ -1695,7 +1611,7 @@ class RequestQueue:
                     print(f"Request ID {req.customerid} not found in queue {queueid}. Continuing with processing...")
                     return 
                 else:               
-                    self.reqRenege( req, queueid, curr_pose, serv_rate, queue_intensity, self.max_local_delay, req.customerid, req.service_time, decision, self.queue)
+                    reward = self.reqRenege( req, queueid, curr_pose, serv_rate, queue_intensity, self.max_local_delay, req.customerid, req.service_time, decision, self.queue)
                                 
                 #temp=stats.erlang.cdf(np.arange(self.max_local_delay,step=self.time_res),k_erlang,scale=scale_erlang)
                 '''
@@ -1748,20 +1664,20 @@ class RequestQueue:
         # the current time minus the time _to_service_end is greater than the time_local_service
         
             reward = self.getRenegeRewardPenalty(req, time_local_service, time_to_service_end)
-        # self.objObserv.set_obs(queueid, True, serv_rate, queue_intensity, False,self.time-req.time_entrance,self.generateLocalCompUtility(req), reward, len(self.queue))
-
-        #for t in range(len(self.queue)):
-        #    if self.queue[t].customerid == customerid:self.arr_rate
-        #        curr_pose = t                                       
-        
-            self.objObserv.set_renege_obs(curr_pose, queue_intensity, decision,time_local_service, time_to_service_end, reward, queueid, "reneged")
-        
-            # self.curr_obs_renege.append(self.objObserv.get_renege_obs(queueid, self.queue)) #queueid, queue_intensity, curr_pose))
-            self.curr_obs_renege.append(self.objObserv.get_curr_obs_renege(queueid))      
+                                     
+            reneging_rate = self.compute_reneging_rate(curr_queue)
+            jockeying_rate = self.compute_jockeying_rate(curr_queue)
+            long_avg_serv_time = self.get_long_run_avg_service_time(queueid)         
+            
+            self.objObserv.set_obs(queueid, curr_pose, queue_intensity, jockeying_rate, reneging_rate, time_local_service, time_to_service_end, reward, "reneged", long_avg_serv_time)
+            
+            self.history.append(self.objObserv.get_obs())      
         
             self.curr_req = req
         
             self.objQueues.update_queue_status(queueid)
+            
+            return reward
 
 
     def get_request_position(self, queue_id, request_id):
@@ -1814,9 +1730,14 @@ class RequestQueue:
             
             self.log_action(f"Jockeyed", req, dest_queue_id)
             
-            self.objObserv.set_jockey_obs(curr_pose, queue_intensity, decision, exp_delay, req.exp_time_service_end, reward, 1.0, "jockeyed") # time_alt_queue        
-            # self.curr_obs_jockey.append(self.objObserv.get_jockey_obs(curr_queue_id, queue_intensity, curr_pose))
-            self.curr_obs_jockey.append(self.objObserv.get_curr_obs_jockey(curr_queue_id))                                      
+            reneging_rate = self.compute_reneging_rate(curr_queue)
+            jockeying_rate = self.compute_jockeying_rate(curr_queue)     
+            long_avg_serv_time = self.get_long_run_avg_service_time(curr_queue_id)                 
+            
+            self.objObserv.set_obs(curr_queue_id, curr_pose, queue_intensity, jockeying_rate, reneging_rate, exp_delay, req.exp_time_service_end, reward, "jockeyed", long_avg_serv_time) # time_alt_queue        
+            
+            self.history.append(self.objObserv.get_obs())
+                                                  
             self.curr_req = req        
             self.objQueues.update_queue_status(curr_queue_id)# long_avg_serv_time
         
@@ -1874,20 +1795,21 @@ def main():
     discount_coef = 0.1
     requestObj = RequestQueue(utility_basic, discount_coef)
     # env = ImpatientTenantEnv()
-    duration = 10
+    duration = 20
     
     # Start the scheduler
-    scheduler_thread = threading.Thread(target=requestObj.run_scheduler)
+    scheduler_thread = threading.Thread(target=requestObj.run(duration)) #requestObj.run_scheduler)
     scheduler_thread.start()
     
+    # requestObj.run(duration)
+    
     actor_critic = requestObj.getActCritNet() 
-        
-    requestObj.run(duration)
+    agent = requestObj.getAgent()        
     
     #state_dim = len(env.observation_space)
     #action_dim = env.action_space            
 
-    agent = A2CAgent(state_dim, action_dim)    
+    # agent = A2CAgent(state_dim, action_dim)    
     
     # Instantiate the ActorCritic class
     
