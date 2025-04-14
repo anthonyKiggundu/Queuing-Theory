@@ -16,7 +16,8 @@ import threading
 from tqdm import tqdm
 import MarkovStateMachine as msm
 from ImpTenEnv import ImpatientTenantEnv
-from a2c import ActorCritic, A2CAgent
+# from RenegeJockey import RequestQueue
+# from a2c import ActorCritic, A2CAgent
 from timeit import default_timer as timer
 import matplotlib.pyplot as plt
 from gymnasium.utils.env_checker import check_env
@@ -27,6 +28,9 @@ import torch.optim as optim
 import logging
 from datetime import datetime
 from termcolor import colored
+import csv
+import matplotlib.pyplot as plt
+import pandas as pd
 ###############################################################################
 
 #from RenegeJockey import RequestQueue, Queues, Observations
@@ -41,261 +45,10 @@ logging.basicConfig(
 
 ################################## Globals ####################################
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-env = ImpatientTenantEnv()
 
+env = ImpatientTenantEnv()
 state_dim = len(env.observation_space)
 action_dim = env.action_space
-# print("\n => ", state_dim, " = ", action_dim)
-
-
-class ActorCritic(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super(ActorCritic, self).__init__()
-        self.actor = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, action_dim),
-            nn.Softmax(dim=-1)
-        )
-        self.critic = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1)
-        )
-
-    def forward(self, state):
-		
-        # print("\n FORWARDED STATE: ", state)
-        action_probs = self.actor(state)
-        state_value = self.critic(state)
-        
-        # Check for NaN values in action_probs and handle them
-        if torch.isnan(action_probs).any():
-            print("NaN values detected in action_probs:", action_probs)
-            action_probs = torch.where(torch.isnan(action_probs), torch.zeros_like(action_probs), action_probs)
-            action_probs = action_probs / action_probs.sum(dim=-1, keepdim=True)  # Normalize to ensure valid probabilities
-            
-        return action_probs, state_value
-        
-
-class A2CAgent:
-    def __init__(self, state_dim, action_dim, lr=0.001, gamma=0.99):
-        self.gamma = gamma
-                
-        self.model = ActorCritic(state_dim, action_dim).to(device)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        self.log_probs = []
-        self.values = []
-        self.rewards = []
-        
-
-    def select_action(self, state):
-        # print("\n -->> ", state)
-        if isinstance(state, dict):
-            #state = np.concatenate([state[key].flatten() for key in state.keys()])
-            # state = np.concatenate([np.array(state[key]).flatten() if hasattr(state[key], 'flatten') else [state[key]] for key in state.keys()])
-            state = np.concatenate([
-                np.array(state[key]).flatten() if hasattr(state[key], 'flatten') else np.array([state[key]], dtype=float)
-                for key in state.keys() if isinstance(state[key], (int, float, np.number))
-            ])
-            
-        # If state is not a tensor, create one; otherwise, use it as is.
-        if not isinstance(state, torch.Tensor):
-            state = torch.FloatTensor(state)
-    
-        # Ensure the state tensor does not contain NaN values
-        if torch.isnan(state).any():
-            print("NaN values detected in state tensor:", state)
-            state = torch.where(torch.isnan(state), torch.zeros_like(state), state)
-                       
-        state = state.unsqueeze(0).to(device)
-        action_probs, state_value = self.model(state)
-    
-        # Check for NaN values in action_probs and handle them
-        if torch.isnan(action_probs).any():
-            print("NaN values detected in action_probs:", action_probs)
-            action_probs = torch.where(torch.isnan(action_probs), torch.zeros_like(action_probs), action_probs)
-            action_probs = action_probs / action_probs.sum(dim=-1, keepdim=True)  # Normalize to ensure valid probabilities
-            #print("*** After *** :", action_probs)
-            
-        action_dist = torch.distributions.Categorical(action_probs)
-        action = action_dist.sample()
-        self.log_probs.append(action_dist.log_prob(action))
-        self.values.append(state_value)
-        
-        return action.item()
-        
-
-    def store_reward(self, reward):
-        self.rewards.append(reward)
-        
-
-    def update(self):
-        R = 0
-        returns = []
-        for r in reversed(self.rewards):
-            R = r + self.gamma * R
-            returns.insert(0, R)
-
-        returns = torch.tensor(returns).to(device)
-        log_probs = torch.stack(self.log_probs).to(device)
-        values = torch.cat(self.values).to(device)
-        advantage = returns - values
-
-        actor_loss = -(log_probs * advantage.detach()).mean()
-        critic_loss = advantage.pow(2).mean()
-        loss = actor_loss + critic_loss
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-
-        self.log_probs = []
-        self.values = []
-        self.rewards = []
-
-
-class Actions(Enum):
-    RENEGE = 0
-    JOCKEY = 1
-    SERVED = -1
-    
-
-class ImpatientTenantEnv:
-    metadata = {"render_modes": ["ansi"], "render_fps": 4}
-
-    def __init__(self, render_mode=None):
-        self.queue_state = {}
-        self.action = ""  
-        self.utility_basic = 1.0
-        self.discount_coef = 0.1
-        self.history = {}
-        self.queueObj = Queues()
-        self.Observations = Observations()        
-        self.endutil = 0.0 
-        self.intensity = 0.0
-        self.jockey = 0.0
-        self.queuesize = 0.0
-        self.renege = 0.0
-        self.reward = 0.0 
-        self.servrate = 0.0
-        self.waitingtime = 0.0
-        self.ren_state_after_action = {}
-        self.jock_state_after_action = {}
-        self.requestObj = RequestQueue(self.utility_basic, self.discount_coef)
-        #duration = 3
-        #self.requestObj.run(duration)        
-        self.queue_id = self.requestObj.get_curr_queue_id()
-  
-        self.action_space = 2  # Number of discrete actions
-        self.history = self.requestObj.get_history()        
-
-        self.observation_space = {
-            "ServerID": ("1", "2"),
-            "rate_jockeyed": (0.0, 1.0),            
-            "this_busy": (0.0, 20),
-            "expected_service_time": (0.0, 50.0),
-            "time_service_took": (0.0, 50.0),
-            "rate_reneged": (0.0, 1.0),
-            "reward": (0.0, 1.0),
-            "at_pose": (1.0, 50),
-            "long_avg_serv_time": (0.0,50),
-            "action": ("served","reneged","jockeyed"),
-        }
-        
-       
-
-        self._action_to_state = {
-            Actions.RENEGE.value: self.get_renege_action_outcome(self.queue_id), 
-            Actions.JOCKEY.value: self.get_jockey_action_outcome(self.queue_id)
-        }
-
-        assert render_mode is None or render_mode in self.metadata["render_modes"]
-        self.render_mode = render_mode
-        
-
-    def _get_obs(self):
-        obs = {key: np.zeros(1) for key in self.observation_space.keys()}
-        # print("\n Observed: ", obs)
-        return obs
-        
-
-    def _get_info(self):
-		
-        return self._action_to_state 
-        
-
-    def reset(self, seed=None, options=None):
-        random.seed(seed)
-        np.random.seed(seed)
-        observation = self.Observations.get_obs() # self._get_obs()         
-        info = self._get_info()                                 
-        return observation, info
-
-
-    def get_renege_action_outcome(self, queue_id):
-        curr_state = self.requestObj.get_queue_state(queue_id) # get_queue_curr_state()
-        srv = curr_state.get('ServerID')
-        
-        if srv == 1:
-            if len(self.Observations.get_obs()) > 0: #get_curr_obs_renege(srv)) > 0:
-                curr_state['apt_pose'] = self.queuesize - 1
-                curr_state["reward"] = self.Observations.get_curr_obs_renege(srv)[0]['reward']
-        else:
-            if len(self.Observations.get_obs()) > 0: # get_curr_obs_renege(srv)) > 0:
-                curr_state['apt_pose'] = self.queuesize - 1
-                curr_state["reward"] = self.Observations.get_curr_obs_renege[0]['reward']
-                
-        return curr_state
-        
-
-    def get_jockey_action_outcome(self, queue_id):
-        curr_state = self.requestObj.get_queue_state(queue_id) # get_queue_curr_state()
-        srv = curr_state.get('ServerID')
-        
-        if srv == 1:
-            if len(self.Observations.get_obs()) > 0: #get_curr_obs_jockey(srv)) > 0:
-                curr_state['apt_pose'] = self.queuesize + 1
-                curr_state["reward"] = self.Observations.get_curr_obs_jockey(srv)[0]['reward']
-        else:
-            if len(self.Observations.get_obs()) > 0: # get_curr_obs_jockey(srv)) > 0:
-                curr_state['at_pose'] = self.queuesize + 1
-                curr_state["reward"] = self.Observations.get_curr_obs_jockey(srv)[0]['reward']
-                
-        return curr_state
-        
-
-    def step(self, action):
-        new_state = self._action_to_state[action]
-        terminated = new_state["QueueSize"] <= 0.0
-        reward = new_state['Reward']
-        observation = self._get_obs()
-        info = self._get_info()
-        flattened_observation = np.concatenate([observation[key].flatten() for key in observation.keys()])
-
-        if self.render_mode == "human":
-            self._render_frame()
-        
-        return flattened_observation, reward, terminated, info        
-
- 
-    def get_state_action_info(self):
-        state_action_info = {
-            "state": self._get_obs(),
-            "action_to_state": self._get_info() # self._action_to_state
-        }
-        
-        return state_action_info
-        
-
-    def get_raw_server_status(self):
-        raw_server_status = {
-            "queue_id": self.queue_id,
-            "queuesize": self.queuesize,
-            "servrate": self.servrate,
-            "waitingtime": self.waitingtime
-        }
-        return raw_server_status
 
 
 class Queues(object):
@@ -612,92 +365,6 @@ class Request:
         logging.info("", extra={"request_id": self.request_id, "queue_id": self.queue_id, "action": action}) # MATCH
 
 
-class Observations:
-    def __init__(self, reneged=False, curr_pose=0, intensity=0.0, jockeying_rate=0.0, reneging_rate=0.0, jockeyed=False, time_waited=0.0,end_utility=0.0, reward=0.0, long_avg_serv_time=0.0): # reward=0.0, 
-        self.reneged=reneged
-        #self.serv_rate = serv_rate
-        self.queue_intensity = intensity
-        self.jockeyed=jockeyed
-        self.time_waited=float(time_waited)
-        self.end_utility=float(end_utility)
-        self.reward= reward # id_queue
-        self.queue_size=curr_pose
-        self.obs = OrderedDict() #{} # self.get_obs()  
-        self.curr_obs_jockey = []
-        self.curr_obs_renege = []
-        self.long_avg_serv_time = long_avg_serv_time 
-        self. jockeying_rate = jockeying_rate
-        self.reneging_rate = reneging_rate
-
-        return
-
-
-    def set_obs (self, queue_id,  curr_pose, intensity, jockeying_rate, reneging_rate, time_in_serv, time_to_service_end, reward, activity, long_avg_serv_time): 
-        		
-        if queue_id == "1": # Server1
-            _id_ = 1
-        else:
-            _id_ = 2
-			
-        self.obs = {
-			        "ServerID": _id_, #queue_id,
-                    "at_pose": curr_pose,
-                    "rate_jockeyed": jockeying_rate,
-                    "rate_reneged": reneging_rate,                    
-                    "this_busy": intensity,
-                    "expected_service_time":time_in_serv,
-                    "time_service_took": time_to_service_end,
-                    "reward": reward,
-                    "action":activity,
-                    "long_avg_serv_time": long_avg_serv_time
-                }
-              
-
-    def get_obs (self):
-        
-        return self.obs
-        
-        
-    #def set_renege_obs(self, curr_pose, queue_intensity, perc_reneged,time_local_service, time_to_service_end, reward, queueid, activity):		
-
-    #    self.curr_obs_renege.append(
-    #        {   
-    #            "queue": queueid,
-    #            "at_pose": curr_pose,
-    #            "rate_jockeyed": jockeying_rate ,
-    #            "rate_reneged": perc_reneged,
-    #            "this_busy": queue_intensity,
-    #            "expected_service_time":time_local_service,
-    #            "time_service_took": time_to_service_end,
-    #           "reward": reward,
-    #            "action":activity
-    #        }
-    #    )
-        
-        
-    def get_renege_obs(self, queueid, queue): # , intensity, pose): # get_curr_obs_renege
-		
-        renegs = sum(1 for req in queue if '_reneged' in req.customerid)        			       
-	    
-        return renegs #self.curr_obs_renege 
-  
-        
-    #def set_jockey_obs(self, curr_pose, queue_intensity, perc_jockeyed, time_alt_queue, time_to_service_end, reward, queueid, activity):
-        
-    #    self.curr_obs_jockey.append(
-    #        {
-    #            "queue": queueid,
-    #            "at_pose": curr_pose,
-    #            "this_busy": queue_intensity,
-    #            "perc_jockeyed": perc_jockeyed,
-    #            "expected_service_time":time_alt_queue,
-    #            "time_service_took": time_to_service_end,
-    #            "reward": reward,
-    #            "action":activity   			
-    #        }
-    #    )
-
-
 class RequestQueue:
 
     APPROX_INF = 1000 # an integer for approximating infinite
@@ -806,18 +473,7 @@ class RequestQueue:
         
         BROADCAST_INTERVAL = 5
         
-        return
-        
-    
-    #def enqueue(self, request, use_nn=False):
-    #    if len(self.queue) < self.capacity:
-    #        self.queue.append(request)
-    #        if use_nn:
-    #            self.nn_subscribers.append(request)
-    #        else:
-    #            self.state_subscribers.append(request)
-    #        return True
-    #    return False        
+        return               
 		
 	
     def setActCritNet(self, state_dim, action_dim):
@@ -953,72 +609,190 @@ class RequestQueue:
         return new_history
 
 
-    def run(self,duration, progress_bar=True,progress_log=False):
-        steps=int(duration/self.time_res)
-    
-        if progress_bar!=None:
-            loop=tqdm(range(steps),leave=False,desc='     Current run')
-        else:
-            loop=range(steps)                 
+    def run(self, duration, adjust_service_rate, num_episodes=100, progress_bar=True, progress_log=False, save_to_file="metrics.csv"):
+        """
+        Run the simulation with episodic training.
+
+        Args:
+            duration (int): The total duration of the simulation (e.g., seconds or steps).
+            num_episodes (int): Number of episodes for training.
+            progress_bar (bool): Whether to show a progress bar for steps.
+            progress_log (bool): Whether to log progress for each step.
+
+        Returns:
+            None
+        """
         
+        steps_per_episode = int(duration / self.time_res)
+        metrics = []  # List to store metrics for all episodes
+        save_to_file = "simu_results.csv"
+
+        if progress_bar:
+            step_loop = tqdm(range(steps_per_episode), leave=False, desc='     Current run')
+        else:
+            step_loop = range(steps_per_episode)
+
+        # Retrieve the arrival rate from the queue setup                       
         self.arr_rate = self.objQueues.get_arrivals_rates()
         print("\n Arrival rate: ", self.arr_rate)
         
-        for i in loop:            
+        for episode in range(num_episodes):
+            print(f"Starting Episode {episode + 1}/{num_episodes}")
+            
+            # Reset environment for the new episode
+            state, info = env.reset(seed=42)
+            total_reward = 0
+            done = False  # Flag to track episode termination
+            episode_start_time = time.time()
+            i = 0
+            jockeying_rates = []
+            reneging_rates = []
+        
+            for i in step_loop:   
+                if done:  # Break the loop if the episode ends
+                    break         
 			
-            if progress_log:
-                print("Step",i,"/",steps)
-            # ToDo:: is line below the same as the update_parameters() in the a2c.py    
-            self.markov_model.updateState()
+                if progress_log:
+                    print("Step", i + 1, "/", steps_per_episode) # print("Step",i,"/",steps)
+                        
+                self.markov_model.updateState()
 
-            srv_1 = self.dict_queues_obj.get("1") # Server1
-            srv_2 = self.dict_queues_obj.get("2") # Server2
+                srv_1 = self.dict_queues_obj.get("1") # Server1
+                srv_2 = self.dict_queues_obj.get("2") # Server2
 
-            if len(srv_1) < len(srv_2):
-                self.queue = srv_2
-                self.srv_rate = self.dict_servers_info.get("2") # Server2
+                if len(srv_1) < len(srv_2):
+                    self.queue = srv_2
+                    self.srv_rate = self.dict_servers_info.get("2") # Server2
 
-            else:            
-                self.queue = srv_1
-                self.srv_rate = self.dict_servers_info.get("1") # Server1
+                else:            
+                    self.queue = srv_1
+                    self.srv_rate = self.dict_servers_info.get("1") # Server1
             
                   
-            service_intervals=np.random.exponential(1/self.srv_rate,max(int(self.srv_rate*self.time_res*5),2)) # to ensure they exceed one sampling interval
-            service_intervals=service_intervals[np.where(np.add.accumulate(service_intervals)<=self.time_res)[0]]
-            service_intervals=service_intervals[0:np.min([len(service_intervals),self.queue.size])]
-            arrival_intervals=np.random.exponential(1/self.arr_rate, max(int(self.arr_rate*self.time_res*5),2))
+                service_intervals=np.random.exponential(1/self.srv_rate,max(int(self.srv_rate*self.time_res*5),2)) # to ensure they exceed one sampling interval
+                service_intervals=service_intervals[np.where(np.add.accumulate(service_intervals)<=self.time_res)[0]]
+                service_intervals=service_intervals[0:np.min([len(service_intervals),self.queue.size])]
+                arrival_intervals=np.random.exponential(1/self.arr_rate, max(int(self.arr_rate*self.time_res*5),2))
 
-            arrival_intervals=arrival_intervals[np.where(np.add.accumulate(arrival_intervals)<=self.time_res)[0]]
-            service_entries=np.array([[self.time+i,False] for i in service_intervals]) # False for service
-            service_entries=service_entries.reshape(int(service_entries.size/2),2)
-            time.sleep(2)
-            arrival_entries=np.array([[self.time+i,True] for i in arrival_intervals]) # True for request
-            # print("\n Arrived: ",arrival_entries) ####
-            time.sleep(2)
-            arrival_entries=arrival_entries.reshape(int(arrival_entries.size/2),2)
-            # print(arrival_entries)
-            time.sleep(2)
-            all_entries=np.append(service_entries,arrival_entries,axis=0)
-            all_entries=all_entries[np.argsort(all_entries[:,0])]
-            self.all_times = all_entries
-            # print("\n All Entered After: ",all_entries) ####
-            serv_times = np.random.exponential(2, len(all_entries))
-            serv_times = np.sort(serv_times)
-            self.all_serv_times = serv_times
-            # print("\n Times: ", np.random.exponential(2, len(all_entries)), "\n Arranged: ",serv_times)
-            time.sleep(2)                      
+                arrival_intervals=arrival_intervals[np.where(np.add.accumulate(arrival_intervals)<=self.time_res)[0]]
+                service_entries=np.array([[self.time+i,False] for i in service_intervals]) # False for service
+                service_entries=service_entries.reshape(int(service_entries.size/2),2)
+                time.sleep(1)
+                arrival_entries=np.array([[self.time+i,True] for i in arrival_intervals]) # True for request
+                # print("\n Arrived: ",arrival_entries) ####
+                time.sleep(1)
+                arrival_entries=arrival_entries.reshape(int(arrival_entries.size/2),2)
+                # print(arrival_entries)
+                time.sleep(1)
+                all_entries=np.append(service_entries,arrival_entries,axis=0)
+                all_entries=all_entries[np.argsort(all_entries[:,0])]
+                self.all_times = all_entries
+                # print("\n All Entered After: ",all_entries) ####
+                serv_times = np.random.exponential(2, len(all_entries))
+                serv_times = np.sort(serv_times)
+                self.all_serv_times = serv_times
+                # print("\n Times: ", np.random.exponential(2, len(all_entries)), "\n Arranged: ",serv_times)
+                time.sleep(2)                      
+                
+                # Step 1: Get action from the agent based on the current state
+                action = self.agent.select_action(state)
+                
+                # Step 2: Apply the action to the environment and get feedback
+                next_state, reward, done, info = self.env.step(action)
+
+                # Step 3: Store the reward for training
+                self.agent.store_reward(reward)
+                total_reward += reward
+
+                # Step 4: Update the state for the next step
+                state = next_state
+                i += 1            
+                              
+                self.processEntries(all_entries, i) #, self.uses_nn)
+                self.time+=self.time_res
             
-            self.processEntries(all_entries, i) #, self.uses_nn)
-            self.time+=self.time_res
+                # Step 4 (Optional): Adjust service rates if enabled
+                if adjust_service_rate:
+                    self.adjust_service_rates()
+
+                # Step 5: Compute jockeying and reneging rates
+                queue_jockeying_rate = self.compute_jockeying_rate(self.dict_queues_obj["1"])
+                queue_reneging_rate = self.compute_reneging_rate(self.dict_queues_obj["1"])
+                jockeying_rates.append(queue_jockeying_rate)
+                reneging_rates.append(queue_reneging_rate)
+                
+                # Ensure dispatch data is updated at each step
+                self.dispatch_all_queues() #dispatch_all_queues()
+                #self.run_scheduler(duration)
+                
+                # Optional: Log step-level progress (can be verbose)
+                if progress_log:
+                    print(f"Step {step + 1}: Action={action}, Reward={reward}, Total Reward={total_reward}")
             
+                self.set_batch_id(i)
+                
+            # Update the RL agent at the end of each episode
+            self.agent.update()
             
-            # Ensure dispatch data is updated at each step
-            self.dispatch_all_queues() #dispatch_all_queues()
-            #self.run_scheduler(duration)
+            # Calculate episode duration
+            episode_duration = time.time() - episode_start_time
+
+            # Log metrics for the episode
+            episode_metrics = {
+                "episode": episode + 1,
+                "total_reward": total_reward,
+                "average_reward": total_reward / i if i > 0 else 0,
+                "steps": i,
+                "duration": episode_duration,
+                "policy_entropy": episode_policy_entropy / i if i > 0 else 0,
+                "actor_loss": losses["actor_loss"],
+                "critic_loss": losses["critic_loss"],
+                "total_loss": losses["total_loss"],
+                "average_jockeying_rate": sum(jockeying_rates) / len(jockeying_rates) if jockeying_rates else 0,
+                "average_reneging_rate": sum(reneging_rates) / len(reneging_rates) if reneging_rates else 0
+            }
+            metrics.append(episode_metrics)
+
+            # Print episode summary
+            print(f"Episode {episode + 1} Summary: Total Reward={total_reward}, "
+                  f"Avg Reward={episode_metrics['average_reward']:.2f}, Steps={i}, "
+                  f"Policy Entropy={episode_metrics['policy_entropy']:.2f}, "
+                  f"Actor Loss={losses['actor_loss']:.4f}, Critic Loss={losses['critic_loss']:.4f}, "
+                  f"Total Loss={losses['total_loss']:.4f}, Steps={steps}, "
+                  f"Duration={episode_duration:.2f}s")
+              
+            print(f"Episode {episode + 1} finished with a total reward of {total_reward}")
             
-            self.set_batch_id(i)
-            
+            # Optional: Introduce a small delay between episodes for better monitoring
+            time.sleep(0.1)
+        
+        # Save metrics to file
+        
+        self.save_metrics(metrics, save_to_file)
+        print(f"Metrics saved to {save_to_file}")
+        
+        print("Training completed.")
+           
         return
+        
+        
+    def save_metrics(self, metrics, filename):
+        """
+        Save episode metrics to a CSV file.
+
+        Args:
+            metrics (list): A list of dictionaries with episode metrics.
+            filename (str): Path to the CSV file to save metrics.
+
+        Returns:
+            None
+        """
+        with open(filename, mode='w', newline='') as file:
+            writer = csv.DictWriter(file, fieldnames=metrics[0].keys())
+            writer.writeheader()
+            writer.writerows(metrics)
+            
+        print(f"Metrics successfully saved to {filename}")
     
     
     def set_batch_id(self, id):
@@ -1261,21 +1035,25 @@ class RequestQueue:
             for req in curr_queue:
                 if req.uses_nn:  # NN-based requests
                     
-                    action = self.get_nn_optimized_decision(curr_queue_state) #self.actor_critic.select_action(curr_queue_state)
-                    # print("\n ACT: ",action['action'], type(action['action']))
+                    action = self.get_nn_optimized_decision(curr_queue_state) 
+                    next_state, reward, done, _ = self.env.step(action)  # Apply action
+                    self.agent.store_reward(reward)  # Store the reward for training
+
+                    # Train RL model after processing each request
+                    if done:
+                        self.agent.update()
+                    
                     if action['action'] == 0: #action == 0:
-                        print(f"ActorCriticInfo [RENEGE]: Server {curr_queue_id} in state:  {curr_queue_state}. Dispatching state to all {len(self.nn_subscribers)} requests  in server {alt_queue_id}")
+                        print(f"ActorCriticInfo [RENEGE]: Server {curr_queue_id} in state:  {curr_queue_state}. Dispatching {next_state} to all {len(self.nn_subscribers)} requests  in server {alt_queue_id}")
                         self.makeRenegingDecision(req, curr_queue_id)                    
                     elif action['action'] ==  1: #action == 1:
-                        print(f"ActorCriticInfo [JOCKEY]: Server {curr_queue_id} in state:  {curr_queue_state}. Dispatching state to all {len(self.nn_subscribers)} requests  in server {alt_queue_id}")
+                        print(f"ActorCriticInfo [JOCKEY]: Server {curr_queue_id} in state:  {curr_queue_state}. Dispatching {next_state} to all {len(self.nn_subscribers)} requests  in server {alt_queue_id}")
                         self.makeJockeyingDecision(req, curr_queue_id, alt_queue_id, req.customerid, serv_rate) # STATE
                 else: 
                     print(f"Raw Markovian:  Server {curr_queue_id} in state {curr_queue_state}. Dispatching state to all {len(self.state_subscribers)} requests  in server {alt_queue_id}")
                     self.makeRenegingDecision(req, curr_queue_id)                                   
                     self.makeJockeyingDecision(req, curr_queue_id, alt_queue_id, req.customerid, serv_rate)
-                    
-             # of {len(curr_queue)}
-             # of {len(curr_queue)}
+                        
         else:
             return
 
@@ -1290,29 +1068,11 @@ class RequestQueue:
         action = self.agent.select_action(state_tensor)  # self.actor_critic.select_action(state_tensor)# rate_reneged
         # print("\n Learned Action => ", "Jockey" if action == 1 else "Renege")
         return {"action": action, "nn_based": True}
-    
-    #def get_nn_optimized_decision(self, queue_state):
-        
-    #    if isinstance(queue_state, dict):         
-    #        state = np.concatenate([
-    #            np.array(queue_state[key]).flatten() if hasattr(queue_state[key], 'flatten') else np.array([queue_state[key]], dtype=float)
-    #            for key in queue_state.keys() if isinstance(queue_state[key], (int, float, np.number))
-    #        ])
-            
-        """Uses AI model to decide whether to renege or jockey."""
-        #state_tensor = torch.tensor(state, dtype=torch.float32).to(device) # .values()
-        
-        # If state is not a tensor, create one; otherwise, use it as is.
-    #    if not isinstance(state, torch.Tensor):
-    #        state_tensor = torch.FloatTensor(state)
-        
+       
     #    if not isinstance(None, type(state_tensor)):
     #        action, _, _, _ = self.agent.select_action(state_tensor)  # self.actor_critic.select_action(state_tensor)                          
     #        return {"action": action.cpu().numpy(), "nn_based": True}
-            
-    #    else:			
-    #        return     
-    
+
     
     def dispatch(self, uses_nn): #  dispatch_data,   alt_queue_id
         """
@@ -1948,48 +1708,452 @@ class RequestQueue:
         return decision
        
 
+
+
+class ActorCritic(nn.Module):
+    def __init__(self, state_dim, action_dim):
+        super(ActorCritic, self).__init__()
+        self.actor = nn.Sequential(
+            nn.Linear(state_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, action_dim),
+            nn.Softmax(dim=-1)
+        )
+        self.critic = nn.Sequential(
+            nn.Linear(state_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+
+    def forward(self, state):
+		
+        # print("\n FORWARDED STATE: ", state)
+        action_probs = self.actor(state)
+        state_value = self.critic(state)
+        
+        # Check for NaN values in action_probs and handle them
+        if torch.isnan(action_probs).any():
+            print("NaN values detected in action_probs:", action_probs)
+            action_probs = torch.where(torch.isnan(action_probs), torch.zeros_like(action_probs), action_probs)
+            action_probs = action_probs / action_probs.sum(dim=-1, keepdim=True)  # Normalize to ensure valid probabilities
+            
+        return action_probs, state_value
+        
+
+class A2CAgent:
+    def __init__(self, state_dim, action_dim, lr=0.001, gamma=0.99):
+        self.gamma = gamma
+                
+        self.model = ActorCritic(state_dim, action_dim).to(device)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        self.log_probs = []
+        self.values = []
+        self.rewards = []
+        
+
+    def select_action(self, state):
+        print("\n -->> ", state)
+        if isinstance(state, dict):
+            #state = np.concatenate([state[key].flatten() for key in state.keys()])
+            # state = np.concatenate([np.array(state[key]).flatten() if hasattr(state[key], 'flatten') else [state[key]] for key in state.keys()])
+            state = np.concatenate([
+                np.array(state[key]).flatten() if hasattr(state[key], 'flatten') else np.array([state[key]], dtype=float)
+                for key in state.keys() if isinstance(state[key], (int, float, np.number))
+            ])
+            
+        # If state is not a tensor, create one; otherwise, use it as is.
+        if not isinstance(state, torch.Tensor):
+            state = torch.FloatTensor(state)
+    
+        # Ensure the state tensor does not contain NaN values
+        if torch.isnan(state).any():
+            print("NaN values detected in state tensor:", state)
+            state = torch.where(torch.isnan(state), torch.zeros_like(state), state)
+                       
+        state = state.unsqueeze(0).to(device)
+        action_probs, state_value = self.model(state)
+    
+        # Check for NaN values in action_probs and handle them
+        if torch.isnan(action_probs).any():
+            print("NaN values detected in action_probs:", action_probs)
+            action_probs = torch.where(torch.isnan(action_probs), torch.zeros_like(action_probs), action_probs)
+            action_probs = action_probs / action_probs.sum(dim=-1, keepdim=True)  # Normalize to ensure valid probabilities            
+            
+        action_dist = torch.distributions.Categorical(action_probs)
+        action = action_dist.sample()
+        self.log_probs.append(action_dist.log_prob(action))
+        self.values.append(state_value)
+        
+        return action.item()
+        
+
+    def store_reward(self, reward):
+        self.rewards.append(reward)
+        
+
+    def update(self):
+        R = 0
+        returns = []
+        for r in reversed(self.rewards):
+            R = r + self.gamma * R
+            returns.insert(0, R)
+
+        returns = torch.tensor(returns).to(device)
+        log_probs = torch.stack(self.log_probs).to(device)
+        values = torch.cat(self.values).to(device)
+        advantage = returns - values
+
+        actor_loss = -(log_probs * advantage.detach()).mean()
+        critic_loss = advantage.pow(2).mean()
+        loss = actor_loss + critic_loss
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        self.log_probs = []
+        self.values = []
+        self.rewards = []
+
+
+class Observations:
+    def __init__(self, reneged=False, curr_pose=0, intensity=0.0, jockeying_rate=0.0, reneging_rate=0.0, jockeyed=False, time_waited=0.0,end_utility=0.0, reward=0.0, long_avg_serv_time=0.0): # reward=0.0, 
+        self.reneged=reneged
+        #self.serv_rate = serv_rate
+        self.queue_intensity = intensity
+        self.jockeyed=jockeyed
+        self.time_waited=float(time_waited)
+        self.end_utility=float(end_utility)
+        self.reward= reward # id_queue
+        self.queue_size=curr_pose
+        self.obs = OrderedDict() #{} # self.get_obs()  
+        self.curr_obs_jockey = []
+        self.curr_obs_renege = []
+        self.long_avg_serv_time = long_avg_serv_time 
+        self. jockeying_rate = jockeying_rate
+        self.reneging_rate = reneging_rate
+
+        return
+
+
+    def set_obs (self, queue_id,  curr_pose, intensity, jockeying_rate, reneging_rate, time_in_serv, time_to_service_end, reward, activity, long_avg_serv_time): 
+        		
+        if queue_id == "1": # Server1
+            _id_ = 1
+        else:
+            _id_ = 2
+			
+        self.obs = {
+			        "ServerID": _id_, #queue_id,
+                    "at_pose": curr_pose,
+                    "rate_jockeyed": jockeying_rate,
+                    "rate_reneged": reneging_rate,                    
+                    "this_busy": intensity,
+                    "expected_service_time":time_in_serv,
+                    "time_service_took": time_to_service_end,
+                    "reward": reward,
+                    "action":activity,
+                    "long_avg_serv_time": long_avg_serv_time
+                }
+              
+
+    def get_obs (self):
+        
+        return self.obs        
+        
+        
+    def get_renege_obs(self, queueid, queue): # , intensity, pose): # get_curr_obs_renege
+		
+        renegs = sum(1 for req in queue if '_reneged' in req.customerid)        			       
+	    
+        return renegs  
+     
+
+class Actions(Enum):
+    RENEGE = 0
+    JOCKEY = 1
+    SERVED = -1
+    
+
+class ImpatientTenantEnv:
+    metadata = {"render_modes": ["ansi"], "render_fps": 4}
+
+    def __init__(self, render_mode=None):
+        self.queue_state = {}
+        self.action = ""  
+        self.utility_basic = 1.0
+        self.discount_coef = 0.1
+        self.history = {}
+        # self.queueObj = Queues()
+        self.Observations = Observations()        
+        self.endutil = 0.0 
+        self.intensity = 0.0
+        self.jockey = 0.0
+        self.queuesize = 0.0
+        self.renege = 0.0
+        self.reward = 0.0 
+        self.servrate = 0.0
+        self.waitingtime = 0.0
+        self.ren_state_after_action = {}
+        self.jock_state_after_action = {}
+        self.requestObj = RequestQueue(self.utility_basic, self.discount_coef)
+        #duration = 3
+        #self.requestObj.run(duration)        
+        self.queue_id = self.requestObj.get_curr_queue_id()
+  
+        self.action_space = 2  # Number of discrete actions
+        self.history = self.requestObj.get_history()        
+
+        self.observation_space = {
+            "ServerID": ("1", "2"),
+            "rate_jockeyed": (0.0, 1.0),            
+            "this_busy": (0.0, 20),
+            "expected_service_time": (0.0, 50.0),
+            "time_service_took": (0.0, 50.0),
+            "rate_reneged": (0.0, 1.0),
+            "reward": (0.0, 1.0),
+            "at_pose": (1.0, 50),
+            "long_avg_serv_time": (0.0,50),
+            "action": ("served","reneged","jockeyed"),
+        }
+        
+       
+
+        self._action_to_state = {
+            Actions.RENEGE.value: self.get_renege_action_outcome(self.queue_id), 
+            Actions.JOCKEY.value: self.get_jockey_action_outcome(self.queue_id)
+        }
+
+        assert render_mode is None or render_mode in self.metadata["render_modes"]
+        self.render_mode = render_mode
+        
+
+    def _get_obs(self):
+        obs = {key: np.zeros(1) for key in self.observation_space.keys()}
+        # print("\n Observed: ", obs)
+        return obs
+        
+
+    def _get_info(self):
+		
+        return self._action_to_state 
+        
+
+    def reset(self, seed=None, options=None):
+        random.seed(seed)
+        np.random.seed(seed)
+        observation = [0.0] * state_dim #self.Observations.get_obs() # self._get_obs()         
+        info = self._get_info()                                 
+        return observation, info
+
+
+    def get_renege_action_outcome(self, queue_id):
+        curr_state = self.requestObj.get_queue_state(queue_id) # get_queue_curr_state()
+        srv = curr_state.get('ServerID')
+        
+        if srv == 1:
+            if len(self.Observations.get_obs()) > 0: #get_curr_obs_renege(srv)) > 0:
+                curr_state['apt_pose'] = self.queuesize - 1
+                curr_state["reward"] = self.Observations.get_curr_obs_renege(srv)[0]['reward']
+        else:
+            if len(self.Observations.get_obs()) > 0: # get_curr_obs_renege(srv)) > 0:
+                curr_state['apt_pose'] = self.queuesize - 1
+                curr_state["reward"] = self.Observations.get_curr_obs_renege[0]['reward']
+                
+        return curr_state
+        
+
+    def get_jockey_action_outcome(self, queue_id):
+        curr_state = self.requestObj.get_queue_state(queue_id) # get_queue_curr_state()
+        srv = curr_state.get('ServerID')
+        
+        if srv == 1:
+            if len(self.Observations.get_obs()) > 0: #get_curr_obs_jockey(srv)) > 0:
+                curr_state['apt_pose'] = self.queuesize + 1
+                curr_state["reward"] = self.Observations.get_curr_obs_jockey(srv)[0]['reward']
+        else:
+            if len(self.Observations.get_obs()) > 0: # get_curr_obs_jockey(srv)) > 0:
+                curr_state['at_pose'] = self.queuesize + 1
+                curr_state["reward"] = self.Observations.get_curr_obs_jockey(srv)[0]['reward']
+                
+        return curr_state
+        
+
+    def step(self, action):
+        new_state = self._action_to_state[action]
+        terminated = new_state["QueueSize"] <= 0.0
+        reward = new_state['Reward']
+        observation = self._get_obs()
+        info = self._get_info()
+        flattened_observation = np.concatenate([observation[key].flatten() for key in observation.keys()])
+
+        if self.render_mode == "human":
+            self._render_frame()
+        
+        return flattened_observation, reward, terminated, info        
+
+ 
+    def get_state_action_info(self):
+        state_action_info = {
+            "state": self._get_obs(),
+            "action_to_state": self._get_info() # self._action_to_state
+        }
+        
+        return state_action_info
+        
+
+    def get_raw_server_status(self):
+        raw_server_status = {
+            "queue_id": self.queue_id,
+            "queuesize": self.queuesize,
+            "servrate": self.servrate,
+            "waitingtime": self.waitingtime
+        }
+        return raw_server_status
+
+
+
+def visualize_results(metrics_file="metrics.csv"):
+    """
+    Visualize simulation results recorded in the metrics file.
+
+    Args:
+        metrics_file (str): Path to the CSV file containing episode metrics.
+
+    Returns:
+        None
+    """
+    # Load metrics from the CSV file
+    metrics = pd.read_csv(metrics_file)
+
+    # Plot Total Rewards per Episode
+    plt.figure(figsize=(10, 6))
+    plt.plot(metrics['episode'], metrics['total_reward'], label='Total Reward', marker='o')
+    plt.title("Total Rewards per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Total Reward")
+    plt.grid()
+    plt.legend()
+    plt.show()
+
+    # Plot Average Rewards per Episode
+    plt.figure(figsize=(10, 6))
+    plt.plot(metrics['episode'], metrics['average_reward'], label='Average Reward', marker='o', color='orange')
+    plt.title("Average Rewards per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Average Reward")
+    plt.grid()
+    plt.legend()
+    plt.show()
+
+    # Plot Policy Entropy
+    plt.figure(figsize=(10, 6))
+    plt.plot(metrics['episode'], metrics['policy_entropy'], label='Policy Entropy', marker='o', color='green')
+    plt.title("Policy Entropy per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Policy Entropy")
+    plt.grid()
+    plt.legend()
+    plt.show()
+
+    # Plot Loss Metrics
+    plt.figure(figsize=(10, 6))
+    plt.plot(metrics['episode'], metrics['actor_loss'], label='Actor Loss', marker='o', color='red')
+    plt.plot(metrics['episode'], metrics['critic_loss'], label='Critic Loss', marker='o', color='blue')
+    plt.plot(metrics['episode'], metrics['total_loss'], label='Total Loss', marker='o', color='purple')
+    plt.title("Loss Metrics per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Loss")
+    plt.grid()
+    plt.legend()
+    plt.show()
+
+    # Plot Jockeying and Reneging Rates
+    plt.figure(figsize=(10, 6))
+    plt.plot(metrics['episode'], metrics['average_jockeying_rate'], label='Average Jockeying Rate', marker='o', color='cyan')
+    plt.plot(metrics['episode'], metrics['average_reneging_rate'], label='Average Reneging Rate', marker='o', color='magenta')
+    plt.title("Jockeying and Reneging Rates per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Rate")
+    plt.grid()
+    plt.legend()
+    plt.show()
+
+
+def visualize_comparison(adjusted_file="adjusted_metrics.csv", non_adjusted_file="non_adjusted_metrics.csv"):
+    """
+    Visualize and compare metrics between adjusted and non-adjusted service rates.
+
+    Args:
+        adjusted_file (str): Path to the metrics file for adjusted service rates.
+        non_adjusted_file (str): Path to the metrics file for non-adjusted service rates.
+
+    Returns:
+        None
+    """
+    # Load metrics
+    adjusted_metrics = pd.read_csv(adjusted_file)
+    non_adjusted_metrics = pd.read_csv(non_adjusted_file)
+
+    # Plot Jockeying Rates
+    plt.figure(figsize=(12, 6))
+    plt.plot(adjusted_metrics['episode'], adjusted_metrics['average_jockeying_rate'], label='Adjusted Service Rate', marker='o')
+    plt.plot(non_adjusted_metrics['episode'], non_adjusted_metrics['average_jockeying_rate'], label='Non-Adjusted Service Rate', marker='x')
+    plt.title("Average Jockeying Rates per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Average Jockeying Rate")
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+    # Plot Reneging Rates
+    plt.figure(figsize=(12, 6))
+    plt.plot(adjusted_metrics['episode'], adjusted_metrics['average_reneging_rate'], label='Adjusted Service Rate', marker='o')
+    plt.plot(non_adjusted_metrics['episode'], non_adjusted_metrics['average_reneging_rate'], label='Non-Adjusted Service Rate', marker='x')
+    plt.title("Average Reneging Rates per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Average Reneging Rate")
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+
 def main():       
 	
     utility_basic = 1.0
     discount_coef = 0.1
     requestObj = RequestQueue(utility_basic, discount_coef)
-    # env = ImpatientTenantEnv()
+    
     duration = 20
     
     # Start the scheduler
-    scheduler_thread = threading.Thread(target=requestObj.run(duration)) # requestObj.run_scheduler) # 
+    scheduler_thread = threading.Thread(target=requestObj.run(duration, adjust_service_rate=False, save_to_file="non_adjusted_metrics.csv")) # requestObj.run_scheduler) # 
     scheduler_thread.start()
     
-    # requestObj.run(duration)
+    visualize_results(metrics_file="metrics.csv")
     
-    actor_critic = requestObj.getActCritNet() # Inside    
-    agent = requestObj.getAgent()        
+    visualize_comparison()
     
-    #state_dim = len(env.observation_space)
-    #action_dim = env.action_space            
-
-    # agent = A2CAgent(state_dim, action_dim)    
+    #actor_critic = requestObj.getActCritNet() # Inside    
+    #agent = requestObj.getAgent()        
     
-    # Instantiate the ActorCritic class
     
-    #actor_critic = ActorCritic(state_dim, action_dim).to(device)
+    #for episode in range(100):
+    #    state, info = env.reset(seed=42)
+    #    total_reward = 0
 
-    for episode in range(100):
-        state, info = env.reset(seed=42)
-        total_reward = 0
+    #    for t in range(100):
+    #        action = agent.select_action(state)
+    #        next_state, reward, done, info = env.step(action)
+    #        agent.store_reward(reward)
+    #        state = next_state
+    #        total_reward += reward
 
-        for t in range(100):
-            action = agent.select_action(state)
-            next_state, reward, done, info = env.step(action)
-            agent.store_reward(reward)
-            state = next_state
-            total_reward += reward
+    #        if done:
+    #            break
 
-            if done:
-                break
-
-        agent.update()
-        print(f"Episode {episode}, Total Reward: {total_reward}")
+    #    agent.update()
+    #    print(f"Episode {episode}, Total Reward: {total_reward}")
 
 if __name__ == "__main__":
     main()
