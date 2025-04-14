@@ -46,9 +46,63 @@ logging.basicConfig(
 ################################## Globals ####################################
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-env = ImpatientTenantEnv()
-state_dim = len(env.observation_space)
-action_dim = env.action_space
+class Actions(Enum):
+    RENEGE = 0
+    JOCKEY = 1
+    SERVED = -1
+    
+
+class Observations:
+    def __init__(self, reneged=False, curr_pose=0, intensity=0.0, jockeying_rate=0.0, reneging_rate=0.0, jockeyed=False, time_waited=0.0,end_utility=0.0, reward=0.0, long_avg_serv_time=0.0): # reward=0.0, 
+        self.reneged=reneged
+        #self.serv_rate = serv_rate
+        self.queue_intensity = intensity
+        self.jockeyed=jockeyed
+        self.time_waited=float(time_waited)
+        self.end_utility=float(end_utility)
+        self.reward= reward # id_queue
+        self.queue_size=curr_pose
+        self.obs = OrderedDict() #{} # self.get_obs()  
+        self.curr_obs_jockey = []
+        self.curr_obs_renege = []
+        self.long_avg_serv_time = long_avg_serv_time 
+        self. jockeying_rate = jockeying_rate
+        self.reneging_rate = reneging_rate
+
+        return
+
+
+    def set_obs (self, queue_id,  curr_pose, intensity, jockeying_rate, reneging_rate, time_in_serv, time_to_service_end, reward, activity, long_avg_serv_time): 
+        		
+        if queue_id == "1": # Server1
+            _id_ = 1
+        else:
+            _id_ = 2
+			
+        self.obs = {
+			        "ServerID": _id_, #queue_id,
+                    "at_pose": curr_pose,
+                    "rate_jockeyed": jockeying_rate,
+                    "rate_reneged": reneging_rate,                    
+                    "this_busy": intensity,
+                    "expected_service_time":time_in_serv,
+                    "time_service_took": time_to_service_end,
+                    "reward": reward,
+                    "action":activity,
+                    "long_avg_serv_time": long_avg_serv_time
+                }
+              
+
+    def get_obs (self):
+        
+        return self.obs        
+        
+        
+    def get_renege_obs(self, queueid, queue): # , intensity, pose): # get_curr_obs_renege
+		
+        renegs = sum(1 for req in queue if '_reneged' in req.customerid)        			       
+	    
+        return renegs      
 
 
 class Queues(object):
@@ -369,7 +423,7 @@ class RequestQueue:
 
     APPROX_INF = 1000 # an integer for approximating infinite
 
-    def __init__(self, utility_basic, discount_coef, markov_model=msm.StateMachine(orig=None),
+    def __init__(self, state_dim, action_dim, utility_basic, discount_coef, markov_model=msm.StateMachine(orig=None),
                  time=0.0, outage_risk=0.1, customerid="",learning_mode='online', decision_rule='risk_control',
                  alt_option='fixed_revenue', min_amount_observations=1, dist_local_delay=stats.expon, exp_time_service_end=0.0,
                  para_local_delay=[1.0,2.0,10.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, batchid=np.int16, uses_nn=False): # Dispatched
@@ -381,6 +435,8 @@ class RequestQueue:
         }
         self.markov_model=msm.StateMachine(orig=markov_model)
         self.customerid = customerid
+        self.state_dim = state_dim
+        self.action_dim = action_dim
         self.utility_basic=float(utility_basic)
         self.local_utility = 0.0
         self.compute_counter = 0
@@ -1708,6 +1764,184 @@ class RequestQueue:
         return decision
        
 
+class ImpatientTenantEnv:
+    metadata = {"render_modes": ["ansi"], "render_fps": 4}
+
+    def __init__(self, render_mode=None):
+        self.queue_state = {}
+        self.action = ""  
+        self.utility_basic = 1.0
+        self.discount_coef = 0.1
+        self.history = {}
+        # self.queueObj = Queues()
+        self.Observations = Observations()        
+        self.endutil = 0.0 
+        self.intensity = 0.0
+        self.jockey = 0.0
+        self.queuesize = 0.0
+        self.renege = 0.0
+        self.reward = 0.0 
+        self.servrate = 0.0
+        self.waitingtime = 0.0
+        self.ren_state_after_action = {}
+        self.jock_state_after_action = {}
+             
+        self.action_space = 2  # Number of discrete actions
+        self.observation_space = {
+            "ServerID": ("1", "2"),
+            "rate_jockeyed": (0.0, 1.0),            
+            "this_busy": (0.0, 20),
+            "expected_service_time": (0.0, 50.0),
+            "time_service_took": (0.0, 50.0),
+            "rate_reneged": (0.0, 1.0),
+            "reward": (0.0, 1.0),
+            "at_pose": (1.0, 50),
+            "long_avg_serv_time": (0.0,50),
+            "action": ("served","reneged","jockeyed"),
+        }
+        
+        
+        self.state_dim = len(self.observation_space)
+        self.action_dim = self.action_space
+        # self.requestObj = RequestQueue(self.utility_basic, self.discount_coef)
+        self.requestObj = RequestQueue(self.state_dim, self.action_dim, self.utility_basic, self.discount_coef)       
+        self.queue_id = self.requestObj.get_curr_queue_id()         
+        self.history = self.requestObj.get_history()   
+                       
+        self._action_to_state = {
+            Actions.RENEGE.value: self.get_renege_action_outcome(self.queue_id), 
+            Actions.JOCKEY.value: self.get_jockey_action_outcome(self.queue_id)
+        }
+
+        assert render_mode is None or render_mode in self.metadata["render_modes"]
+        self.render_mode = render_mode
+        
+
+    def _get_obs(self):
+        obs = {key: np.zeros(1) for key in self.observation_space.keys()}
+        # print("\n Observed: ", obs)
+        return obs
+        
+
+    def _get_info(self):
+		
+        return self._action_to_state 
+        
+
+    def reset(self, seed=None, options=None):
+        random.seed(seed)
+        np.random.seed(seed)
+        observation = [0.0] * state_dim #self.Observations.get_obs() # self._get_obs()         
+        info = self._get_info()                                 
+        return observation, info
+
+
+    def get_renege_action_outcome(self, queue_id):
+        """
+        Compute the state of the queue after a renege action.
+
+        Args:
+            queue_id (str): The ID of the queue where the renege action occurs.
+
+        Returns:
+            dict: The resulting state of the queue.
+        """
+        if not self.queue_state[queue_id]:
+            return {"QueueSize": 0, "Reward": -1.0}  # Example: Empty queue, negative reward
+
+        # Simulate the renege action (remove the last customer)
+        new_queue_state = list(self.queue_state[queue_id])  # Copy current state
+        new_queue_state.pop()  # Remove the last customer
+
+        return {
+            "QueueSize": len(new_queue_state),
+            "Reward": 0.5,  # Example: Positive reward for reducing queue size
+            "NewState": new_queue_state
+        }
+        
+
+    def get_jockey_action_outcome(self, queue_id):
+        """
+        Compute the state of the queue after a jockey action.
+
+        Args:
+            queue_id (str): The ID of the source queue for the jockey action.
+
+        Returns:
+            dict: The resulting state of the queue.
+        """
+        target_queue_id = "queue_2" if queue_id == "queue_1" else "queue_1"
+
+        if not self.queue_state[queue_id]:
+            return {"QueueSize": len(self.queue_state[target_queue_id]), "Reward": -1.0}  # Negative reward for invalid action
+
+        # Simulate the jockey action (move the last customer to the target queue)
+        new_source_queue = list(self.queue_state[queue_id])  # Copy current state
+        new_target_queue = list(self.queue_state[target_queue_id])  # Copy target state
+        customer = new_source_queue.pop()  # Remove customer from source
+        new_target_queue.append(customer)  # Add customer to target
+
+        return {
+            "QueueSize": len(new_target_queue),
+            "Reward": 1.0,  # Example: Positive reward for balancing queues
+            "SourceState": new_source_queue,
+            "TargetState": new_target_queue
+        }
+
+    def step(self, action):
+        """
+        Execute a step in the environment based on the given action.
+
+        Args:
+            action (int): The action to perform (RENEGE or JOCKEY).
+
+        Returns:
+            tuple: (observation, reward, terminated, info)
+        """
+        # Update action_to_state dynamically
+        self.update_action_to_state()
+
+        # Get the resulting state for the action
+        new_state = self._action_to_state[action]
+        terminated = new_state["QueueSize"] <= 0  # Example termination condition
+        reward = new_state["Reward"]
+
+        # Update queue states based on the action outcome
+        if action == Actions.RENEGE.value:
+            self.queue_state[self.queue_id] = new_state["NewState"]
+        elif action == Actions.JOCKEY.value:
+            self.queue_state[self.queue_id] = new_state["SourceState"]
+            target_queue = "queue_2" if self.queue_id == "queue_1" else "queue_1"
+            self.queue_state[target_queue] = new_state["TargetState"]
+
+        # Get observation and info
+        observation = self._get_obs()
+        info = self._get_info()
+
+        return observation, reward, terminated, info       
+
+ 
+    def get_state_action_info(self):
+        state_action_info = {
+            "state": self._get_obs(),
+            "action_to_state": self._get_info() # self._action_to_state
+        }
+        
+        return state_action_info
+        
+
+    def get_raw_server_status(self):
+        raw_server_status = {
+            "queue_id": self.queue_id,
+            "queuesize": self.queuesize,
+            "servrate": self.servrate,
+            "waitingtime": self.waitingtime
+        }
+        return raw_server_status
+        
+env = ImpatientTenantEnv()
+state_dim = len(env.observation_space)
+action_dim = env.action_space
 
 
 class ActorCritic(nn.Module):
@@ -1752,7 +1986,7 @@ class A2CAgent:
         
 
     def select_action(self, state):
-        print("\n -->> ", state)
+        # print("\n -->> ", state)
         if isinstance(state, dict):
             #state = np.concatenate([state[key].flatten() for key in state.keys()])
             # state = np.concatenate([np.array(state[key]).flatten() if hasattr(state[key], 'flatten') else [state[key]] for key in state.keys()])
@@ -1814,202 +2048,6 @@ class A2CAgent:
         self.log_probs = []
         self.values = []
         self.rewards = []
-
-
-class Observations:
-    def __init__(self, reneged=False, curr_pose=0, intensity=0.0, jockeying_rate=0.0, reneging_rate=0.0, jockeyed=False, time_waited=0.0,end_utility=0.0, reward=0.0, long_avg_serv_time=0.0): # reward=0.0, 
-        self.reneged=reneged
-        #self.serv_rate = serv_rate
-        self.queue_intensity = intensity
-        self.jockeyed=jockeyed
-        self.time_waited=float(time_waited)
-        self.end_utility=float(end_utility)
-        self.reward= reward # id_queue
-        self.queue_size=curr_pose
-        self.obs = OrderedDict() #{} # self.get_obs()  
-        self.curr_obs_jockey = []
-        self.curr_obs_renege = []
-        self.long_avg_serv_time = long_avg_serv_time 
-        self. jockeying_rate = jockeying_rate
-        self.reneging_rate = reneging_rate
-
-        return
-
-
-    def set_obs (self, queue_id,  curr_pose, intensity, jockeying_rate, reneging_rate, time_in_serv, time_to_service_end, reward, activity, long_avg_serv_time): 
-        		
-        if queue_id == "1": # Server1
-            _id_ = 1
-        else:
-            _id_ = 2
-			
-        self.obs = {
-			        "ServerID": _id_, #queue_id,
-                    "at_pose": curr_pose,
-                    "rate_jockeyed": jockeying_rate,
-                    "rate_reneged": reneging_rate,                    
-                    "this_busy": intensity,
-                    "expected_service_time":time_in_serv,
-                    "time_service_took": time_to_service_end,
-                    "reward": reward,
-                    "action":activity,
-                    "long_avg_serv_time": long_avg_serv_time
-                }
-              
-
-    def get_obs (self):
-        
-        return self.obs        
-        
-        
-    def get_renege_obs(self, queueid, queue): # , intensity, pose): # get_curr_obs_renege
-		
-        renegs = sum(1 for req in queue if '_reneged' in req.customerid)        			       
-	    
-        return renegs  
-     
-
-class Actions(Enum):
-    RENEGE = 0
-    JOCKEY = 1
-    SERVED = -1
-    
-
-class ImpatientTenantEnv:
-    metadata = {"render_modes": ["ansi"], "render_fps": 4}
-
-    def __init__(self, render_mode=None):
-        self.queue_state = {}
-        self.action = ""  
-        self.utility_basic = 1.0
-        self.discount_coef = 0.1
-        self.history = {}
-        # self.queueObj = Queues()
-        self.Observations = Observations()        
-        self.endutil = 0.0 
-        self.intensity = 0.0
-        self.jockey = 0.0
-        self.queuesize = 0.0
-        self.renege = 0.0
-        self.reward = 0.0 
-        self.servrate = 0.0
-        self.waitingtime = 0.0
-        self.ren_state_after_action = {}
-        self.jock_state_after_action = {}
-        self.requestObj = RequestQueue(self.utility_basic, self.discount_coef)
-        #duration = 3
-        #self.requestObj.run(duration)        
-        self.queue_id = self.requestObj.get_curr_queue_id()
-  
-        self.action_space = 2  # Number of discrete actions
-        self.history = self.requestObj.get_history()        
-
-        self.observation_space = {
-            "ServerID": ("1", "2"),
-            "rate_jockeyed": (0.0, 1.0),            
-            "this_busy": (0.0, 20),
-            "expected_service_time": (0.0, 50.0),
-            "time_service_took": (0.0, 50.0),
-            "rate_reneged": (0.0, 1.0),
-            "reward": (0.0, 1.0),
-            "at_pose": (1.0, 50),
-            "long_avg_serv_time": (0.0,50),
-            "action": ("served","reneged","jockeyed"),
-        }
-        
-       
-
-        self._action_to_state = {
-            Actions.RENEGE.value: self.get_renege_action_outcome(self.queue_id), 
-            Actions.JOCKEY.value: self.get_jockey_action_outcome(self.queue_id)
-        }
-
-        assert render_mode is None or render_mode in self.metadata["render_modes"]
-        self.render_mode = render_mode
-        
-
-    def _get_obs(self):
-        obs = {key: np.zeros(1) for key in self.observation_space.keys()}
-        # print("\n Observed: ", obs)
-        return obs
-        
-
-    def _get_info(self):
-		
-        return self._action_to_state 
-        
-
-    def reset(self, seed=None, options=None):
-        random.seed(seed)
-        np.random.seed(seed)
-        observation = [0.0] * state_dim #self.Observations.get_obs() # self._get_obs()         
-        info = self._get_info()                                 
-        return observation, info
-
-
-    def get_renege_action_outcome(self, queue_id):
-        curr_state = self.requestObj.get_queue_state(queue_id) # get_queue_curr_state()
-        srv = curr_state.get('ServerID')
-        
-        if srv == 1:
-            if len(self.Observations.get_obs()) > 0: #get_curr_obs_renege(srv)) > 0:
-                curr_state['apt_pose'] = self.queuesize - 1
-                curr_state["reward"] = self.Observations.get_curr_obs_renege(srv)[0]['reward']
-        else:
-            if len(self.Observations.get_obs()) > 0: # get_curr_obs_renege(srv)) > 0:
-                curr_state['apt_pose'] = self.queuesize - 1
-                curr_state["reward"] = self.Observations.get_curr_obs_renege[0]['reward']
-                
-        return curr_state
-        
-
-    def get_jockey_action_outcome(self, queue_id):
-        curr_state = self.requestObj.get_queue_state(queue_id) # get_queue_curr_state()
-        srv = curr_state.get('ServerID')
-        
-        if srv == 1:
-            if len(self.Observations.get_obs()) > 0: #get_curr_obs_jockey(srv)) > 0:
-                curr_state['apt_pose'] = self.queuesize + 1
-                curr_state["reward"] = self.Observations.get_curr_obs_jockey(srv)[0]['reward']
-        else:
-            if len(self.Observations.get_obs()) > 0: # get_curr_obs_jockey(srv)) > 0:
-                curr_state['at_pose'] = self.queuesize + 1
-                curr_state["reward"] = self.Observations.get_curr_obs_jockey(srv)[0]['reward']
-                
-        return curr_state
-        
-
-    def step(self, action):
-        new_state = self._action_to_state[action]
-        terminated = new_state["QueueSize"] <= 0.0
-        reward = new_state['Reward']
-        observation = self._get_obs()
-        info = self._get_info()
-        flattened_observation = np.concatenate([observation[key].flatten() for key in observation.keys()])
-
-        if self.render_mode == "human":
-            self._render_frame()
-        
-        return flattened_observation, reward, terminated, info        
-
- 
-    def get_state_action_info(self):
-        state_action_info = {
-            "state": self._get_obs(),
-            "action_to_state": self._get_info() # self._action_to_state
-        }
-        
-        return state_action_info
-        
-
-    def get_raw_server_status(self):
-        raw_server_status = {
-            "queue_id": self.queue_id,
-            "queuesize": self.queuesize,
-            "servrate": self.servrate,
-            "waitingtime": self.waitingtime
-        }
-        return raw_server_status
 
 
 
