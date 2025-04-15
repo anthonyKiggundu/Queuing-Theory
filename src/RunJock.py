@@ -419,11 +419,117 @@ class Request:
         logging.info("", extra={"request_id": self.request_id, "queue_id": self.queue_id, "action": action}) # MATCH
 
 
+class ActorCritic(nn.Module):
+    def __init__(self, state_dim, action_dim):
+        super(ActorCritic, self).__init__()
+        self.actor = nn.Sequential(
+            nn.Linear(state_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, action_dim),
+            nn.Softmax(dim=-1)
+        )
+        self.critic = nn.Sequential(
+            nn.Linear(state_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+
+    def forward(self, state):
+		
+        # print("\n FORWARDED STATE: ", state)
+        action_probs = self.actor(state)
+        state_value = self.critic(state)
+        
+        # Check for NaN values in action_probs and handle them
+        if torch.isnan(action_probs).any():
+            print("NaN values detected in action_probs:", action_probs)
+            action_probs = torch.where(torch.isnan(action_probs), torch.zeros_like(action_probs), action_probs)
+            action_probs = action_probs / action_probs.sum(dim=-1, keepdim=True)  # Normalize to ensure valid probabilities
+            
+        return action_probs, state_value
+        
+
+class A2CAgent:
+    def __init__(self, state_dim, action_dim, lr=0.001, gamma=0.99):
+        self.gamma = gamma
+                
+        self.model = ActorCritic(state_dim, action_dim).to(device)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        self.log_probs = []
+        self.values = []
+        self.rewards = []
+        
+
+    def select_action(self, state):
+        # print("\n -->> ", state)
+        if isinstance(state, dict):
+            #state = np.concatenate([state[key].flatten() for key in state.keys()])
+            # state = np.concatenate([np.array(state[key]).flatten() if hasattr(state[key], 'flatten') else [state[key]] for key in state.keys()])
+            state = np.concatenate([
+                np.array(state[key]).flatten() if hasattr(state[key], 'flatten') else np.array([state[key]], dtype=float)
+                for key in state.keys() if isinstance(state[key], (int, float, np.number))
+            ])
+            
+        # If state is not a tensor, create one; otherwise, use it as is.
+        if not isinstance(state, torch.Tensor):
+            state = torch.FloatTensor(state)
+    
+        # Ensure the state tensor does not contain NaN values
+        if torch.isnan(state).any():
+            print("NaN values detected in state tensor:", state)
+            state = torch.where(torch.isnan(state), torch.zeros_like(state), state)
+                       
+        state = state.unsqueeze(0).to(device)
+        action_probs, state_value = self.model(state)
+    
+        # Check for NaN values in action_probs and handle them
+        if torch.isnan(action_probs).any():
+            print("NaN values detected in action_probs:", action_probs)
+            action_probs = torch.where(torch.isnan(action_probs), torch.zeros_like(action_probs), action_probs)
+            action_probs = action_probs / action_probs.sum(dim=-1, keepdim=True)  # Normalize to ensure valid probabilities            
+            
+        action_dist = torch.distributions.Categorical(action_probs)
+        action = action_dist.sample()
+        self.log_probs.append(action_dist.log_prob(action))
+        self.values.append(state_value)
+        
+        return action.item()
+        
+
+    def store_reward(self, reward):
+        self.rewards.append(reward)
+        
+
+    def update(self):
+        R = 0
+        returns = []
+        for r in reversed(self.rewards):
+            R = r + self.gamma * R
+            returns.insert(0, R)
+
+        returns = torch.tensor(returns).to(device)
+        log_probs = torch.stack(self.log_probs).to(device)
+        values = torch.cat(self.values).to(device)
+        advantage = returns - values
+
+        actor_loss = -(log_probs * advantage.detach()).mean()
+        critic_loss = advantage.pow(2).mean()
+        loss = actor_loss + critic_loss
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        self.log_probs = []
+        self.values = []
+        self.rewards = []
+
+
 class RequestQueue:
 
     APPROX_INF = 1000 # an integer for approximating infinite
 
-    def __init__(self, state_dim, action_dim, utility_basic, discount_coef, markov_model=msm.StateMachine(orig=None),
+    def __init__(self, state_dim, action_dim, utility_basic, discount_coef, actor_critic, agent, markov_model=msm.StateMachine(orig=None),
                  time=0.0, outage_risk=0.1, customerid="",learning_mode='online', decision_rule='risk_control',
                  alt_option='fixed_revenue', min_amount_observations=1, dist_local_delay=stats.expon, exp_time_service_end=0.0,
                  para_local_delay=[1.0,2.0,10.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, batchid=np.int16, uses_nn=False): # Dispatched
@@ -437,6 +543,8 @@ class RequestQueue:
         self.customerid = customerid
         self.state_dim = state_dim
         self.action_dim = action_dim
+        self.actor_critic = actor_critic
+        self.agent = agent
         self.utility_basic=float(utility_basic)
         self.local_utility = 0.0
         self.compute_counter = 0
@@ -487,11 +595,11 @@ class RequestQueue:
         self.arr_rate = 0.0 # self.objQueues.get_arrivals_rates()
         # self.arr_rate = self.objQueues.get_arrivals_rates()
         
-        self.setActCritNet(state_dim, action_dim)
-        self.actor_critic = self.getActCritNet()
+        # self.setActCritNet(state_dim, action_dim)
+        # self.actor_critic = self.getActCritNet()
         
-        self.setAgent(state_dim, action_dim)
-        self.agent = self.getAgent()
+        # self.setAgent(state_dim, action_dim)
+        # self.agent = self.getAgent()
         
         self.all_times = []
         self.all_serv_times = []
@@ -1331,14 +1439,17 @@ class RequestQueue:
     def get_queue_state(self, queueid): # , queueobj): #, action):      
 		
         observed = self.get_history()         
+        print("\n Instance history ", type(observed))
         
-        if not isinstance(None, type(observed)):
+        #if not isinstance(None, type(observed)):
+        if len(observed) > 0:
             for hist in reversed(observed):               
                 if queueid in str(hist['ServerID']):
                     # print("\n MATCH:", hist )
                     state = hist
                     return state
-        else:			 
+        else:
+            #print("\n I execute the else part")			 
             self.history.append({
 				    "ServerID": queueid, 
                     "at_pose": 0, 
@@ -1351,7 +1462,7 @@ class RequestQueue:
                     "reward": 0.0, 
                     "action":"served",				 
 			})	
-			            
+            print("\n This is what I return from state: ", self.history[0])           
             return self.history[0]  		  
 
 
@@ -1785,7 +1896,7 @@ class ImpatientTenantEnv:
         self.waitingtime = 0.0
         self.ren_state_after_action = {}
         self.jock_state_after_action = {}
-             
+                
         self.action_space = 2  # Number of discrete actions
         self.observation_space = {
             "ServerID": ("1", "2"),
@@ -1803,10 +1914,15 @@ class ImpatientTenantEnv:
         
         self.state_dim = len(self.observation_space)
         self.action_dim = self.action_space
+        self.actor_critic = ActorCritic(self.state_dim, self.action_dim)
+        self.agent = A2CAgent(self.state_dim, self.action_dim)     
         # self.requestObj = RequestQueue(self.utility_basic, self.discount_coef)
-        self.requestObj = RequestQueue(self.state_dim, self.action_dim, self.utility_basic, self.discount_coef)       
+        self.requestObj = RequestQueue(self.state_dim, self.action_dim, self.utility_basic, self.discount_coef, self.actor_critic, self.agent)       
         self.queue_id = self.requestObj.get_curr_queue_id()         
-        self.history = self.requestObj.get_history()   
+        self.history = self.requestObj.get_history()  
+        self.queue_state = self.requestObj.get_queue_state(self.queue_id) 
+        
+        print("\n -> STATE: ", self.queue_state, " -- HISTORY: ",self.history) 
                        
         self._action_to_state = {
             Actions.RENEGE.value: self.get_renege_action_outcome(self.queue_id), 
@@ -1939,115 +2055,9 @@ class ImpatientTenantEnv:
         }
         return raw_server_status
         
-env = ImpatientTenantEnv()
-state_dim = len(env.observation_space)
-action_dim = env.action_space
-
-
-class ActorCritic(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super(ActorCritic, self).__init__()
-        self.actor = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, action_dim),
-            nn.Softmax(dim=-1)
-        )
-        self.critic = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1)
-        )
-
-    def forward(self, state):
-		
-        # print("\n FORWARDED STATE: ", state)
-        action_probs = self.actor(state)
-        state_value = self.critic(state)
-        
-        # Check for NaN values in action_probs and handle them
-        if torch.isnan(action_probs).any():
-            print("NaN values detected in action_probs:", action_probs)
-            action_probs = torch.where(torch.isnan(action_probs), torch.zeros_like(action_probs), action_probs)
-            action_probs = action_probs / action_probs.sum(dim=-1, keepdim=True)  # Normalize to ensure valid probabilities
-            
-        return action_probs, state_value
-        
-
-class A2CAgent:
-    def __init__(self, state_dim, action_dim, lr=0.001, gamma=0.99):
-        self.gamma = gamma
-                
-        self.model = ActorCritic(state_dim, action_dim).to(device)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        self.log_probs = []
-        self.values = []
-        self.rewards = []
-        
-
-    def select_action(self, state):
-        # print("\n -->> ", state)
-        if isinstance(state, dict):
-            #state = np.concatenate([state[key].flatten() for key in state.keys()])
-            # state = np.concatenate([np.array(state[key]).flatten() if hasattr(state[key], 'flatten') else [state[key]] for key in state.keys()])
-            state = np.concatenate([
-                np.array(state[key]).flatten() if hasattr(state[key], 'flatten') else np.array([state[key]], dtype=float)
-                for key in state.keys() if isinstance(state[key], (int, float, np.number))
-            ])
-            
-        # If state is not a tensor, create one; otherwise, use it as is.
-        if not isinstance(state, torch.Tensor):
-            state = torch.FloatTensor(state)
-    
-        # Ensure the state tensor does not contain NaN values
-        if torch.isnan(state).any():
-            print("NaN values detected in state tensor:", state)
-            state = torch.where(torch.isnan(state), torch.zeros_like(state), state)
-                       
-        state = state.unsqueeze(0).to(device)
-        action_probs, state_value = self.model(state)
-    
-        # Check for NaN values in action_probs and handle them
-        if torch.isnan(action_probs).any():
-            print("NaN values detected in action_probs:", action_probs)
-            action_probs = torch.where(torch.isnan(action_probs), torch.zeros_like(action_probs), action_probs)
-            action_probs = action_probs / action_probs.sum(dim=-1, keepdim=True)  # Normalize to ensure valid probabilities            
-            
-        action_dist = torch.distributions.Categorical(action_probs)
-        action = action_dist.sample()
-        self.log_probs.append(action_dist.log_prob(action))
-        self.values.append(state_value)
-        
-        return action.item()
-        
-
-    def store_reward(self, reward):
-        self.rewards.append(reward)
-        
-
-    def update(self):
-        R = 0
-        returns = []
-        for r in reversed(self.rewards):
-            R = r + self.gamma * R
-            returns.insert(0, R)
-
-        returns = torch.tensor(returns).to(device)
-        log_probs = torch.stack(self.log_probs).to(device)
-        values = torch.cat(self.values).to(device)
-        advantage = returns - values
-
-        actor_loss = -(log_probs * advantage.detach()).mean()
-        critic_loss = advantage.pow(2).mean()
-        loss = actor_loss + critic_loss
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-
-        self.log_probs = []
-        self.values = []
-        self.rewards = []
+#env = ImpatientTenantEnv()
+#state_dim = len(env.observation_space)
+#action_dim = env.action_space
 
 
 
@@ -2160,7 +2170,21 @@ def main():
 	
     utility_basic = 1.0
     discount_coef = 0.1
-    requestObj = RequestQueue(utility_basic, discount_coef)
+    state_dim = 10  # Example state dimension
+    action_dim = 2  # Example action dimension
+
+    # Initialize Actor-Critic model and A2C agent
+    actor_critic = ActorCritic(state_dim, action_dim)
+    agent = A2CAgent(state_dim, action_dim)    
+    
+    # Initialize RequestQueue with all required arguments
+    request_queue = RequestQueue(state_dim, action_dim, utility_basic, discount_coef, actor_critic, agent)
+
+    # Initialize ImpatientTenantEnv with the RequestQueue instance
+    env = ImpatientTenantEnv()
+    env.requestObj = request_queue  # Set the RequestQueue instance in the environment
+
+    print("Environment and RequestQueue initialized successfully!")
     
     duration = 20
     
