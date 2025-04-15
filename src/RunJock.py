@@ -98,11 +98,55 @@ class Observations:
         return self.obs        
         
         
-    def get_renege_obs(self, queueid, queue): # , intensity, pose): # get_curr_obs_renege
+    def get_renege_obs(self): # , intensity, pose): # get_curr_obs_renege # , queueid, queue
 		
-        renegs = sum(1 for req in queue if '_reneged' in req.customerid)        			       
+        #renegs = sum(1 for req in queue if '_reneged' in req.customerid)        			       
 	    
-        return renegs      
+        return self.curr_obs_renege #  renegs
+        
+          
+        
+    def set_renege_obs(self, curr_pose, queue_intensity, jockeying_rate, reneging_rate ,time_local_service, time_to_service_end, reward, queueid, activity, long_avg_serv_time):		
+
+        self.curr_obs_renege.append(
+            {   
+                "ServerID": queueid,
+                "at_pose": curr_pose,
+                "rate_jockeyed": jockeying_rate,
+                "rate_reneged": reneging_rate,                
+                "this_busy": queue_intensity,
+                "expected_service_time":time_local_service,
+                "time_service_took": time_to_service_end,
+                "reward": reward,
+                "action":activity,
+                "long_avg_serv_time": long_avg_serv_time
+            }
+        )
+        
+        return self.curr_obs_renege
+        
+        
+    def set_jockey_obs(self, curr_pose, queue_intensity, jockeying_rate, reneging_rate ,time_local_service, time_to_service_end, reward, queueid, activity, long_avg_serv_time):
+        
+        self.curr_obs_jockey.append(
+            {
+                "ServerID": queueid,
+                "at_pose": curr_pose,
+                "rate_jockeyed": jockeying_rate,
+                "rate_reneged": reneging_rate,                
+                "this_busy": queue_intensity,
+                "expected_service_time":time_local_service,
+                "time_service_took": time_to_service_end,
+                "reward": reward,
+                "action":activity,
+                "long_avg_serv_time": long_avg_serv_time 			
+            }
+        )
+        
+    
+    def get_jockey_obs(self):
+		
+        return self. curr_obs_jockey    
 
 
 class Queues(object):
@@ -545,6 +589,7 @@ class RequestQueue:
         self.action_dim = action_dim
         self.actor_critic = actor_critic
         self.agent = agent
+        self.env = ""
         self.utility_basic=float(utility_basic)
         self.local_utility = 0.0
         self.compute_counter = 0
@@ -589,7 +634,7 @@ class RequestQueue:
         if self.dict_queues_obj:
             self.queueID = str(max(self.dict_queues_obj, key=lambda q: len(self.dict_queues_obj[q])))
          
-        print("\n QUEUE ID: ", self.queueID)  
+        # print("\n QUEUE ID: ", self.queueID)  
         self.renege_reward = 0.0
         self.jockey_reward = 0.0
         self.curr_state = {} # ["Busy","Empty"]
@@ -768,7 +813,7 @@ class RequestQueue:
         return new_history
 
 
-    def run(self, duration, adjust_service_rate, num_episodes=100, progress_bar=True, progress_log=False, save_to_file="metrics.csv"):
+    def run(self, duration, env, adjust_service_rate, num_episodes=100, progress_bar=True, progress_log=False, save_to_file="metrics.csv"):
         """
         Run the simulation with episodic training.
 
@@ -782,6 +827,7 @@ class RequestQueue:
             None
         """
         
+        self.env = env
         steps_per_episode = int(duration / self.time_res)
         metrics = []  # List to store metrics for all episodes
         save_to_file = "simu_results.csv"
@@ -799,7 +845,7 @@ class RequestQueue:
             print(f"Starting Episode {episode + 1}/{num_episodes}")
             
             # Reset environment for the new episode
-            state, info = env.reset(seed=42)
+            state, info = self.env.reset(seed=42)
             total_reward = 0
             done = False  # Flag to track episode termination
             episode_start_time = time.time()
@@ -1195,7 +1241,8 @@ class RequestQueue:
                 if req.uses_nn:  # NN-based requests
                     
                     action = self.get_nn_optimized_decision(curr_queue_state) 
-                    next_state, reward, done, _ = self.env.step(action)  # Apply action
+                    # print("\n ACTION :", action)
+                    next_state, reward, done, _ = self.env.step(action['action'])  # Apply action
                     self.agent.store_reward(reward)  # Store the reward for training
 
                     # Train RL model after processing each request
@@ -1661,7 +1708,7 @@ class RequestQueue:
             self.max_cloud_delay=stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=1/serv_rate) #(self.certainty,a=self.pos_in_queue,loc=0,scale=1/serv_rate) #self.serv_rate)
 
         else:			
-            num_observations=min(self.objObserv.get_renege_obs(queueid, queue),len(self.history)) # if len(self.get_curr_obs_renege()) > 0 else 0 #self.history #self.observations.size
+            num_observations=min(len(self.objObserv.get_renege_obs()), len(self.history)) # queueid, queue),len(self.history)
             mean_interval=np.mean(num_observations) # unbiased estimation of 1/lambda where lambda is the service rate
             if np.isnan(mean_interval):
                 mean_interval=0
@@ -1752,9 +1799,10 @@ class RequestQueue:
             self.jockeying_rate = self.compute_jockeying_rate(curr_queue)
             self.long_avg_serv_time = self.get_long_run_avg_service_time(queueid)         
             
-            self.objObserv.set_obs(queueid, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, time_local_service, time_to_service_end, reward, 0, self.long_avg_serv_time)
+            self.objObserv.set_renege_obs(queueid, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, time_local_service, time_to_service_end, reward, 0, self.long_avg_serv_time)
+            # set_jockey_obs
             
-            self.history.append(self.objObserv.get_obs())  # Inside--    
+            #self.history.append(self.objObserv.get_obs())  # Inside--    
         
             self.curr_req = req
         
@@ -1815,9 +1863,9 @@ class RequestQueue:
             self.jockeying_rate = self.compute_jockeying_rate(curr_queue)     
             self.long_avg_serv_time = self.get_long_run_avg_service_time(curr_queue_id)                 
             
-            self.objObserv.set_obs(curr_queue_id, curr_pose, self.queue_intensity, self.jockeying_rate, self.reneging_rate, exp_delay, req.exp_time_service_end, reward, 1, self.long_avg_serv_time) # time_alt_queue        
+            self.objObserv.set_jockey_obs(curr_queue_id, curr_pose, self.queue_intensity, self.jockeying_rate, self.reneging_rate, exp_delay, req.exp_time_service_end, reward, 1, self.long_avg_serv_time) # time_alt_queue        
             
-            self.history.append(self.objObserv.get_obs())
+            #self.history.append(self.objObserv.get_jockey_obs())
                                                   
             self.curr_req = req        
             self.objQueues.update_queue_status(curr_queue_id)# long_avg_serv_time
@@ -1917,7 +1965,7 @@ class ImpatientTenantEnv:
         self.history = self.requestObj.get_history()  
         self.queue_state = self.requestObj.get_queue_state(self.queue_id) 
         
-        print("\n -> STATE: ", self.queue_state) 
+        # print("\n -> STATE: ", self.queue_state) 
                        
         self._action_to_state = {
             Actions.RENEGE.value: self.get_renege_action_outcome(self.queue_id), 
@@ -1930,7 +1978,7 @@ class ImpatientTenantEnv:
 
     def _get_obs(self):
         obs = {key: np.zeros(1) for key in self.observation_space.keys()}
-        # print("\n Observed: ", obs)
+        
         return obs
         
 
@@ -1942,7 +1990,7 @@ class ImpatientTenantEnv:
     def reset(self, seed=None, options=None):
         random.seed(seed)
         np.random.seed(seed)
-        observation = [0.0] * state_dim #self.Observations.get_obs() # self._get_obs()         
+        observation = [0.0] * self.state_dim #self.Observations.get_obs() # self._get_obs()         
         info = self._get_info()                                 
         return observation, info
 
@@ -1961,14 +2009,28 @@ class ImpatientTenantEnv:
         #    return {"QueueSize": 0, "Reward": -1.0}  # Example: Empty queue, negative reward
 
         # Simulate the renege action (remove the last customer)
-        new_queue_state = list(self.queue_state[queue_id])  # Copy current state
-        new_queue_state.pop()  # Remove the last customer
+        #new_queue_state = list(self.queue_state[queue_id])  # Copy current state
+        ##new_queue_state.pop()  # Remove the last customer
 
-        return {
-            "QueueSize": len(new_queue_state),
-            "Reward": 0.5,  # Example: Positive reward for reducing queue size
-            "NewState": new_queue_state
-        }
+        #return {
+        #    "QueueSize": len(new_queue_state),
+        #    "Reward": 0.5,  # Example: Positive reward for reducing queue size
+        #    "NewState": new_queue_state
+        #}
+        
+        #curr_state = self.requestObj.get_queue_state(queue_id) # get_queue_curr_state()
+        srv = self.queue_state.get('ServerID') # curr_state.get('ServerID')
+        
+        if srv == 1:
+            if len(self.Observations.get_renege_obs()) > 0: #get_curr_obs_renege(srv)) > 0:
+                self.queue_state['at_pose'] = self.queuesize - 1
+                self.queue_state["reward"] = self.Observations.get_curr_obs_renege(srv)[0]['reward']
+        else:
+            if len(self.Observations.get_renege_obs()) > 0: # get_curr_obs_renege(srv)) > 0:
+                self.queue_state['at_pose'] = self.queuesize - 1
+                self.queue_state["reward"] = self.Observations.get_curr_obs_renege[0]['reward']
+                
+        return self.queue_state
         
 
     def get_jockey_action_outcome(self, queue_id):
@@ -1981,23 +2043,38 @@ class ImpatientTenantEnv:
         Returns:
             dict: The resulting state of the queue.
         """
-        target_queue_id = "queue_2" if queue_id == "queue_1" else "queue_1"
+        #target_queue_id = "queue_2" if queue_id == "queue_1" else "queue_1"
 
-        if not self.queue_state[queue_id]:
-            return {"QueueSize": len(self.queue_state[target_queue_id]), "Reward": -1.0}  # Negative reward for invalid action
+        #if not self.queue_state[queue_id]:
+        #    return {"QueueSize": len(self.queue_state[target_queue_id]), "Reward": -1.0}  # Negative reward for invalid action
 
         # Simulate the jockey action (move the last customer to the target queue)
-        new_source_queue = list(self.queue_state[queue_id])  # Copy current state
-        new_target_queue = list(self.queue_state[target_queue_id])  # Copy target state
-        customer = new_source_queue.pop()  # Remove customer from source
-        new_target_queue.append(customer)  # Add customer to target
+        #new_source_queue = list(self.queue_state[queue_id])  # Copy current state
+        #new_target_queue = list(self.queue_state[target_queue_id])  # Copy target state
+        #customer = new_source_queue.pop()  # Remove customer from source
+        #new_target_queue.append(customer)  # Add customer to target
 
-        return {
-            "QueueSize": len(new_target_queue),
-            "Reward": 1.0,  # Example: Positive reward for balancing queues
-            "SourceState": new_source_queue,
-            "TargetState": new_target_queue
-        }
+        #return {
+        #    "QueueSize": len(new_target_queue),
+        #    "Reward": 1.0,  # Example: Positive reward for balancing queues
+        #    "SourceState": new_source_queue,
+        #    "TargetState": new_target_queue
+        #}
+        
+        # curr_state = self.requestObj.get_queue_state(queue_id) # get_queue_curr_state()
+        srv = self.queue_state.get('ServerID') # curr_state.get('ServerID')
+        
+        if srv == 1:
+            if len(self.Observations.get_jockey_obs()) > 0: #get_curr_obs_jockey(srv)) > 0:
+                self.queue_state['at_pose'] = self.queuesize + 1
+                self.queue_state["reward"] = self.Observations.get_jockey_obs(srv)[0]['reward']
+        else:
+            if len(self.Observations.get_jockey_obs()) > 0: # get_curr_obs_jockey(srv)) > 0:
+                self.queue_state['at_pose'] = self.queuesize + 1
+                self.queue_state["reward"] = self.Observations.get_jockey_obs(srv)[0]['reward']
+                
+        return self.queue_state
+
 
     def step(self, action):
         """
@@ -2010,23 +2087,23 @@ class ImpatientTenantEnv:
             tuple: (observation, reward, terminated, info)
         """
         # Update action_to_state dynamically
-        self.update_action_to_state()
+        # self.update_action_to_state()
 
         # Get the resulting state for the action
         new_state = self._action_to_state[action]
-        terminated = new_state["QueueSize"] <= 0  # Example termination condition
-        reward = new_state["Reward"]
+        terminated = new_state["at_pose"] <= 0  # Example termination condition
+        reward = new_state["reward"]
 
         # Update queue states based on the action outcome
         if action == Actions.RENEGE.value:
-            self.queue_state[self.queue_id] = new_state["NewState"]
+            self.queue_state[self.queue_id] = new_state # ["NewState"]
         elif action == Actions.JOCKEY.value:
-            self.queue_state[self.queue_id] = new_state["SourceState"]
-            target_queue = "queue_2" if self.queue_id == "queue_1" else "queue_1"
-            self.queue_state[target_queue] = new_state["TargetState"]
+            self.queue_state[self.queue_id] = new_state #["SourceState"]
+            target_queue = "2" if self.queue_id == "1" else "1"
+            self.queue_state[target_queue] = new_state #["TargetState"]
 
         # Get observation and info
-        observation = self._get_obs()
+        observation = new_state # self._get_obs()
         info = self._get_info()
 
         return observation, reward, terminated, info       
@@ -2184,7 +2261,7 @@ def main():
     duration = 20
     
     # Start the scheduler
-    scheduler_thread = threading.Thread(target=requestObj.run(duration, adjust_service_rate=False, save_to_file="non_adjusted_metrics.csv")) # requestObj.run_scheduler) # 
+    scheduler_thread = threading.Thread(target=request_queue.run(duration, env, adjust_service_rate=False, save_to_file="non_adjusted_metrics.csv")) # requestObj.run_scheduler) # 
     scheduler_thread.start()
     
     visualize_results(metrics_file="metrics.csv")
