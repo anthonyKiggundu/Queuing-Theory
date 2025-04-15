@@ -581,13 +581,15 @@ class RequestQueue:
         self.objQueues = Queues()
         self.objRequest = Request(self.uses_nn,time)
         self.objObserv = Observations()
-        # self.env = ImpatientTenantEnv()
-        #state_dim, action_dim = self.getStateActionDims()
-        #self.actor_critic = ActorCritic(state_dim, action_dim).to(device)
+        self.queueID = "1"  # Initialize with default queue ID "1" or any logic to choose a starting queue
 
         self.dict_queues_obj = self.objQueues.get_dict_queues()
         self.dict_servers_info = self.objQueues.get_dict_servers()
-        self.jockey_threshold = 1
+        
+        if self.dict_queues_obj:
+            self.queueID = str(max(self.dict_queues_obj, key=lambda q: len(self.dict_queues_obj[q])))
+         
+        print("\n QUEUE ID: ", self.queueID)  
         self.renege_reward = 0.0
         self.jockey_reward = 0.0
         self.curr_state = {} # ["Busy","Empty"]
@@ -595,15 +597,8 @@ class RequestQueue:
         self.arr_rate = 0.0 # self.objQueues.get_arrivals_rates()
         # self.arr_rate = self.objQueues.get_arrivals_rates()
         
-        # self.setActCritNet(state_dim, action_dim)
-        # self.actor_critic = self.getActCritNet()
-        
-        # self.setAgent(state_dim, action_dim)
-        # self.agent = self.getAgent()
-        
         self.all_times = []
-        self.all_serv_times = []
-        self.queueID = ""
+        self.all_serv_times = []        
         self.curr_req = ""
 
         # self.rng_pos_reg=np.array([])
@@ -1439,7 +1434,7 @@ class RequestQueue:
     def get_queue_state(self, queueid): # , queueobj): #, action):      
 		
         observed = self.get_history()         
-        print("\n Instance history ", type(observed))
+        # print("\n Instance history ", type(observed))
         
         #if not isinstance(None, type(observed)):
         if len(observed) > 0:
@@ -1922,7 +1917,7 @@ class ImpatientTenantEnv:
         self.history = self.requestObj.get_history()  
         self.queue_state = self.requestObj.get_queue_state(self.queue_id) 
         
-        print("\n -> STATE: ", self.queue_state, " -- HISTORY: ",self.history) 
+        print("\n -> STATE: ", self.queue_state) 
                        
         self._action_to_state = {
             Actions.RENEGE.value: self.get_renege_action_outcome(self.queue_id), 
@@ -1962,8 +1957,8 @@ class ImpatientTenantEnv:
         Returns:
             dict: The resulting state of the queue.
         """
-        if not self.queue_state[queue_id]:
-            return {"QueueSize": 0, "Reward": -1.0}  # Example: Empty queue, negative reward
+        #if not self.queue_state[queue_id]:
+        #    return {"QueueSize": 0, "Reward": -1.0}  # Example: Empty queue, negative reward
 
         # Simulate the renege action (remove the last customer)
         new_queue_state = list(self.queue_state[queue_id])  # Copy current state
