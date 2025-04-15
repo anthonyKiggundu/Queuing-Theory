@@ -538,7 +538,42 @@ class A2CAgent:
         self.values.append(state_value)
         
         return action.item()
-        
+    
+    
+    def select_action_with_entropy(self, state):
+        """
+        Select an action and calculate the entropy of the policy distribution.
+
+        Args:
+            state (np.ndarray or torch.Tensor): The current state or observation.
+
+        Returns:
+            tuple: (action, entropy) where:
+                - action (int): The selected action.
+                - entropy (float): The entropy of the policy distribution.
+        """
+        # Convert state to a tensor if it's not already
+        if not isinstance(state, torch.Tensor):
+            state = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+
+        # Get action probabilities and state value from the model
+        action_probs, state_value = self.model(state)
+
+        # Create a categorical distribution based on action probabilities
+        action_dist = torch.distributions.Categorical(action_probs)
+
+        # Sample an action
+        action = action_dist.sample()
+
+        # Calculate entropy of the policy distribution
+        entropy = action_dist.entropy().item()
+
+        # Store log probability and state value for training
+        self.log_probs.append(action_dist.log_prob(action))
+        self.values.append(state_value)
+
+        return action.item(), entropy
+      
 
     def store_reward(self, reward):
         self.rewards.append(reward)
@@ -550,16 +585,32 @@ class A2CAgent:
         for r in reversed(self.rewards):
             R = r + self.gamma * R
             returns.insert(0, R)
-
+        
+        
         returns = torch.tensor(returns).to(device)
-        log_probs = torch.stack(self.log_probs).to(device)
-        values = torch.cat(self.values).to(device)
+        
+        if not self.log_probs:
+            log_probs = torch.tensor([], device=device)  # Default to an empty tensor
+            print(f"log_probs before stacking: {log_probs}")
+        else:
+            log_probs = torch.stack(self.log_probs).to(device)
+            
+        # log_probs = torch.stack(self.log_probs).to(device)
+        
+        if not self.values:
+            values = torch.tensor([], device=device)  # Default to an empty tensor
+        else:
+            values = torch.cat(self.values).to(device)
+            
+        # values = torch.cat(self.values).to(device)
         advantage = returns - values
 
         actor_loss = -(log_probs * advantage.detach()).mean()
         critic_loss = advantage.pow(2).mean()
         loss = actor_loss + critic_loss
-
+        
+        print("loss.requires_grad:", loss.requires_grad)
+        
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
@@ -811,9 +862,34 @@ class RequestQueue:
                 #new_history.append(history)
 
         return new_history
+        
+        
+    def initialize_queue_state(self, queueid, arr_rate):
+		
+        srv_rate = self.dict_servers_info.get(queueid)
+		
+        if "1" in queueid: 
+            size_srv = len(self.dict_queues_obj.get("1"))			
+            intensity = arr_rate/srv_rate
+        else: 
+            size_srv = len(self.dict_queues_obj.get("2"))           
+            intensity = arr_rate/srv_rate
+			
+        return {
+			"ServerID": queueid, 
+            "at_pose": size_srv, 
+            "rate_jockeyed": 0.0, 
+            "rate_reneged": 0.0, 
+            "expected_service_time": 0.0,               
+            "this_busy": intensity, 
+            "long_avg_serv_time": self.long_avg_serv_time,
+            "time_service_took": 0.0,
+            "reward": 0.0, 
+            "action":"queued",	
+        }
 
 
-    def run(self, duration, env, adjust_service_rate, num_episodes=100, progress_bar=True, progress_log=False, save_to_file="metrics.csv"):
+    def run(self, duration, env, adjust_service_rate, num_episodes=10, progress_bar=True, progress_log=True, save_to_file="metrics.csv"):
         """
         Run the simulation with episodic training.
 
@@ -841,6 +917,11 @@ class RequestQueue:
         self.arr_rate = self.objQueues.get_arrivals_rates()
         print("\n Arrival rate: ", self.arr_rate)
         
+        srv_1 = self.dict_queues_obj.get("1") # Server1
+        srv_2 = self.dict_queues_obj.get("2") # Server2
+        
+        # self.initialize_queue_state(self.queueID, self.arr_rate)
+        
         for episode in range(num_episodes):
             print(f"Starting Episode {episode + 1}/{num_episodes}")
             
@@ -850,6 +931,8 @@ class RequestQueue:
             done = False  # Flag to track episode termination
             episode_start_time = time.time()
             i = 0
+            episode_policy_entropy = 0  # Track total policy entropy for the episode
+            losses = {"actor_loss": 0, "critic_loss": 0, "total_loss": 0}
             jockeying_rates = []
             reneging_rates = []
         
@@ -861,9 +944,7 @@ class RequestQueue:
                     print("Step", i + 1, "/", steps_per_episode) # print("Step",i,"/",steps)
                         
                 self.markov_model.updateState()
-
-                srv_1 = self.dict_queues_obj.get("1") # Server1
-                srv_2 = self.dict_queues_obj.get("2") # Server2
+                
 
                 if len(srv_1) < len(srv_2):
                     self.queue = srv_2
@@ -885,7 +966,7 @@ class RequestQueue:
                 time.sleep(1)
                 arrival_entries=np.array([[self.time+i,True] for i in arrival_intervals]) # True for request
                 # print("\n Arrived: ",arrival_entries) ####
-                time.sleep(1)
+                # time.sleep(1)
                 arrival_entries=arrival_entries.reshape(int(arrival_entries.size/2),2)
                 # print(arrival_entries)
                 time.sleep(1)
@@ -897,10 +978,14 @@ class RequestQueue:
                 serv_times = np.sort(serv_times)
                 self.all_serv_times = serv_times
                 # print("\n Times: ", np.random.exponential(2, len(all_entries)), "\n Arranged: ",serv_times)
-                time.sleep(2)                      
+                time.sleep(1)                      
                 
                 # Step 1: Get action from the agent based on the current state
                 action = self.agent.select_action(state)
+                
+                # Step 1: Get action from the agent based on the current state
+                #action, policy_entropy = self.agent.select_action_with_entropy(state)
+                #episode_policy_entropy += policy_entropy
                 
                 # Step 2: Apply the action to the environment and get feedback
                 next_state, reward, done, info = self.env.step(action)
@@ -932,7 +1017,7 @@ class RequestQueue:
                 
                 # Optional: Log step-level progress (can be verbose)
                 if progress_log:
-                    print(f"Step {step + 1}: Action={action}, Reward={reward}, Total Reward={total_reward}")
+                    print(f"Step {i + 1}: Action={action}, Reward={reward}, Total Reward={total_reward}")
             
                 self.set_batch_id(i)
                 
@@ -949,7 +1034,7 @@ class RequestQueue:
                 "average_reward": total_reward / i if i > 0 else 0,
                 "steps": i,
                 "duration": episode_duration,
-                "policy_entropy": episode_policy_entropy / i if i > 0 else 0,
+                #"policy_entropy": episode_policy_entropy / i if i > 0 else 0,
                 "actor_loss": losses["actor_loss"],
                 "critic_loss": losses["critic_loss"],
                 "total_loss": losses["total_loss"],
@@ -961,9 +1046,9 @@ class RequestQueue:
             # Print episode summary
             print(f"Episode {episode + 1} Summary: Total Reward={total_reward}, "
                   f"Avg Reward={episode_metrics['average_reward']:.2f}, Steps={i}, "
-                  f"Policy Entropy={episode_metrics['policy_entropy']:.2f}, "
+                  # f"Policy Entropy={episode_metrics['policy_entropy']:.2f}, "
                   f"Actor Loss={losses['actor_loss']:.4f}, Critic Loss={losses['critic_loss']:.4f}, "
-                  f"Total Loss={losses['total_loss']:.4f}, Steps={steps}, "
+                  f"Total Loss={losses['total_loss']:.4f}, Steps={i}, " # steps
                   f"Duration={episode_duration:.2f}s")
               
             print(f"Episode {episode + 1} finished with a total reward of {total_reward}")
@@ -1017,41 +1102,44 @@ class RequestQueue:
 
     def processEntries(self,entries, batchid): #, uses_nn): # =np.int16 , actor_critic=actor_critic, =np.array([]), =np.int16 # else
         
+        
         num_iterations = random.randint(1, 5)  # Random number of iterations between 1 and 5
         
-        for entry in entries:           
-            if entry[1]==True:
+        for entry in entries: 
+            print("  Adding a new request into task queue...", entry, " ====== ENTRY[1]", entry[1])       
+            #if entry[1]==True:
                 # print("  Adding a new request into task queue...")                
-                uses_nn = random.choice([True, False])
-                req = self.addNewRequest(entry[0], batchid, uses_nn)
-                self.arr_prev_times = np.append(self.arr_prev_times, entry[0])
+            uses_nn = random.choice([True, False])
+            req = self.addNewRequest(entry[0], batchid, uses_nn)
+            #self.arr_prev_times = np.append(self.arr_prev_times, entry[0])
                 
-            else:                
-                q_selector = random.randint(1, 2)
+            #else:                
+            q_selector = random.randint(1, 2)
                 
-                curr_queue = self.dict_queues_obj.get("1") if q_selector == "1" else self.dict_queues_obj.get("2")
-                jockeying_rate = self.compute_jockeying_rate(curr_queue)
-                reneging_rate = self.compute_jockeying_rate(curr_queue) # MATCH
+            print("\n Jumped into Processing now .....now serving ...", q_selector)
+                  
+            curr_queue = self.dict_queues_obj.get("1") if q_selector == "1" else self.dict_queues_obj.get("2")
+            jockeying_rate = self.compute_jockeying_rate(curr_queue)
+            reneging_rate = self.compute_jockeying_rate(curr_queue) # MATCH
                 
-                if q_selector == 1:					
-                    self.queueID = "1" # Server1
+            if q_selector == 1:					
+                self.queueID = "1" # Server1
                     
-                    """
-                         Run the serveOneRequest function a random number of times before continuing.
-                    """
-                        # Introduce a short delay to simulate processing time            
-                    self.serveOneRequest(self.queueID, jockeying_rate, reneging_rate) # Server1 = self.dict_queues_obj["1"][0], entry[0],
-                      
-                                                                                
-                    self.dispatch_queue_state(self.dict_queues_obj["1"], self.queueID) #, self.dict_queues_obj["2"]) #, req)
-                    time.sleep(random.uniform(0.1, 0.5))  # Random delay between 0.1 and 0.5 seconds
+                """
+                     Run the serveOneRequest function a random number of times before continuing.
+                """
+                              
+                self.serveOneRequest(self.queueID, jockeying_rate, reneging_rate) # Server1 = self.dict_queues_obj["1"][0], entry[0],
+                                                                                                      
+                self.dispatch_queue_state(self.dict_queues_obj["1"], self.queueID) #, self.dict_queues_obj["2"]) #, req)
+                time.sleep(random.uniform(0.1, 0.5))  # Random delay between 0.1 and 0.5 seconds
                                                
-                else:
-                    self.queueID = "2"
-                    self.serveOneRequest(self.queueID,  jockeying_rate, reneging_rate) # Server2 = self.dict_queues_obj["2"][0], entry[0],  
-                    # self.initialize_queue_states(self.queueID,len(curr_queue), self.jockeying_rate, self.reneging_rate, req)                                     
-                    self.dispatch_queue_state(self.dict_queues_obj["2"], self.queueID) #, self.dict_queues_obj["1"]) #, req)
-                    time.sleep(random.uniform(0.1, 0.5))                                        
+            else:
+                self.queueID = "2"
+                self.serveOneRequest(self.queueID,  jockeying_rate, reneging_rate) # Server2 = self.dict_queues_obj["2"][0], entry[0],  
+                # self.initialize_queue_states(self.queueID,len(curr_queue), self.jockeying_rate, self.reneging_rate, req)                                     
+                self.dispatch_queue_state(self.dict_queues_obj["2"], self.queueID) #, self.dict_queues_obj["1"]) #, req)
+                time.sleep(random.uniform(0.1, 0.5))                                        
                     
                     
         return
@@ -1163,7 +1251,7 @@ class RequestQueue:
                     
             self.state_subscribers.append(req)  
 
-        # print("\n LENGTHS => ", len(self.state_subscribers), " ==== ", len(self.nn_subscribers))   
+        print("\n LENGTHS => ", len(self.state_subscribers), " ==== ", len(self.nn_subscribers))   
   
         self.dict_queues_obj[server_id] = np.append(self.dict_queues_obj[server_id], req)
         
@@ -1483,8 +1571,8 @@ class RequestQueue:
         observed = self.get_history()         
         # print("\n Instance history ", type(observed))
         
-        #if not isinstance(None, type(observed)):
-        if len(observed) > 0:
+        if not isinstance(None, type(observed)):
+        #if len(observed) > 0:
             for hist in reversed(observed):               
                 if queueid in str(hist['ServerID']):
                     # print("\n MATCH:", hist )
@@ -1512,7 +1600,7 @@ class RequestQueue:
         #randomly select which queue to process at a time t+1
         q_selector = random.randint(1, 2)                            
         
-        """Process a request and use the result for training the RL model."""
+        """Process a request and use the result for training the RL model."""             
          
         if "1" in queueID:
             queue = self.dict_queues_obj["1"]            
@@ -1799,14 +1887,13 @@ class RequestQueue:
             self.jockeying_rate = self.compute_jockeying_rate(curr_queue)
             self.long_avg_serv_time = self.get_long_run_avg_service_time(queueid)         
             
-            self.objObserv.set_renege_obs(queueid, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, time_local_service, time_to_service_end, reward, 0, self.long_avg_serv_time)
-            # set_jockey_obs
+            self.objObserv.set_renege_obs(queueid, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, time_local_service, time_to_service_end, reward, 0, self.long_avg_serv_time)            
             
             #self.history.append(self.objObserv.get_obs())  # Inside--    
         
             self.curr_req = req
         
-            self.objQueues.update_queue_status(queueid)
+            # self.objQueues.update_queue_status(queueid)
             
             return reward
 
@@ -1868,7 +1955,7 @@ class RequestQueue:
             #self.history.append(self.objObserv.get_jockey_obs())
                                                   
             self.curr_req = req        
-            self.objQueues.update_queue_status(curr_queue_id)# long_avg_serv_time
+            #self.objQueues.update_queue_status(curr_queue_id)# long_avg_serv_time
         
         return
 
@@ -1927,7 +2014,7 @@ class ImpatientTenantEnv:
         self.utility_basic = 1.0
         self.discount_coef = 0.1
         self.history = {}
-        # self.queueObj = Queues()
+        self.objQueues = Queues()
         self.Observations = Observations()        
         self.endutil = 0.0 
         self.intensity = 0.0
@@ -1961,11 +2048,12 @@ class ImpatientTenantEnv:
         self.agent = A2CAgent(self.state_dim, self.action_dim)     
         # self.requestObj = RequestQueue(self.utility_basic, self.discount_coef)
         self.requestObj = RequestQueue(self.state_dim, self.action_dim, self.utility_basic, self.discount_coef, self.actor_critic, self.agent)       
-        self.queue_id = self.requestObj.get_curr_queue_id()         
-        self.history = self.requestObj.get_history()  
-        self.queue_state = self.requestObj.get_queue_state(self.queue_id) 
+        self.queue_id = self.requestObj.get_curr_queue_id()  
+        arr_rate = self.objQueues.get_arrivals_rates()    
+          
+        self.queue_state = self.requestObj.initialize_queue_state(self.queue_id, arr_rate) 
         
-        # print("\n -> STATE: ", self.queue_state) 
+        print("\n -> STATE: ", self.queue_state) 
                        
         self._action_to_state = {
             Actions.RENEGE.value: self.get_renege_action_outcome(self.queue_id), 
