@@ -923,11 +923,8 @@ class RequestQueue:
         if progress_bar:
             step_loop = tqdm(range(steps_per_episode), leave=False, desc='     Current run')
         else:
-            step_loop = range(steps_per_episode)
-
-        # Retrieve the arrival rate from the queue setup                       
-        self.arr_rate = self.objQueues.get_arrivals_rates()
-        print("\n Arrival rate: ", self.arr_rate)
+            step_loop = range(steps_per_episode)                             
+        
         
         srv_1 = self.dict_queues_obj.get("1") # Server1
         srv_2 = self.dict_queues_obj.get("2") # Server2
@@ -936,6 +933,8 @@ class RequestQueue:
         
         for episode in range(num_episodes):
             print(f"Starting Episode {episode + 1}/{num_episodes}")
+            self.arr_rate = self.objQueues.get_arrivals_rates()
+            print("\n Arrival rate: ", self.arr_rate)
             
             # Reset environment for the new episode
             state, info = self.env.reset(seed=42)
@@ -2413,14 +2412,14 @@ def visualize_results(metrics_file="simu_results.csv"):
     plt.show()
 
     # Plot Policy Entropy
-    plt.figure(figsize=(10, 6))
-    plt.plot(metrics['episode'], metrics['policy_entropy'], label='Policy Entropy', marker='o', color='green')
-    plt.title("Policy Entropy per Episode")
-    plt.xlabel("Episode")
-    plt.ylabel("Policy Entropy")
-    plt.grid()
-    plt.legend()
-    plt.show()
+    #plt.figure(figsize=(10, 6))
+    #plt.plot(metrics['episode'], metrics['policy_entropy'], label='Policy Entropy', marker='o', color='green')
+    #plt.title("Policy Entropy per Episode")
+    #plt.xlabel("Episode")
+    #plt.ylabel("Policy Entropy")
+    #plt.grid()
+    #plt.legend()
+    #plt.show()
 
     # Plot Loss Metrics
     plt.figure(figsize=(10, 6))
@@ -2510,7 +2509,7 @@ def main():
     scheduler_thread = threading.Thread(target=request_queue.run(duration, env, adjust_service_rate=False, save_to_file="non_adjusted_metrics.csv")) # requestObj.run_scheduler) # 
     scheduler_thread.start()
     
-    visualize_results(metrics_file="metrics.csv")
+    visualize_results(metrics_file="simu_results.csv")
     
     visualize_comparison()
     
