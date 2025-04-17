@@ -49,38 +49,3 @@ plt.title("Requests Per Queue Over Time")
 plt.legend()
 plt.grid()
 plt.show()
-
-
-'''
- def get_renege_action_outcome(self, queue_id):
-        curr_state = self.requestObj.get_queue_state(queue_id) # get_queue_curr_state()
-        srv = curr_state.get('ServerID')
-        
-        if srv == 1:
-            if len(self.Observations.get_obs()) > 0: # get_curr_obs_renege(srv)) > 0:
-                curr_state['apt_pose'] = self.queuesize - 1
-                curr_state["reward"] = self.Observations.get_curr_obs_renege(srv)[0]['reward']
-        else:
-            if len(self.Observations.get_obs()) > 0: # get_curr_obs_renege(srv)) > 0:
-                curr_state['apt_pose'] = self.queuesize - 1
-                curr_state["reward"] = self.Observations.get_curr_obs_renege[0]['reward']
-                
-        return curr_state
-        
-
-    def get_jockey_action_outcome(self, queue_id):
-        curr_state = self.requestObj.get_queue_state(queue_id) # get_queue_curr_state()
-        srv = curr_state.get('ServerID')
-        
-        if srv == 1:
-            if len(self.Observations.get_obs()) > 0: #get_curr_obs_jockey(srv)) > 0:
-                curr_state['apt_pose'] = self.queuesize + 1
-                curr_state["reward"] = self.Observations.get_curr_obs_jockey(srv)[0]['reward']
-        else:
-            if len(self.Observations.get_obs()) > 0: # get_curr_obs_jockey(srv)) > 0:
-                curr_state['at_pose'] = self.queuesize + 1
-                curr_state["reward"] = self.Observations.get_curr_obs_jockey(srv)[0]['reward']
-                
-        return curr_state
-
-'''
