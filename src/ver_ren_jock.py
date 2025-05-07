@@ -484,7 +484,7 @@ class ActorCritic(nn.Module):
 
     def forward(self, state):
 		
-        print("\n FORWARDED STATE: ", state)
+        # print("\n FORWARDED STATE: ", state)
         action_probs = self.actor(state)
         state_value = self.critic(state)
         
@@ -544,7 +544,7 @@ class A2CAgent:
         action = action_dist.sample()
         self.log_probs.append(action_dist.log_prob(action))
         self.values.append(state_value)
-        # print(f"log_probs: {self.log_probs}, values: {self.values}, rewards: {self.rewards}")
+        # print(f"log_probs: {self.log_probs}, values: {self.values}") #, rewards: {self.rewards}")
         #print("\n LOG: ", self.log_probs, "\n ACTION DIST: ", action_dist)
         return action.item()
     
@@ -586,6 +586,7 @@ class A2CAgent:
 
     def store_reward(self, reward):
         self.rewards.append(reward)
+        print(f"Stored reward: {reward}, Total rewards: {self.rewards}")
         
 
     def update(self):
@@ -612,7 +613,7 @@ class A2CAgent:
             R = r + self.gamma * R
             returns.insert(0, R)
         
-        
+        print(f"Returns: {returns}")
         returns = torch.tensor(returns).to(device)            
             
         # values = torch.cat(self.values).to(device)
@@ -622,7 +623,7 @@ class A2CAgent:
         critic_loss = advantage.pow(2).mean()
         loss = actor_loss + critic_loss
         
-        # print("loss.requires_grad:", loss.requires_grad)
+        print("\n total loss of actor + critic:", loss) #loss.requires_grad)
         
         self.optimizer.zero_grad()
         loss.backward()
@@ -1799,7 +1800,7 @@ class RequestQueue:
 
         # Compute reward based on actual waiting time vs. expected time
         time_in_queue = req.time_exit-req.time_entrance 
-        reward = 1.0 if time_in_queue < req.service_time else -1.0
+        reward = 1.0 if time_in_queue < req.service_time else 0.0
         
         len_queue_1, len_queue_2 = self.get_queue_sizes()
                               
@@ -1831,10 +1832,10 @@ class RequestQueue:
                 self.departure_dispatch_count += 1
                 self.uses_intensity_based = False
             
-            if curr_intensity['this_busy'] <= 2.0:
-                print("\n =================== using intensity information ===================", curr_intensity)
-                self.uses_intensity_based = True
-                self.intensity_dispatch_count += 1
+            #if curr_intensity['this_busy'] <= 2.0:
+            #    print("\n =================== using intensity information ===================", curr_intensity)
+            #    self.uses_intensity_based = True
+            #    self.intensity_dispatch_count += 1
             
             self.history.append(self.objObserv.get_obs())
               
@@ -1859,27 +1860,6 @@ class RequestQueue:
             2. Dispatch only when the queue intensity is less than or equal to 1 
         '''               
         
-        #if self.total_served_requests_srv1 >= abs(len(arrived_now)/2) and "1" in queueID:
-        #    self.departure_dispatch_count += 1
-        #    self.uses_intensity_based = False
-        #    self.dispatch_queue_state(queue, queueID, self.uses_intensity_based)
-            
-        #elif self.total_served_requests_srv2 >= abs(len(arrived_now)/2) and "2" in queueID:
-        #    self.departure_dispatch_count += 1
-        #    self.uses_intensity_based = False
-        #    self.dispatch_queue_state(queue, queueID, self.uses_intensity_based) 
-			
-        #else:
-        #    self.uses_intensity_based = False
-        #    self.dispatch_queue_state(queue, queueID, self.uses_intensity_based)
-			
-        #elif curr_intensity['this_busy'] <= 2.0:
-        #    print("\n =================== using intensity information ===================", curr_intensity)
-        #    self.uses_intensity_based = True
-        #    self.intensity_dispatch_count += 1
-        #    self.dispatch_queue_state(queue, queueID, self.uses_intensity_based)
-  
-        
         if not isinstance(None, type(state)):
             action = self.agent.select_action(state)
             self.agent.store_reward(reward)
@@ -1894,6 +1874,7 @@ class RequestQueue:
 		
         reward = 0.0
         if not isinstance(req.customerid, type(None)):	
+            # print("\n Current Request: ", req)
             if '_jockeyed' in req.customerid:
                 if self.avg_delay+req.time_entrance < req.service_time: #exp_time_service_end: That ACTION
                     reward = 1.0
@@ -2116,7 +2097,7 @@ class RequestQueue:
         # the current time minus the time _to_service_end is greater than the time_local_service
         
             reward = self.getRenegeRewardPenalty(req, time_local_service, time_to_service_end)
-            print(colored("%s", 'green') % (req.customerid) + " in Server %s" %(queueid) + " reneging now, to local processing " )
+            print(colored("%s", 'green') % (req.customerid) + " in Server %s" %(queueid) + " reneging now, to local processing with reward %f "%(reward) )
                                      
             self.reneging_rate = self.compute_reneging_rate(curr_queue)
             self.jockeying_rate = self.compute_jockeying_rate(curr_queue)
@@ -2178,7 +2159,7 @@ class RequestQueue:
             reward = self.get_jockey_reward(req)
                   
             # print("\n Moving ", customerid," from Server ",curr_queue_id, " to Server ", dest_queue_id ) 
-            print(colored("%s", 'green') % (req.customerid) + " in Server %s" %(curr_queue_id) + " jockeying now, to Server %s" % (colored(dest_queue_id,'green')))                      
+            print(colored("%s", 'green') % (req.customerid) + " in Server %s" %(curr_queue_id) + " jockeying now, to Server %s" % (colored(dest_queue_id,'green'))+ " with reward %f"%(reward))                      
             
             self.log_action(f"Jockeyed", req, dest_queue_id)
             
@@ -2187,13 +2168,13 @@ class RequestQueue:
             self.long_avg_serv_time = self.get_long_run_avg_service_time(curr_queue_id)                 
             
             self.objObserv.set_jockey_obs(curr_queue_id, curr_pose, self.queue_intensity, self.jockeying_rate, self.reneging_rate, exp_delay, req.exp_time_service_end, reward, 1, self.long_avg_serv_time, uses_intensity_based) # time_alt_queue                                
-            # print("\n **** ", self.objObserv.get_jockey_obs())                                   
+            print("\n **** ", self.objObserv.get_jockey_obs()[-1])                                   
             self.curr_req = req                    
         
         return
         
     
-    def get_current_jockey_count(self):
+    def get_current_jockey_observations(self):
 		
         return self.objObserv.get_jockey_obs()
 
@@ -2252,7 +2233,7 @@ class RequestQueue:
     def compute_jockeying_rate_by_info_source(self, info_src_requests):
         """Compute the reneging rate for a specific info source."""
         jockeys = len(info_src_requests) 
-        return jockeys / len(self.get_current_jockey_count())
+        return jockeys / len(self.get_current_jockey_observations())
     
         
     def compare_behavior_rates_by_information_how_often(self):
@@ -2479,30 +2460,37 @@ class ImpatientTenantEnv:
             
             if len(self.requestObj.get_current_renege_count()) > 0: #len(self.Observations.get_renege_obs()) > 0: 
                 #print("\n Inside outcome renege server 1: ", self.queue_state)
-                self.queue_state['at_pose'] = len(self.requestObj.get_current_renege_count()[0]['at_pose']) - 1 # self.Observations.get_renege_obs()[0]['at_pose'] - 1
-                self.queue_state["reward"] = self.requestObj.get_current_renege_count()[0]['reward'] # self.Observations.get_renege_obs()[0]['reward']                
-                
+                self.queue_state['at_pose'] = len(self.requestObj.get_current_renege_count()[-1]['at_pose']) - 1 # self.Observations.get_renege_obs()[0]['at_pose'] - 1
+                self.queue_state["reward"] = self.requestObj.get_current_renege_count()[-1]['reward'] # self.Observations.get_renege_obs()[0]['reward']                
+                print("\n ***** Reward Renege **** ", srv,self.queue_state["reward"])
                 return self.queue_state
             else:
                 #print("\n No request reneged so far...returning default state")
                 if len(self.requestObj.get_history(queue_id)) > 0:
                     self.queue_state = self.requestObj.get_history(queue_id)[-1]
+                    print("\n ***** Reward Renege **** ", srv,self.queue_state["reward"])
                     return self.queue_state
                 else:
+                    print("\n ***** Reward Renege **** ", srv,self.queue_state["reward"])
                     return self.queue_state
         else:
             if len(self.requestObj.get_current_renege_count()) > 0: # get_curr_obs_renege(srv)) > 0:
-                self.queue_state['at_pose'] = int(self.requestObj.get_current_renege_count()[0]['at_pose']) - 1 #self.Observations.get_renege_obs()[0]['at_pose'] - 1
-                self.queue_state["reward"] = self.requestObj.get_current_renege_count()[0]['reward'] #self.Observations.get_renege_obs()[0]['reward']
+                self.queue_state['at_pose'] = int(self.requestObj.get_current_renege_count()[-1]['at_pose']) - 1 #self.Observations.get_renege_obs()[0]['at_pose'] - 1
+                self.queue_state["reward"] = self.requestObj.get_current_renege_count()[-1]['reward'] #self.Observations.get_renege_obs()[0]['reward']
                 #print("\n Inside outcome renege server 2: ", self.queue_state)
+                print("\n ***** Reward Renege **** ",srv, self.queue_state["reward"])
                 return self.queue_state
             else:
                 #print("\n No request reneged so far...returning default state")
                 if len(self.requestObj.get_history(queue_id)) > 0:
                     self.queue_state = self.requestObj.get_history(queue_id)[-1]
+                    print("\n ***** Reward Renege **** ", srv,self.queue_state["reward"])
                     return self.queue_state
-                else:    
+                else: 
+                    print("\n ***** Reward Renege **** ", srv,self.queue_state["reward"])   
                     return self.queue_state
+        
+        
         
 
     def get_jockey_action_outcome(self, queue_id):
@@ -2517,34 +2505,40 @@ class ImpatientTenantEnv:
         """
         
         srv = self.queue_state.get('ServerID') # curr_state.get('ServerID')
-        #print("\n ********* Jockey from  Server ************** : ", srv,len(self.Observations.get_jockey_obs()),  len(self.requestObj.get_current_jockey_count()), len(self.requestObj.get_history(queue_id)))
+        #print("\n ********* Jockey from  Server ************** : ", srv,len(self.Observations.get_jockey_obs()),  len(self.requestObj.get_current_jockey_observations()), len(self.requestObj.get_history(queue_id)))
         if srv == 1:
-            if len(self.requestObj.get_current_jockey_count()) > 0: 
+            if len(self.requestObj.get_current_jockey_observations()) > 0: 
                 #print("\n Inside outcome jockey server 1: ", self.queue_state)
-                self.queue_state['at_pose'] = int(self.requestObj.get_current_jockey_count()[-1]['at_pose']) + 1 # self.Observations.get_jockey_obs()[0]['at_pose'] + 1
-                self.queue_state["reward"] = self.requestObj.get_current_jockey_count()[-1]['reward'] # self.Observations.get_jockey_obs()[0]['reward']
+                self.queue_state['at_pose'] = int(self.requestObj.get_current_jockey_observations()[-1]['at_pose']) + 1 # self.Observations.get_jockey_obs()[0]['at_pose'] + 1
+                self.queue_state["reward"] = self.requestObj.get_current_jockey_observations()[-1]['reward'] # self.Observations.get_jockey_obs()[0]['reward']
+                print("\n ===== Reward Jockey ==== ", srv,self.queue_state["reward"])
                 return self.queue_state
             else:
                 #print("\n No request jockeyed so far...returning default state")
                 if len(self.requestObj.get_history(queue_id)) > 0:
                     self.queue_state = self.requestObj.get_history(queue_id)[-1]
+                    print("\n ---- Reward Jockey---- ", srv,self.queue_state["reward"])
                     return self.queue_state
                 else:    
+                    print("\n ---- Reward Jockey---- ", srv, self.queue_state["reward"])
                     return self.queue_state
         else:
-            if len(self.requestObj.get_current_jockey_count()) > 0: 
+            if len(self.requestObj.get_current_jockey_observations()) > 0: 
                 #print("\n Inside outcome jockey server 2: ", self.queue_state)
-                self.queue_state['at_pose'] = int(self.requestObj.get_current_jockey_count()[-1]['at_pose']) + 1 
-                self.queue_state["reward"] = self.requestObj.get_current_jockey_count()[-1]['reward'] 
+                self.queue_state['at_pose'] = int(self.requestObj.get_current_jockey_observations()[-1]['at_pose']) + 1 
+                self.queue_state["reward"] = self.requestObj.get_current_jockey_observations()[-1]['reward']
+                print("\n ***** Reward Jockey**** ", srv,self.queue_state["reward"]) 
                 return self.queue_state
             else:
                 #print("\n No request jockeyed so far...returning default state")
                 if len(self.requestObj.get_history(queue_id)) > 0:
-                    self.queue_state = self.requestObj.get_history(queue_id)[-1]                
+                    self.queue_state = self.requestObj.get_history(queue_id)[-1]  
+                    print("\n ***** Reward Jockey**** ", srv,self.queue_state["reward"])              
                     return self.queue_state
-                else:    
+                else: 
+                    print("\n ***** Reward Jockey**** ", srv,self.queue_state["reward"])   
                     return self.queue_state
-
+                             
 
     def get_action_to_state(self):
 		
@@ -2583,7 +2577,8 @@ class ImpatientTenantEnv:
         #    self.queue_state[self.queue_id] = new_state #["SourceState"]
         #    target_queue = "2" if self.queue_id == "1" else "1"
         #    self.queue_state[target_queue] = new_state #["TargetState"]
-
+        
+        print(f"Action: {action}, Reward: {self.queue_state['reward']}")
         # Get observation and info
         observation = self.queue_state 
         
@@ -2725,7 +2720,7 @@ def main():
 	
     utility_basic = 1.0
     discount_coef = 0.1
-    state_dim = 10  # Example state dimension
+    state_dim = 11  # Example state dimension
     action_dim = 2  # Example action dimension
 
     # Initialize Actor-Critic model and A2C agent
