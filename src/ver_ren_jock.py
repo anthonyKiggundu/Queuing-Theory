@@ -106,8 +106,8 @@ class Observations:
         
           
         
-    def set_renege_obs(self, curr_pose, queue_intensity, jockeying_rate, reneging_rate ,time_local_service, time_to_service_end, reward, queueid, activity, long_avg_serv_time, uses_intensity_based):		
-
+    def set_renege_obs(self, queueid, curr_pose, queue_intensity, jockeying_rate, reneging_rate ,time_local_service, time_to_service_end, reward,  activity, long_avg_serv_time, uses_intensity_based):		
+        
         self.curr_obs_renege.append(
             {   
                 "ServerID": queueid,
@@ -127,7 +127,7 @@ class Observations:
         return self.curr_obs_renege
         
         
-    def set_jockey_obs(self, curr_pose, queue_intensity, jockeying_rate, reneging_rate ,time_local_service, time_to_service_end, reward, queueid, activity, long_avg_serv_time, uses_intensity_based):
+    def set_jockey_obs(self, queueid, curr_pose, queue_intensity, jockeying_rate, reneging_rate ,time_local_service, time_to_service_end, reward,  activity, long_avg_serv_time, uses_intensity_based):
         
         self.curr_obs_jockey.append(
             {
@@ -586,7 +586,7 @@ class A2CAgent:
 
     def store_reward(self, reward):
         self.rewards.append(reward)
-        print(f"Stored reward: {reward}, Total rewards: {self.rewards}")
+        # print(f"Stored reward: {reward}, Total rewards: {self.rewards}")
         
 
     def update(self):
@@ -613,7 +613,7 @@ class A2CAgent:
             R = r + self.gamma * R
             returns.insert(0, R)
         
-        print(f"Returns: {returns}")
+        # print(f"Returns: {returns}")
         returns = torch.tensor(returns).to(device)            
             
         # values = torch.cat(self.values).to(device)
@@ -623,7 +623,7 @@ class A2CAgent:
         critic_loss = advantage.pow(2).mean()
         loss = actor_loss + critic_loss
         
-        print("\n total loss of actor + critic:", loss) #loss.requires_grad)
+        # print("\n total loss of actor + critic:", loss) #loss.requires_grad)
         
         self.optimizer.zero_grad()
         loss.backward()
@@ -2072,10 +2072,15 @@ class RequestQueue:
                 
         self.curr_req = req
         
-        return decision        
+        #return decision        
 
 
     def reqRenege(self, req, queueid, curr_pose, serv_rate, queue_intensity, time_local_service, customerid, time_to_service_end, decision, curr_queue, uses_intensity_based):
+        
+        if decision:
+            decison = 1
+        else:
+            decision = 0
         
         if "1" in queueid:
             self.queue = self.dict_queues_obj["1"]            
@@ -2103,8 +2108,8 @@ class RequestQueue:
             self.jockeying_rate = self.compute_jockeying_rate(curr_queue)
             self.long_avg_serv_time = self.get_long_run_avg_service_time(queueid)         
             
-            self.objObserv.set_renege_obs(queueid, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, time_local_service, time_to_service_end, reward, 0, self.long_avg_serv_time, uses_intensity_based)                
-        
+            self.objObserv.set_renege_obs(queueid, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, time_local_service, time_to_service_end, reward, decision, self.long_avg_serv_time, uses_intensity_based)                
+            #print("\n ==== CURRENT Reneg OBS ", queueid, " = ",curr_pose, " = ",queue_intensity, " = ",self.jockeying_rate, " = ",self.reneging_rate, " = ",time_local_service, " = ",req.exp_time_service_end, " = ",reward, decision, " = ",self.long_avg_serv_time, " = ",uses_intensity_based)
             self.curr_req = req
             
             return reward
@@ -2135,10 +2140,16 @@ class RequestQueue:
         return None
         
             
-    def reqJockey(self, curr_queue_id, dest_queue_id, req, customerid, serv_rate, dest_queue, exp_delay, decision, curr_pose, curr_queue, uses_intensity_based):		        
-                
+    def reqJockey(self, curr_queue_id, dest_queue_id, req, customerid, serv_rate, dest_queue, exp_delay, decision, curr_pose, curr_queue, uses_intensity_based):	
+		# Convert here the decision from bool to numeric - true = 1, false = 0
+			        
+        if decision:
+            decison = 1
+        else:
+            decision = 0
+			
         if curr_pose >= len(curr_queue):
-            return
+            return                   
             
         else:	
             np.delete(curr_queue, curr_pose) # np.where(id_queue==req_id)[0][0])
@@ -2167,8 +2178,8 @@ class RequestQueue:
             self.jockeying_rate = self.compute_jockeying_rate(curr_queue)     
             self.long_avg_serv_time = self.get_long_run_avg_service_time(curr_queue_id)                 
             
-            self.objObserv.set_jockey_obs(curr_queue_id, curr_pose, self.queue_intensity, self.jockeying_rate, self.reneging_rate, exp_delay, req.exp_time_service_end, reward, 1, self.long_avg_serv_time, uses_intensity_based) # time_alt_queue                                
-            print("\n **** ", self.objObserv.get_jockey_obs()[-1])                                   
+            self.objObserv.set_jockey_obs(curr_queue_id, curr_pose, self.queue_intensity, self.jockeying_rate, self.reneging_rate, exp_delay, req.exp_time_service_end, reward, decision, self.long_avg_serv_time, uses_intensity_based) # time_alt_queue                                
+            #print("\n **** CURRENT Jock OBS ", curr_queue_id, " - ",curr_pose, " - ",self.queue_intensity, " - ",self.jockeying_rate, " - ",self.reneging_rate, " - ",exp_delay, " - ",req.exp_time_service_end, " - ",reward, decision, " - ",self.long_avg_serv_time, " - ",uses_intensity_based)                                   
             self.curr_req = req                    
         
         return
@@ -2176,6 +2187,7 @@ class RequestQueue:
     
     def get_current_jockey_observations(self):
 		
+        #print("OBS -> ", self.objObserv.get_jockey_obs())
         return self.objObserv.get_jockey_obs()
 
 
@@ -2221,7 +2233,7 @@ class RequestQueue:
         #        care anymore whether they incur a loss because they have already joined anyway
         #        such that reneging returns more loss than the jockeying decision
 
-        return decision
+        #return decision
         
     
     def compute_reneging_rate_by_info_source(self, info_src_requests):
@@ -2236,7 +2248,7 @@ class RequestQueue:
         return jockeys / len(self.get_current_jockey_observations())
     
         
-    def compare_behavior_rates_by_information_how_often(self):
+    def compare_behavior_rates_by_information_how_often_old(self):
         """
         Compare reneging and jockeying rates for intensity-based and departure-based requests.
         """
@@ -2244,8 +2256,11 @@ class RequestQueue:
         jockeyed_departure_based_requests = [d.get("intensity_based_info") for d in self.objObserv.get_jockey_obs() if not "intensity_based_info" in d]  
         
         reneged_intensity_based_requests = [d.get("intensity_based_info") for d in self.objObserv.get_renege_obs() if "intensity_based_info" in d]  
-        reneged_departure_based_requests = [d.get("intensity_based_info") for d in self.objObserv.get_renege_obs() if not "intensity_based_info" in d] 
-
+        reneged_departure_based_requests = [d.get("intensity_based_info") for d in self.objObserv.get_renege_obs() if not "intensity_based_info" in d]
+        
+        print("\n Lastly intensity jockeys: ", jockeyed_intensity_based_requests) 
+        print("\n Lastly departure jockeys: ", jockeyed_departure_based_requests)
+        
         # Calculate rates for intensity-based requests
         reneging_rate_intensity = self.compute_reneging_rate_by_info_source(reneged_intensity_based_requests)
         jockeying_rate_intensity = self.compute_jockeying_rate_by_info_source(jockeyed_intensity_based_requests)
@@ -2267,7 +2282,7 @@ class RequestQueue:
         # Add labels and title
         plt.xlabel("Categories")
         plt.ylabel("Rate")
-        plt.title("Comparison of Reneging and Jockeying Rates")
+        #plt.title("Comparison of Reneging and Jockeying Rates")
         plt.legend()
         plt.grid(axis='y', linestyle='--', alpha=0.7)
         plt.tight_layout()
@@ -2275,17 +2290,58 @@ class RequestQueue:
         # Show the plot
         plt.show()
 
-        # Return or print comparison
-        #return {
-        #    "intensity_based": {
-        #        "reneging_rate": reneging_rate_intensity,
-        #        "jockeying_rate": jockeying_rate_intensity,
-        #    },
-        #    "departure_based": {
-        #        "reneging_rate": reneging_rate_departure,
-        #        "jockeying_rate": jockeying_rate_departure,
-        #    },
-        #}
+    
+    def compare_behavior_rates_by_information_how_often(self):
+        """
+        Compare the percentage of jockeyed versus reneged requests based on
+        intensity-based information versus departure-based information over all episodes.
+        """
+        # Separate observations based on decision source
+        jockeyed_intensity_based_requests = [d for d in self.objObserv.get_jockey_obs() if d.get("intensity_based_info", False)]
+        jockeyed_departure_based_requests = [d for d in self.objObserv.get_jockey_obs() if not d.get("intensity_based_info", False)]
+    
+        reneged_intensity_based_requests = [d for d in self.objObserv.get_renege_obs() if d.get("intensity_based_info", False)]
+        reneged_departure_based_requests = [d for d in self.objObserv.get_renege_obs() if not d.get("intensity_based_info", False)]
+
+        # Compute total counts for each category
+        total_jockeyed_intensity = len(jockeyed_intensity_based_requests)
+        total_jockeyed_departure = len(jockeyed_departure_based_requests)
+        total_reneged_intensity = len(reneged_intensity_based_requests)
+        total_reneged_departure = len(reneged_departure_based_requests)
+
+        # Compute percentages
+        total_jockeyed = total_jockeyed_intensity + total_jockeyed_departure
+        total_reneged = total_reneged_intensity + total_reneged_departure
+
+        jockeyed_intensity_percent = (total_jockeyed_intensity / total_jockeyed) * 100 if total_jockeyed > 0 else 0
+        jockeyed_departure_percent = (total_jockeyed_departure / total_jockeyed) * 100 if total_jockeyed > 0 else 0
+        reneged_intensity_percent = (total_reneged_intensity / total_reneged) * 100 if total_reneged > 0 else 0
+        reneged_departure_percent = (total_reneged_departure / total_reneged) * 100 if total_reneged > 0 else 0
+
+        # Create a bar chart
+        categories = ["Jockeyed", "Reneged"]
+        intensity_based_percents = [jockeyed_intensity_percent, reneged_intensity_percent]
+        departure_based_percents = [jockeyed_departure_percent, reneged_departure_percent]
+
+        x = range(len(categories))  # Indices for categories
+
+        plt.figure(figsize=(10, 6))
+        plt.bar(x, intensity_based_percents, width=0.4, label="Intensity-Based", color="blue", align="center")
+        plt.bar(
+            [i + 0.4 for i in x], departure_based_percents, width=0.4, label="Departure-Based", color="orange", align="center"
+        )
+
+        # Add labels and titles
+        plt.xlabel("Categories")
+        plt.ylabel("Percentage")
+        #plt.title("Percentage of Jockeyed vs Reneged Requests by Decision Source")
+        plt.xticks([i + 0.2 for i in x], categories)
+        plt.legend()
+        plt.grid(axis="y", linestyle="--", alpha=0.7) 
+        plt.tight_layout()
+
+        # Display the plot
+        plt.show()
         
 
     def compare_rates_by_information_source_with_graph(self):
@@ -2318,7 +2374,7 @@ class RequestQueue:
         # Add labels and title
         plt.xlabel("Categories")
         plt.ylabel("Rate")
-        plt.title("Comparison of Reneging and Jockeying Rates")
+        #plt.title("Comparison of Reneging and Jockeying Rates")
         plt.legend()
         plt.grid(axis='y', linestyle='--', alpha=0.7)
         plt.tight_layout()
@@ -2326,7 +2382,37 @@ class RequestQueue:
         # Show the plot
         plt.show()
 
-    # Existing methods and attributes...
+    def plot_queue_intensity_vs_requests(self):
+        """
+        Plot the intensity of both queues against the number of requests in the queues.
+        """
+        # Extract data for Server 1
+        server_1_data = self.dispatch_data["server_1"]
+        num_requests_server_1 = server_1_data["num_requests"]  # Number of requests in Server 1
+        intensity_server_1 = server_1_data["queue_intensity"]  # Intensity of Server 1
+
+        # Extract data for Server 2
+        server_2_data = self.dispatch_data["server_2"]
+        num_requests_server_2 = server_2_data["num_requests"]  # Number of requests in Server 2
+        intensity_server_2 = server_2_data["queue_intensity"]  # Intensity of Server 2
+
+        # Plot data for Server 1
+        plt.figure(figsize=(12, 6))
+        plt.plot(num_requests_server_1, intensity_server_1, label="Server 1 Intensity", marker="o", linestyle="-", color="blue",)
+
+        # Plot data for Server 2
+        plt.plot(num_requests_server_2, intensity_server_2, label="Server 2 Intensity", marker="x", linestyle="--", color="orange",)
+
+        # Add labels and title
+        plt.xlabel("Number of Requests in Queue")
+        plt.ylabel("Queue Intensity")
+        # plt.title("Queue Intensity vs Number of Requests")
+        plt.legend()
+        plt.grid(axis="both", linestyle="--", alpha=0.7)
+        plt.tight_layout()
+
+        # Show the plot
+        plt.show()
        
 
 class ImpatientTenantEnv:
@@ -2443,6 +2529,60 @@ class ImpatientTenantEnv:
         return observation, info
 
 
+    def get_renege_action_outcome_original(self, queue_id):
+        """
+        Compute the state of the queue after a renege action.
+
+        Args:
+            queue_id (str): The ID of the queue where the renege action occurs.
+
+        Returns:
+            dict: The resulting state of the queue.
+        """
+        srv = self.queue_state.get('ServerID')  # Get the current server ID from the queue state
+        
+        # Check if the current server has any reneged requests
+        if "1" in srv:  # Server 1
+            #print("\n --> ID ", srv, type(srv))
+            if len(self.requestObj.get_current_renege_count()) > 0:
+                # Retrieve the latest reneged observation
+                last_renege = self.requestObj.get_current_renege_count()[-1]
+                #print("\n LAST RENEGE EVENT: ", last_renege)
+                self.queue_state['at_pose'] = max(0, last_renege['at_pose'] - 1)  # Decrease the position in the queue
+                self.queue_state["reward"] = last_renege["reward"]  # Update the reward based on the latest renege
+            elif len(self.requestObj.get_history(queue_id)) > 0:
+                # Fall back to the last known state in the history if no reneged requests exist
+                self.queue_state = self.requestObj.get_history(queue_id)[-1]
+            else:
+                # Default state if no renege or history exists
+                self.queue_state['at_pose'] = 0
+                self.queue_state["reward"] = 0.0
+
+        elif "2" in srv:  # Server 2
+            #print("\n --> ID ", srv, type(srv))
+            if len(self.requestObj.get_current_renege_count()) > 0:
+                # Retrieve the latest reneged observation
+                last_renege = self.requestObj.get_current_renege_count()[-1]
+                #print("\n LAST RENEGE EVENT: ", last_renege)
+                self.queue_state['at_pose'] = max(0, last_renege['at_pose'] - 1)  # Decrease the position in the queue
+                self.queue_state["reward"] = last_renege["reward"]  # Update the reward based on the latest renege
+            elif len(self.requestObj.get_history(queue_id)) > 0:
+                # Fall back to the last known state in the history if no reneged requests exist
+                self.queue_state = self.requestObj.get_history(queue_id)[-1]
+            else:
+                # Default state if no renege or history exists
+                self.queue_state['at_pose'] = 0
+                self.queue_state["reward"] = 0.0
+
+        else:
+            # Handle unexpected server IDs
+            raise ValueError(f"Invalid Server ID: {srv}")
+
+        # Log the resulting state and return it
+        print(f"New state after renege action on Server {srv}: {self.queue_state}")
+        return self.queue_state
+    
+    
     def get_renege_action_outcome(self, queue_id):
         """
         Compute the state of the queue after a renege action.
@@ -2455,42 +2595,35 @@ class ImpatientTenantEnv:
         """
         
         srv = self.queue_state.get('ServerID') # curr_state.get('ServerID')
-        #print("\n *********Renege from  Server ************** : ", srv,len(self.Observations.get_renege_obs()),  len(self.requestObj.get_current_renege_count()), len(self.requestObj.get_history(queue_id))) # That ACTION
+        
         if srv == 1:
             
             if len(self.requestObj.get_current_renege_count()) > 0: #len(self.Observations.get_renege_obs()) > 0: 
-                #print("\n Inside outcome renege server 1: ", self.queue_state)
-                self.queue_state['at_pose'] = len(self.requestObj.get_current_renege_count()[-1]['at_pose']) - 1 # self.Observations.get_renege_obs()[0]['at_pose'] - 1
-                self.queue_state["reward"] = self.requestObj.get_current_renege_count()[-1]['reward'] # self.Observations.get_renege_obs()[0]['reward']                
-                print("\n ***** Reward Renege **** ", srv,self.queue_state["reward"])
+                last_renege = self.requestObj.get_current_renege_count()[-1]
+                self.queue_state['at_pose'] = max(0, last_renege['at_pose'] - 1) # self.requestObj.get_current_renege_count()[-1]['at_pose'] - 1 # self.Observations.get_renege_obs()[0]['at_pose'] - 1
+                self.queue_state["reward"] = last_renege["reward"] # self.requestObj.get_current_renege_count()[-1]['reward'] # self.Observations.get_renege_obs()[0]['reward']                                
                 return self.queue_state
             else:
-                #print("\n No request reneged so far...returning default state")
+                
                 if len(self.requestObj.get_history(queue_id)) > 0:
-                    self.queue_state = self.requestObj.get_history(queue_id)[-1]
-                    print("\n ***** Reward Renege **** ", srv,self.queue_state["reward"])
+                    self.queue_state = self.requestObj.get_history(queue_id)[-1]                    
                     return self.queue_state
-                else:
-                    print("\n ***** Reward Renege **** ", srv,self.queue_state["reward"])
+                else:                    
                     return self.queue_state
         else:
             if len(self.requestObj.get_current_renege_count()) > 0: # get_curr_obs_renege(srv)) > 0:
-                self.queue_state['at_pose'] = int(self.requestObj.get_current_renege_count()[-1]['at_pose']) - 1 #self.Observations.get_renege_obs()[0]['at_pose'] - 1
-                self.queue_state["reward"] = self.requestObj.get_current_renege_count()[-1]['reward'] #self.Observations.get_renege_obs()[0]['reward']
-                #print("\n Inside outcome renege server 2: ", self.queue_state)
-                print("\n ***** Reward Renege **** ",srv, self.queue_state["reward"])
+                last_renege = self.requestObj.get_current_renege_count()[-1]
+                self.queue_state['at_pose'] = max(0, last_renege['at_pose'] - 1) # int(self.requestObj.get_current_renege_count()[-1]['at_pose']) - 1 #self.Observations.get_renege_obs()[0]['at_pose'] - 1
+                self.queue_state["reward"] = last_renege["reward"] #self.requestObj.get_current_renege_count()[-1]['reward'] #self.Observations.get_renege_obs()[0]['reward']
+                                
                 return self.queue_state
             else:
-                #print("\n No request reneged so far...returning default state")
+                
                 if len(self.requestObj.get_history(queue_id)) > 0:
-                    self.queue_state = self.requestObj.get_history(queue_id)[-1]
-                    print("\n ***** Reward Renege **** ", srv,self.queue_state["reward"])
+                    self.queue_state = self.requestObj.get_history(queue_id)[-1]                    
                     return self.queue_state
-                else: 
-                    print("\n ***** Reward Renege **** ", srv,self.queue_state["reward"])   
+                else:                     
                     return self.queue_state
-        
-        
         
 
     def get_jockey_action_outcome(self, queue_id):
@@ -2504,39 +2637,112 @@ class ImpatientTenantEnv:
             dict: The resulting state of the queue.
         """
         
-        srv = self.queue_state.get('ServerID') # curr_state.get('ServerID')
-        #print("\n ********* Jockey from  Server ************** : ", srv,len(self.Observations.get_jockey_obs()),  len(self.requestObj.get_current_jockey_observations()), len(self.requestObj.get_history(queue_id)))
+        srv = self.queue_state.get('ServerID')  # Current server ID
         if srv == 1:
-            if len(self.requestObj.get_current_jockey_observations()) > 0: 
-                #print("\n Inside outcome jockey server 1: ", self.queue_state)
-                self.queue_state['at_pose'] = int(self.requestObj.get_current_jockey_observations()[-1]['at_pose']) + 1 # self.Observations.get_jockey_obs()[0]['at_pose'] + 1
-                self.queue_state["reward"] = self.requestObj.get_current_jockey_observations()[-1]['reward'] # self.Observations.get_jockey_obs()[0]['reward']
-                print("\n ===== Reward Jockey ==== ", srv,self.queue_state["reward"])
-                return self.queue_state
+            if len(self.requestObj.get_current_jockey_observations()) > 0:
+                # Access the last jockeying event to calculate expected processing time
+                jockey_event = self.requestObj.get_current_jockey_observations()[-1]
+                #print("\n LAST JOCKEYED EVENT: ", jockey_event)
+                expected_processing_time = jockey_event['expected_service_time']
+
+                # If the previous jockeying event was rewarded, and the expected processing time is favorable
+                if jockey_event['reward'] > 0 and expected_processing_time < self.queue_state['long_avg_serv_time']:
+                    self.queue_state['at_pose'] += 1  # Jockey to the alternative queue
+                    self.queue_state['reward'] = jockey_event['reward']
+
+                    # Update the history to reflect the jockeyed state
+                    self.requestObj.srv1_history.append({
+                        "ServerID": queue_id,
+                        "at_pose": self.queue_state['at_pose'],
+                        "rate_jockeyed": self.queue_state['rate_jockeyed'],
+                        "rate_reneged": self.queue_state['rate_reneged'],
+                        "expected_service_time": expected_processing_time,
+                        "this_busy": self.queue_state['this_busy'],
+                        "long_avg_serv_time": self.queue_state['long_avg_serv_time'],
+                        "time_service_took": expected_processing_time,
+                        "reward": jockey_event['reward'],
+                        "action": "jockeyed",
+                        "intensity_based_info": self.queue_state['intensity_based_info']
+                    })
+                    return self.queue_state
             else:
-                #print("\n No request jockeyed so far...returning default state")
+                # Default to the last known state if no jockeying occurred
                 if len(self.requestObj.get_history(queue_id)) > 0:
                     self.queue_state = self.requestObj.get_history(queue_id)[-1]
-                    print("\n ---- Reward Jockey---- ", srv,self.queue_state["reward"])
+                return self.queue_state
+        else:
+            if len(self.requestObj.get_current_jockey_observations()) > 0:
+                jockey_event = self.requestObj.get_current_jockey_observations()[-1]
+                #print("\n LAST JOCKEYED EVENT: ", jockey_event)
+                expected_processing_time = jockey_event['expected_service_time']
+
+                if jockey_event['reward'] > 0 and expected_processing_time < self.queue_state['long_avg_serv_time']:
+                    self.queue_state['at_pose'] += 1
+                    self.queue_state['reward'] = jockey_event['reward']
+
+                    # Update the history to reflect the jockeyed state
+                    self.requestObj.srv2_history.append({
+                        "ServerID": queue_id,
+                        "at_pose": self.queue_state['at_pose'],
+                        "rate_jockeyed": self.queue_state['rate_jockeyed'],
+                        "rate_reneged": self.queue_state['rate_reneged'],
+                        "expected_service_time": expected_processing_time,
+                        "this_busy": self.queue_state['this_busy'],
+                        "long_avg_serv_time": self.queue_state['long_avg_serv_time'],
+                        "time_service_took": expected_processing_time,
+                        "reward": jockey_event['reward'],
+                        "action": "jockeyed",
+                        "intensity_based_info": self.queue_state['intensity_based_info']
+                    })
+                    return self.queue_state
+            else:
+                if len(self.requestObj.get_history(queue_id)) > 0:
+                    self.queue_state = self.requestObj.get_history(queue_id)[-1]
+                return self.queue_state        
+
+
+    def get_jockey_action_outcome_original(self, queue_id):
+        """
+        Compute the state of the queue after a jockey action.
+
+        Args:
+            queue_id (str): The ID of the source queue for the jockey action.
+
+        Returns:
+            dict: The resulting state of the queue.
+        """
+        
+        srv = self.queue_state.get('ServerID') # curr_state.get('ServerID')
+        
+        if srv == 1:
+            if len(self.requestObj.get_current_jockey_observations()) > 0:                 
+                self.queue_state['at_pose'] = int(self.requestObj.get_current_jockey_observations()[-1]['at_pose']) + 1 # self.Observations.get_jockey_obs()[0]['at_pose'] + 1
+                self.queue_state["reward"] = self.requestObj.get_current_jockey_observations()[-1]['reward'] # self.Observations.get_jockey_obs()[0]['reward']
+                #print("\n ===== Reward Jockey ==== ", srv,self.queue_state["reward"])
+                return self.queue_state
+            else:                
+                if len(self.requestObj.get_history(queue_id)) > 0:
+                    self.queue_state = self.requestObj.get_history(queue_id)[-1]
+                    #print("\n ---- Reward Jockey---- ", srv,self.queue_state["reward"])
                     return self.queue_state
                 else:    
-                    print("\n ---- Reward Jockey---- ", srv, self.queue_state["reward"])
+                    #print("\n ---- Reward Jockey---- ", srv, self.queue_state["reward"])
                     return self.queue_state
         else:
             if len(self.requestObj.get_current_jockey_observations()) > 0: 
-                #print("\n Inside outcome jockey server 2: ", self.queue_state)
+                
                 self.queue_state['at_pose'] = int(self.requestObj.get_current_jockey_observations()[-1]['at_pose']) + 1 
                 self.queue_state["reward"] = self.requestObj.get_current_jockey_observations()[-1]['reward']
-                print("\n ***** Reward Jockey**** ", srv,self.queue_state["reward"]) 
+                #print("\n ***** Reward Jockey**** ", srv,self.queue_state["reward"]) 
                 return self.queue_state
             else:
-                #print("\n No request jockeyed so far...returning default state")
+                
                 if len(self.requestObj.get_history(queue_id)) > 0:
                     self.queue_state = self.requestObj.get_history(queue_id)[-1]  
-                    print("\n ***** Reward Jockey**** ", srv,self.queue_state["reward"])              
+                    #print("\n ***** Reward Jockey**** ", srv,self.queue_state["reward"])              
                     return self.queue_state
                 else: 
-                    print("\n ***** Reward Jockey**** ", srv,self.queue_state["reward"])   
+                    #print("\n ***** Reward Jockey**** ", srv,self.queue_state["reward"])   
                     return self.queue_state
                              
 
@@ -2559,32 +2765,31 @@ class ImpatientTenantEnv:
         Returns:
             tuple: (observation, reward, terminated, info)
         """
-      
-        
-        new_state = self.get_action_to_state() #self._action_to_state[action]
-        
-        for key,value in new_state.items():
-            if key == action:
-                
-                terminated = value["at_pose"] <= 0  # Example termination condition
-                #reward = new_state["reward"]
-                reward = value["reward"]
+        new_state = self.get_action_to_state()  # Map actions to states
+
+        # Initialize variables
+        terminated = False
+        reward = 0
+
+        # Check if the action exists in the new_state mapping
+        if action in new_state:
+            value = new_state[action]
+
+            # Ensure value is not None before accessing its keys
+            if value is not None and isinstance(value, dict):
+                terminated = value.get("at_pose", 0) <= 0  # Fallback to 0 if "at_pose" is missing
+                reward = value.get("reward", 0)  # Fallback to 0 if "reward" is missing
                 self.queue_state = value
-        # Update queue states based on the action outcome
-        #if action == Actions.RENEGE.value:
-        #    self.queue_state[self.queue_id] = new_state # ["NewState"]
-        #elif action == Actions.JOCKEY.value:
-        #    self.queue_state[self.queue_id] = new_state #["SourceState"]
-        #    target_queue = "2" if self.queue_id == "1" else "1"
-        #    self.queue_state[target_queue] = new_state #["TargetState"]
-        
-        print(f"Action: {action}, Reward: {self.queue_state['reward']}")
+            else:
+                print(f"Warning: Action {action} does not map to a valid state. Skipping.")
+        else:
+            print(f"Warning: Action {action} is not recognized. Skipping.")
+
         # Get observation and info
-        observation = self.queue_state 
-        
+        observation = self.queue_state
         info = self._get_info()
 
-        return observation, reward, terminated, info       
+        return observation, reward, terminated, info
 
  
     def get_state_action_info(self):
@@ -2603,12 +2808,7 @@ class ImpatientTenantEnv:
             "servrate": self.servrate,
             "waitingtime": self.waitingtime
         }
-        return raw_server_status
-        
-#env = ImpatientTenantEnv()
-#state_dim = len(env.observation_space)
-#action_dim = env.action_space
-
+        return raw_server_status        
 
 
 def visualize_results(metrics_file="simu_results.csv"):
@@ -2697,7 +2897,7 @@ def visualize_comparison(adjusted_file="adjusted_metrics.csv", non_adjusted_file
     plt.figure(figsize=(12, 6))
     plt.plot(adjusted_metrics['episode'], adjusted_metrics['average_jockeying_rate'], label='Adjusted Service Rate', marker='o')
     plt.plot(non_adjusted_metrics['episode'], non_adjusted_metrics['average_jockeying_rate'], label='Non-Adjusted Service Rate', marker='x')
-    plt.title("Average Jockeying Rates per Episode")
+    #plt.title("Average Jockeying Rates per Episode")
     plt.xlabel("Episode")
     plt.ylabel("Average Jockeying Rate")
     plt.legend()
@@ -2708,7 +2908,7 @@ def visualize_comparison(adjusted_file="adjusted_metrics.csv", non_adjusted_file
     plt.figure(figsize=(12, 6))
     plt.plot(adjusted_metrics['episode'], adjusted_metrics['average_reneging_rate'], label='Adjusted Service Rate', marker='o')
     plt.plot(non_adjusted_metrics['episode'], non_adjusted_metrics['average_reneging_rate'], label='Non-Adjusted Service Rate', marker='x')
-    plt.title("Average Reneging Rates per Episode")
+    #plt.title("Average Reneging Rates per Episode")
     plt.xlabel("Episode")
     plt.ylabel("Average Reneging Rate")
     plt.legend()
@@ -2736,15 +2936,15 @@ def main():
 
     print("Environment and RequestQueue initialized successfully!")
     
-    duration = 2 # 20
+    duration = 20
     
     # Start the scheduler
     scheduler_thread = threading.Thread(target=request_queue.run(duration, env, adjust_service_rate=False, save_to_file="non_adjusted_metrics.csv")) # requestObj.run_scheduler) # 
     scheduler_thread.start()
     
     # Let us visualize some results
-    #visualize_results(metrics_file="simu_results.csv")    
-    #request_queue.plot_rates()
+    visualize_results(metrics_file="simu_results.csv")    
+    request_queue.plot_rates()
     request_queue.compare_behavior_rates_by_information_how_often()
     request_queue.compare_rates_by_information_source_with_graph()
     
@@ -2753,23 +2953,6 @@ def main():
     #actor_critic = requestObj.getActCritNet() # Inside    
     #agent = requestObj.getAgent()        
     
-    
-    #for episode in range(100):
-    #    state, info = env.reset(seed=42)
-    #    total_reward = 0
-
-    #    for t in range(100):
-    #        action = agent.select_action(state)
-    #        next_state, reward, done, info = env.step(action)
-    #        agent.store_reward(reward)
-    #        state = next_state
-    #        total_reward += reward
-
-    #        if done:
-    #            break
-
-    #    agent.update()
-    #    print(f"Episode {episode}, Total Reward: {total_reward}")
 
 if __name__ == "__main__":
     main()
