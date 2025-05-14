@@ -487,7 +487,9 @@ class RequestQueue:
         
         self.capacity = self.objQueues.get_queue_capacity()
         self.total_served_requests_srv1 = 0
-        self.total_served_requests_srv2 = 0                        
+        self.total_served_requests_srv2 = 0 
+        self.srvrates_1 = 0
+        self.srvrates_2 = 0                       
         
         BROADCAST_INTERVAL = 5
         
@@ -607,9 +609,7 @@ class RequestQueue:
             loop=tqdm(range(steps),leave=False,desc='     Current run')
         else:
             loop=range(steps)                
-               
-                                    
-        
+
         # Two-state CTMC: mu_0=1.0, mu_1=2.0, switching rates 0.1 between each
         #mu_states = [srv_1, srv_2]
         #Q = [[-0.1, 0.1], [0.1, -0.1]]
@@ -620,11 +620,22 @@ class RequestQueue:
         #    print(f"{t:.3f}s: {etype} at state {state} (μ={mu_states[state]})")
             
         for i in loop:
-            self.arr_rate = self.objQueues.get_arrivals_rates() 
-            srvrates_1, srvrates_2 = self.get_server_rates() 
+            #self.arr_rate = self.objQueues.get_arrivals_rates() 
+            #srvrates_1, srvrates_2 = self.get_server_rates()
+            # Randomize arrival rate and service rates at each iteration
+            self.arr_rate = self.objQueues.randomize_arrival_rate()  # Randomize arrival rate
+            deltaLambda=random.randint(1, 2)
+        
+            serv_rate_one = self.arr_rate + deltaLambda 
+            serv_rate_two = self.arr_rate - deltaLambda
+
+            self.srvrates_1 = serv_rate_one / 2
+            self.srvrates_2 = serv_rate_two / 2
+            #srvrates_1 = random.uniform(0.5, 1.5) * self.arr_rate  # Service rate for Server 1
+            #srvrates_2 = random.uniform(0.5, 1.5) * self.arr_rate  # Service rate for Server 2 
             srv_1 = self.dict_queues_obj.get("1") # Server1
             srv_2 = self.dict_queues_obj.get("2") 
-            print("\n Arrival rate: ",i, self.arr_rate, "Rates 1: ----", srvrates_1,  "Rates 2: ----", srvrates_2)
+            print("\n Arrival rate: ",i, self.arr_rate, "Rates 1: ----", self.srvrates_1,  "Rates 2: ----", self.srvrates_2)
                
             if progress_log:
                 print("Step",i,"/",steps)
@@ -633,19 +644,21 @@ class RequestQueue:
 
             if len(srv_1) < len(srv_2):
                 self.queue = srv_2
-                self.srv_rate = self.dict_servers_info.get("2") # Server2
+                srv_rate = self.srvrates_1 # self.dict_servers_info.get("2") # Server2
+                
                 #model = MarkovQueueModel(arrival_rate=self.arr_rate, service_rate=self.srv_rate, max_states=1000) # 1000)
                 #print("Server2: Long-run change rate:", model.long_run_change_rate())
                 #print("Server2: Sample inter-change time:", model.sample_interchange_time())
 
             else:            
                 self.queue = srv_1
-                self.srv_rate = self.dict_servers_info.get("1") # Server1
+                srv_rate = self.srvrates_2 # self.dict_servers_info.get("1") # Server1
+                
                 #model = MarkovQueueModel(arrival_rate=self.arr_rate, service_rate=self.srv_rate, max_states=1000) # 1000 # len(srv_1))
                 #print("Server1: Long-run change rate:", model.long_run_change_rate())
                 #print("Server1: Sample inter-change time:", model.sample_interchange_time())
                               
-            service_intervals=np.random.exponential(1/self.srv_rate,max(int(self.srv_rate*self.time_res*5),2)) # to ensure they exceed one sampling interval
+            service_intervals=np.random.exponential(1/srv_rate,max(int(srv_rate*self.time_res*5),2)) # to ensure they exceed one sampling interval
             service_intervals=service_intervals[np.where(np.add.accumulate(service_intervals)<=self.time_res)[0]]
             service_intervals=service_intervals[0:np.min([len(service_intervals),self.queue.size])]
             arrival_intervals=np.random.exponential(1/self.arr_rate, max(int(self.arr_rate*self.time_res*5),2))
@@ -1109,12 +1122,12 @@ class RequestQueue:
     def get_queue_state(self, queueid):
 		
         rate_srv1,rate_srv2 = self.get_server_rates()        
-		
+		# srvrates_1, srvrates_1
         if queueid == "1":		
             queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv1    
             customers_in_queue = self.dict_queues_obj["1"]   
             # Instantiate MarkovQueueModel
-            markov_model = MarkovQueueModel(self.arr_rate, rate_srv1, max_states=1000)
+            markov_model = MarkovQueueModel(self.arr_rate, self.srvrates_1, max_states=1000)
             long_run_change_rate = markov_model.long_run_change_rate()
             sample_interchange_time = markov_model.sample_interchange_time() # _steady_state_distribution()
             steady_state_distribution = markov_model._steady_state_distribution()
@@ -1147,7 +1160,7 @@ class RequestQueue:
             queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv2            
             customers_in_queue = self.dict_queues_obj["2"]
             # Instantiate MarkovQueueModel
-            markov_model = MarkovQueueModel(self.arr_rate, rate_srv2, max_states=1000)
+            markov_model = MarkovQueueModel(self.arr_rate, self.srvrates_2, max_states=1000)
             long_run_change_rate = markov_model.long_run_change_rate()
             steady_state_distribution = markov_model._steady_state_distribution()
             steady_state_distribution_list = steady_state_distribution.tolist()  # Convert to list
@@ -1572,19 +1585,29 @@ class RequestQueue:
     
         
     def compare_steady_state_distributions(self, dist_alt_queue, dist_curr_queue):
-        min1,max1,mean1 = dist_alt_queue
-        min2,max2,mean2 = dist_curr_queue
+		        
+        min1 = dist_alt_queue['min']
+        max1 = dist_alt_queue['max']
+        mean1 = dist_alt_queue['mean']
+        
+        min2 = dist_curr_queue['min']
+        max2 = dist_curr_queue['max']
+        mean2 = dist_curr_queue['mean']
+        
+        print("\n => ", min1, max1, mean1, "\n *** ", min2, max2, mean2)
 
         # 1) Pareto‐dominance
         le = (min1<=min2) and (max1<=max2) and (mean1<=mean2)
         lt = (min1< min2) or (max1< max2) or (mean1< mean2)
         if le and lt:
             return True # The alternative queue has a better steady state distribution "Queue1 strictly dominates Queue2"
+        else:
+            return False
             
-        ge = (min2<=min1) and (max2<=max1) and (mean2<=mean1)
-        gt = (min2< min1) or (max2< max1) or (mean2< mean1)
-        if ge and gt:
-            return False # current queue has a better steady state distribution" Queue2 strictly dominates Queue1"
+        #ge = (min2<=min1) and (max2<=max1) and (mean2<=mean1)
+        #gt = (min2< min1) or (max2< max1) or (mean2< mean1)
+        #if ge and gt:
+        #    return False # current queue has a better steady state distribution" Queue2 strictly dominates Queue1"
     
             
     def reqJockey(self, curr_queue_id, dest_queue_id, req, customerid, serv_rate, dest_queue, exp_delay, decision, curr_pose, curr_queue):
@@ -1700,7 +1723,7 @@ class RequestQueue:
             # if alt_steady_state[0] > curr_steady_state[0]:  # Higher probability of being empty
             
             # queue_states_compared = self.compare_queues(alt_queue_state['steady_state_distribution'], curr_queue_state['steady_state_distribution'], K=1)
-            queue_states_compared = self.compare_steady_state_distributions(alt_queue_state, curr_queue_state) # state of alt queue is better than the current one 
+            queue_states_compared = self.compare_steady_state_distributions(alt_steady_state, curr_steady_state) # state of alt queue is better than the current one 
             print("\n Compared state: ", queue_states_compared) # curr_steady_state, "Alt state: ", alt_steady_state) 
             
             if queue_states_compared:  # ['first_order_dominance'] and alt_queue_state['jockeying_rate'] <  curr_queue_state['jockeying_rate']:         
