@@ -1083,8 +1083,8 @@ class RequestQueue:
         """
         Set up the intervals for dispatching the queue status information.
         """
-        # schedule.every(10).seconds.do(self.dispatch_all_queues)
-        # schedule.every(30).seconds.do(self.dispatch_all_queues)
+        schedule.every(10).seconds.do(self.dispatch_all_queues)
+        schedule.every(30).seconds.do(self.dispatch_all_queues)
         schedule.every(60).seconds.do(self.dispatch_all_queues)       
             
 
@@ -1121,74 +1121,59 @@ class RequestQueue:
                        
     def get_queue_state(self, queueid):
 		
-        rate_srv1,rate_srv2 = self.get_server_rates()        
-		# srvrates_1, srvrates_1
+        rate_srv1,rate_srv2 = self.get_server_rates()
+        curr_queue = self.dict_queues_obj[queueid]
+        
+        reneging_rate = self.compute_reneging_rate(curr_queue)
+        jockeying_rate = self.compute_jockeying_rate(curr_queue)      
+	
         if queueid == "1":		
             queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv1    
             customers_in_queue = self.dict_queues_obj["1"]   
             # Instantiate MarkovQueueModel
-            markov_model = MarkovQueueModel(self.arr_rate, self.srvrates_1, max_states=1000)
+            markov_model = MarkovQueueModel(self.arr_rate, self.srvrates_1, max_states=len(customers_in_queue)) # 1000)
             long_run_change_rate = markov_model.long_run_change_rate()
             sample_interchange_time = markov_model.sample_interchange_time() # _steady_state_distribution()
             steady_state_distribution = markov_model._steady_state_distribution()
             steady_state_distribution_list = steady_state_distribution.tolist()  # Convert to list
             
             # Instantiate MarkovModulatedServiceModel
-            mu_states = [rate_srv1, rate_srv2 * 0.8]  # Example states for server 2
-            Q = [[-0.1, 0.1], [0.1, -0.1]]  # Example transition matrix
-            modulated_service_model = MarkovModulatedServiceModel(mu_states, Q)
-            simulated_events = modulated_service_model.simulate(T=10.0)  # Simulate for 10 time units                
-            
-            state = {
-                "total_customers": len(customers_in_queue),
-                "intensity": queue_intensity,
-                "capacity": self.capacity,
-                "long_avg_serv_time": self.get_long_run_avg_service_time(queueid),
-                "sample_interchange_time": sample_interchange_time,
-                "long_run_change_rate": long_run_change_rate, 
-                "steady_state_distribution": {
-                    "max": max(steady_state_distribution_list),
-                    "min": min(steady_state_distribution_list),
-                    "mean": sum(steady_state_distribution_list) / len(steady_state_distribution_list),
-                } #,  steady_state_distribution_list,
-                #"simulated_events": [
-                #    {"time": event[0], "event_type": event[1], "state": event[2]} for event in simulated_events ]
-                #"simulated_events": simulated_events
-            }
+            #mu_states = [rate_srv1, rate_srv2 * 0.8]  # Example states for server 2
+            #Q = [[-0.1, 0.1], [0.1, -0.1]]  # Example transition matrix
+            #modulated_service_model = MarkovModulatedServiceModel(mu_states, Q)
+            #simulated_events = modulated_service_model.simulate(T=10.0)  # Simulate for 10 time units                
+      
         else:
 			#serv_rate = self.get_server_rates()[1] #dict_servers_info["2"] 
             queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv2            
             customers_in_queue = self.dict_queues_obj["2"]
             # Instantiate MarkovQueueModel
-            markov_model = MarkovQueueModel(self.arr_rate, self.srvrates_2, max_states=1000)
+            markov_model = MarkovQueueModel(self.arr_rate, self.srvrates_2, max_states=len(customers_in_queue)) # 1000)
             long_run_change_rate = markov_model.long_run_change_rate()
             steady_state_distribution = markov_model._steady_state_distribution()
             steady_state_distribution_list = steady_state_distribution.tolist()  # Convert to list
-            sample_interchange_time = markov_model.sample_interchange_time()
-
-            # Instantiate MarkovModulatedServiceModel
-            mu_states = [rate_srv1, rate_srv2 * 0.8]  # Example states for server 2
-            Q = [[-0.1, 0.1], [0.1, -0.1]]  # Example transition matrix
-            modulated_service_model = MarkovModulatedServiceModel(mu_states, Q)
-            simulated_events = modulated_service_model.simulate(T=10.0)  # Simulate for 10 time units
-			
-            state = {
-                "total_customers": len(customers_in_queue),
-                "intensity": queue_intensity,
-                "capacity": self.capacity,              
-                "long_avg_serv_time": self.get_long_run_avg_service_time(queueid),
-                "sample_interchange_time": sample_interchange_time,
-                "long_run_change_rate": long_run_change_rate,
-                "steady_state_distribution": {
-                    "max": max(steady_state_distribution_list),
-                    "min": min(steady_state_distribution_list),
-                    "mean": sum(steady_state_distribution_list) / len(steady_state_distribution_list),
-                } #,
+            sample_interchange_time = markov_model.sample_interchange_time()          
+		       
+        state = {
+            "total_customers": len(customers_in_queue),
+            "intensity": queue_intensity,
+            "capacity": self.capacity,              
+            "long_avg_serv_time": self.get_long_run_avg_service_time(queueid),
+            "sample_interchange_time": sample_interchange_time,
+            "long_run_change_rate": long_run_change_rate,
+            "steady_state_distribution": {
+                "max": max(steady_state_distribution_list),
+                "min": min(steady_state_distribution_list),
+                "mean": sum(steady_state_distribution_list) / len(steady_state_distribution_list),
+            },
+            "reneging_rate": reneging_rate,
+            "jockeying_rate" : jockeying_rate 
+            #,
                 #"simulated_events": [
                 #    {"time": event[0], "event_type": event[1], "state": event[2]} for event in simulated_events ]
                 #"simulated_events": simulated_events
-            }
-            
+        }
+           
         return state
   
 
@@ -1219,16 +1204,10 @@ class RequestQueue:
             # take note of the observation ... self.time  queue_id,  serv_rate, intensity, time_in_serv, activity, rewarded, curr_pose
             self.objObserv.set_obs(self.queueID, serv_rate, queue_intensity, req.time_exit-req.time_entrance, reward, len_queue_1, 2)   # req.exp_time_service_end,                                    
             self.history.append(self.objObserv.get_obs())
-                
-            #time_to_service_end = self.estimateMarkovWaitingTime(float(curr_pose), queue_intensity, reqObj.time_entrance)
-            #time_local_service = self.generateLocalCompUtility(req)				                           
-                                
+      
             self.arr_prev_times = self.arr_prev_times[1:self.arr_prev_times.size]
             
-            self.objQueues.update_queue_status(queueID)
-            # req, curr_queue_id, alt_queue_id, customerid, serv_rate
-            # Any Customers interested in jockeying or reneging when a request is processed get_curr_obs_jockey
-            #print("\n Inside Server 1, calling the  decision procedures")
+            self.objQueues.update_queue_status(queueID)      
             
             '''
                 Now after serving a request, dispatch the new state of the queues
@@ -1241,10 +1220,7 @@ class RequestQueue:
             req = self.dict_queues_obj["2"][0] # Server2
             serv_rate = self.dict_servers_info["2"] # Server2
             queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate
-            queueid = "2"   # Server2  
-            
-            #req.service_time = serv_time   
-            #print("\n SERV T IN SERV 2: ", req.service_time)    
+            queueid = "2"   # Server2      
                         
             self.dict_queues_obj["2"] = self.dict_queues_obj["2"][1:self.dict_queues_obj["2"].size] # Server2
             
@@ -1520,7 +1496,7 @@ class RequestQueue:
             self.objQueues.update_queue_status(queueid)
 
 
-    def get_request_position(self, queue_id, request_id):
+    def get_request_position(self, queue_id, request_id): ######
         """
         Get the position of a given request in the queue.
         
@@ -1538,50 +1514,6 @@ class RequestQueue:
                 return position
 
         return None
-        
-        
-    def compare_server_states(self, server1_state, server2_state):
-        """
-        Compare two server states and return the server in a better state.
-    
-        Parameters:
-        - server1_state (dict): State information for server 1.
-        - server2_state (dict): State information for server 2.
-    
-        Returns:
-        - int: 1 if server 1 is better, 2 if server 2 is better.
-        """
-        
-        # Define weights for each metric (you can adjust these based on importance)
-        weights = {
-            "intensity": -1,  # Lower intensity is better (negative weight)
-            "total_customers": -1,  # Fewer customers is better
-            "sample_interchange_time": -1,  # Lower interchange time is better
-            "long_run_change_rate": 1  # Higher change rate is better
-        }
-
-        # Calculate scores for each server
-        server1_score = (
-            weights["intensity"] * server1_state["intensity"] +
-            weights["total_customers"] * server1_state["total_customers"] +
-            weights["sample_interchange_time"] * server1_state["sample_interchange_time"] +
-            weights["long_run_change_rate"] * server1_state["long_run_change_rate"]
-        )
-
-        server2_score = (
-            weights["intensity"] * server2_state["intensity"] +
-            weights["total_customers"] * server2_state["total_customers"] +
-            weights["sample_interchange_time"] * server2_state["sample_interchange_time"] +
-            weights["long_run_change_rate"] * server2_state["long_run_change_rate"]
-        )
-
-        # Compare scores
-        if server1_score > server2_score:
-            return True # 1  # Server 1 is better
-        #elif server2_score > server1_score:
-        #    return False # 2  # Server 2 is better
-        else:
-            return False # 0  # Both servers are equally good
     
         
     def compare_steady_state_distributions(self, dist_alt_queue, dist_curr_queue):
@@ -1603,12 +1535,7 @@ class RequestQueue:
             return True # The alternative queue has a better steady state distribution "Queue1 strictly dominates Queue2"
         else:
             return False
-            
-        #ge = (min2<=min1) and (max2<=max1) and (mean2<=mean1)
-        #gt = (min2< min1) or (max2< max1) or (mean2< mean1)
-        #if ge and gt:
-        #    return False # current queue has a better steady state distribution" Queue2 strictly dominates Queue1"
-    
+     
             
     def reqJockey(self, curr_queue_id, dest_queue_id, req, customerid, serv_rate, dest_queue, exp_delay, decision, curr_pose, curr_queue):
 		
@@ -1649,13 +1576,15 @@ class RequestQueue:
     def compare_queues(self, pi1, pi2, K):
         # pi1, pi2: arrays of steady-state probabilities
         # 1) mean
+        pi1 = np.array(list(pi1.values()))
+        pi2 = np.array(list(pi2.values()))
         mean1, mean2 = np.dot(np.arange(len(pi1)), pi1), np.dot(np.arange(len(pi2)), pi2)
         # 2) tail P(Q > K)
         #tail1, tail2 = pi1[K+1:].sum(), pi2[K+1:].sum()
         # 3) stochastic dominance check (FSD)
         cdf1 = np.cumsum(pi1)
         cdf2 = np.cumsum(pi2)
-        fsd = np.all(cdf1 >= cdf2) and np.any(cdf1 > cdf2)
+        fsd = np.all(cdf1 >= cdf2) or np.any(cdf1 > cdf2) # and
 
         return {
             'mean': (mean1, mean2),
@@ -1723,10 +1652,10 @@ class RequestQueue:
             # if alt_steady_state[0] > curr_steady_state[0]:  # Higher probability of being empty
             
             # queue_states_compared = self.compare_queues(alt_queue_state['steady_state_distribution'], curr_queue_state['steady_state_distribution'], K=1)
-            queue_states_compared = self.compare_steady_state_distributions(alt_steady_state, curr_steady_state) # state of alt queue is better than the current one 
+            queue_states_compared = self.compare_queues(alt_steady_state, curr_steady_state, K=1) # compare_steady_state_distributions()   state of alt queue is better than the current one 
             print("\n Compared state: ", queue_states_compared) # curr_steady_state, "Alt state: ", alt_steady_state) 
             
-            if queue_states_compared:  # ['first_order_dominance'] and alt_queue_state['jockeying_rate'] <  curr_queue_state['jockeying_rate']:         
+            if queue_states_compared['first_order_dominance']: #and (alt_queue_state['jockeying_rate'] <  curr_queue_state['jockeying_rate']):    #        
                 decision = True
                 self.reqJockey(curr_queue_id, alt_queue_id, req, req.customerid, serv_rate, dest_queue, self.avg_delay, decision, curr_pose, self.dict_queues_obj.get(curr_queue_id))
                 
@@ -1765,23 +1694,25 @@ class MarkovQueueModel:
         for an M/M/1 queue: π_n = (1-ρ) ρ^n        
         """
         
-        if self.rho == 1:
-            raise ValueError("System is unstable: rho (arrival rate / service rate) should be less than 1.")
-        if self.rho == 0:
-            raise ValueError("Invalid configuration: arrival rate or service rate cannot be zero.")                     
-            
-        pi = np.zeros(self.max_states+1)
-        one_minus_rho = 1 - self.rho
-        
-        # geometric distribution
-        n = np.arange(self.max_states+1)
+        # Validate rho to ensure it's within a valid range
+        #if not (0 < self.rho < 1):
+        #    raise ValueError("Invalid configuration: rho (arrival rate / service rate) must be between 0 and 1.")
+
+        # Calculate the steady-state distribution
+        pi = np.zeros(self.max_states + 1)
+        one_minus_rho = abs(1 - self.rho)
+
+        n = np.arange(self.max_states + 1)
         pi = one_minus_rho * (self.rho ** n)
-        # normalize in case truncation error
-        pi /= pi.sum()
-        
-        #print(f"self.lambda_: {self.lambda_}, self.mu: {self.mu}, self.rho: {self.rho}")
-        #print(f"one_minus_rho: {one_minus_rho}")
-        #print(f"n: {n}")
+
+        # Normalize to handle potential truncation errors
+        total_sum = np.sum(pi)
+        if total_sum > 0:
+            pi /= total_sum
+        else:
+            # Fallback to uniform distribution if normalization fails
+            pi = np.full(self.max_states + 1, 1.0 / (self.max_states + 1))
+
         return pi
 
     
@@ -1799,18 +1730,37 @@ class MarkovQueueModel:
         Long-run average rate of queue-length changes:
           R_change = sum_n π_n (λ + μ_n)
         """
-        n = np.arange(self.max_states+1)
+        if self.pi is None or len(self.pi) == 0:
+            raise ValueError("Steady-state distribution is not initialized or invalid.")
+
+        n = np.arange(self.max_states + 1)
         mu_n = np.where(n >= 1, self.mu, 0.0)
         gamma_n = self.lambda_ + mu_n
-        # print("\n WHAT? ---------- ", n, mu_n,gamma_n , np.dot(self.pi, gamma_n))
-        return np.dot(self.pi, gamma_n)
+
+        long_run_rate = np.dot(self.pi, gamma_n)
+
+        # Ensure the result is valid and non-zero
+        if not np.isfinite(long_run_rate) or long_run_rate <= 0:
+            # Fallback: Use a small positive constant to avoid zero
+            long_run_rate = max(1e-6, self.lambda_)
+
+        return long_run_rate
     
     def sample_interchange_time(self):
         """
         Sample time until next queue-length change in steady state:
           Exp(R_change)
         """
-        rate = self.long_run_change_rate()
+        try:
+            rate = self.long_run_change_rate()
+        except ValueError:
+            # Fallback to a default positive rate if an exception occurs
+            rate = max(1e-6, self.lambda_)
+
+        # Ensure the sampling rate is positive
+        if rate <= 0:
+            rate = 1e-6
+
         return np.random.exponential(1.0 / rate)
 
 
