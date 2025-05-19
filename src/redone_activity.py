@@ -1,5 +1,5 @@
 ###############################################################################
-# Author: anthony.kiggundu@dfki.de
+# Author: anthony.kiggundu
 ###############################################################################
 from collections import OrderedDict
 import numpy as np
@@ -16,6 +16,7 @@ from tqdm import tqdm
 import MarkovStateMachine as msm
 from timeit import default_timer as timer
 import matplotlib.pyplot as plt
+
 ###############################################################################
 
 class Queues(object):
@@ -412,8 +413,8 @@ class RequestQueue:
                  
         
         self.dispatch_data = {
-            "server_1": {"num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": []},
-            "server_2": {"num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": []}
+            "server_1": {"num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": []},
+            "server_2": {"num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": []}
         }
         self.markov_model=msm.StateMachine(orig=markov_model)
         # self.arr_rate=float(arr_rate) arr_rate, queue=np.array([])
@@ -489,7 +490,8 @@ class RequestQueue:
         self.total_served_requests_srv1 = 0
         self.total_served_requests_srv2 = 0 
         self.srvrates_1 = 0
-        self.srvrates_2 = 0                       
+        self.srvrates_2 = 0  
+        self.curr_state = {}                     
         
         BROADCAST_INTERVAL = 5
         
@@ -600,98 +602,152 @@ class RequestQueue:
                 #new_history.append(history)
 
         return new_history
+        
+    
+    def dispatch_timer(self, interval):
+        """
+        Timer-based dispatch function to log queue state at fixed intervals.
+        """
+        while self.running:
+            print(f"Dispatching queue state at interval: {interval} seconds")
+            for queue_id in ["1", "2"]:
+                curr_queue = self.dict_queues_obj[queue_id]
+
+                alt_queue_id = "2" if "1" in queue_id  else "1"
+                alt_queue = self.dict_queues_obj[alt_queue_id]         
+            
+                # Compute rates
+                jockeying_rate = self.compute_jockeying_rate(curr_queue)
+                reneging_rate = self.compute_reneging_rate(curr_queue)
+
+                self.curr_state = self.get_queue_state(queue_id)         
+                 
+                self.dispatch_queue_state( curr_queue, queue_id, alt_queue, self.curr_state)
+                       
+                # Record the statistics
+                if "1" in queue_id:
+                    serv_rate = self.srvrates_1
+                else:
+                    serv_rate = self.srvrates_2
+					                
+                num_requests = len(curr_queue)
+            
+                # Append rates to interval-specific dispatch data
+                #self.dispatch_data[interval][f"server_{queue_id}"]["num_requests"].append(num_requests)
+                #self.dispatch_data[interval][f"server_{queue_id}"]["jockeying_rate"].append(jockeying_rate)
+                #self.dispatch_data[interval][f"server_{queue_id}"]["reneging_rate"].append(reneging_rate)
+                #self.dispatch_data[interval][f"server_{queue_id}"]["service_rate"].append(serv_rate)
+            
+                self.dispatch_data[f"server_{queue_id}"]["num_requests"].append(num_requests)
+                self.dispatch_data[f"server_{queue_id}"]["jockeying_rate"].append(jockeying_rate)
+                self.dispatch_data[f"server_{queue_id}"]["reneging_rate"].append(reneging_rate)
+                self.dispatch_data[f"server_{queue_id}"]["service_rate"].append(serv_rate)
+                self.dispatch_data[f"server_{queue_id}"]["intervals"].append(interval)
+
+                #print(f"Server {queue_id} - Num requests: {num_requests}, Jockeying rate: {jockeying_rate}, "
+                #     f"Reneging rate: {reneging_rate}, Service rate: {serv_rate}, Long-run rate: {curr_queue_state['long_run_change_rate']}")
+                 
+            # Reset state at the end of the interval
+            # self.reset_state()
+            time.sleep(interval)  # Wait for the next interval
 
 
-    def run(self,duration,progress_bar=True,progress_log=False):
+    def run(self,duration, interval, progress_bar=True,progress_log=False):
         steps=int(duration/self.time_res)
 
         if progress_bar!=None:
             loop=tqdm(range(steps),leave=False,desc='     Current run')
         else:
             loop=range(steps)                
-
-        # Two-state CTMC: mu_0=1.0, mu_1=2.0, switching rates 0.1 between each
-        #mu_states = [srv_1, srv_2]
-        #Q = [[-0.1, 0.1], [0.1, -0.1]]
-        #model = MarkovModulatedServiceModel(mu_states, Q)
-        #events = model.simulate(T=10.0)
-        # print("\n Arrival rate: ", self.arr_rate, "Rates 1: ----", srvrates_1,  "Rates 2: ----", srvrates_2, " ==== ",events) 
-        #for t, etype, state in events:
-        #    print(f"{t:.3f}s: {etype} at state {state} (μ={mu_states[state]})")
-            
-        for i in loop:
-            #self.arr_rate = self.objQueues.get_arrivals_rates() 
-            #srvrates_1, srvrates_2 = self.get_server_rates()
-            # Randomize arrival rate and service rates at each iteration
-            self.arr_rate = self.objQueues.randomize_arrival_rate()  # Randomize arrival rate
-            deltaLambda=random.randint(1, 2)
         
-            serv_rate_one = self.arr_rate + deltaLambda 
-            serv_rate_two = self.arr_rate - deltaLambda
+        self.running = True  # Flag to control threads
 
-            self.srvrates_1 = serv_rate_one / 2
-            self.srvrates_2 = serv_rate_two / 2
-            #srvrates_1 = random.uniform(0.5, 1.5) * self.arr_rate  # Service rate for Server 1
-            #srvrates_2 = random.uniform(0.5, 1.5) * self.arr_rate  # Service rate for Server 2 
-            srv_1 = self.dict_queues_obj.get("1") # Server1
-            srv_2 = self.dict_queues_obj.get("2") 
-            print("\n Arrival rate: ",i, self.arr_rate, "Rates 1: ----", self.srvrates_1,  "Rates 2: ----", self.srvrates_2)
+        # Start dispatch timer in a separate thread
+        dispatch_thread = threading.Thread(target=self.dispatch_timer, args=(interval,))
+        dispatch_thread.start()
+        
+        try:  
+            for i in loop:
+            
+                # Randomize arrival rate and service rates at each iteration
+                self.arr_rate = self.objQueues.randomize_arrival_rate()  # Randomize arrival rate
+                deltaLambda=random.randint(1, 2)
+        
+                serv_rate_one = self.arr_rate + deltaLambda 
+                serv_rate_two = self.arr_rate - deltaLambda
+
+                self.srvrates_1 = serv_rate_one / 2
+                self.srvrates_2 = serv_rate_two / 2
+             
+                srv_1 = self.dict_queues_obj.get("1") # Server1
+                srv_2 = self.dict_queues_obj.get("2") 
+                print("\n Arrival rate: ", self.arr_rate, "Rates 1: ----", self.srvrates_1,  "Rates 2: ----", self.srvrates_2)
                
-            if progress_log:
-                print("Step",i,"/",steps)
-            # ToDo:: is line below the same as the update_parameters() in the a2c.py    
-            # self.markov_model.updateState()           
+                if progress_log:
+                    print("Step",i,"/",steps)                 
 
-            if len(srv_1) < len(srv_2):
-                self.queue = srv_2
-                srv_rate = self.srvrates_1 # self.dict_servers_info.get("2") # Server2
-                
-                #model = MarkovQueueModel(arrival_rate=self.arr_rate, service_rate=self.srv_rate, max_states=1000) # 1000)
-                #print("Server2: Long-run change rate:", model.long_run_change_rate())
-                #print("Server2: Sample inter-change time:", model.sample_interchange_time())
+                if len(srv_1) < len(srv_2):
+                    self.queue = srv_2
+                    srv_rate = self.srvrates_1 # self.dict_servers_info.get("2") # Server2                            
 
-            else:            
-                self.queue = srv_1
-                srv_rate = self.srvrates_2 # self.dict_servers_info.get("1") # Server1
-                
-                #model = MarkovQueueModel(arrival_rate=self.arr_rate, service_rate=self.srv_rate, max_states=1000) # 1000 # len(srv_1))
-                #print("Server1: Long-run change rate:", model.long_run_change_rate())
-                #print("Server1: Sample inter-change time:", model.sample_interchange_time())
+                else:            
+                    self.queue = srv_1
+                    srv_rate = self.srvrates_2 # self.dict_servers_info.get("1") # Server1                                
                               
-            service_intervals=np.random.exponential(1/srv_rate,max(int(srv_rate*self.time_res*5),2)) # to ensure they exceed one sampling interval
-            service_intervals=service_intervals[np.where(np.add.accumulate(service_intervals)<=self.time_res)[0]]
-            service_intervals=service_intervals[0:np.min([len(service_intervals),self.queue.size])]
-            arrival_intervals=np.random.exponential(1/self.arr_rate, max(int(self.arr_rate*self.time_res*5),2))
+                service_intervals=np.random.exponential(1/srv_rate,max(int(srv_rate*self.time_res*5),2)) # to ensure they exceed one sampling interval
+                service_intervals=service_intervals[np.where(np.add.accumulate(service_intervals)<=self.time_res)[0]]
+                service_intervals=service_intervals[0:np.min([len(service_intervals),self.queue.size])]
+                arrival_intervals=np.random.exponential(1/self.arr_rate, max(int(self.arr_rate*self.time_res*5),2))
 
-            arrival_intervals=arrival_intervals[np.where(np.add.accumulate(arrival_intervals)<=self.time_res)[0]]
-            service_entries=np.array([[self.time+i,False] for i in service_intervals]) # False for service
-            service_entries=service_entries.reshape(int(service_entries.size/2),2)
-            time.sleep(2)
-            arrival_entries=np.array([[self.time+i,True] for i in arrival_intervals]) # True for request
-            # print("\n Arrived: ",arrival_entries) ####
-            time.sleep(2)
-            arrival_entries=arrival_entries.reshape(int(arrival_entries.size/2),2)
-            # print(arrival_entries)
-            time.sleep(2)
-            all_entries=np.append(service_entries,arrival_entries,axis=0)
-            all_entries=all_entries[np.argsort(all_entries[:,0])]
-            self.all_times = all_entries
-            # print("\n All Entered After: ",all_entries) ####
-            serv_times = np.random.exponential(2, len(all_entries))
-            serv_times = np.sort(serv_times)
-            self.all_serv_times = serv_times
-            # print("\n Times: ", np.random.exponential(2, len(all_entries)), "\n Arranged: ",serv_times)
-            time.sleep(2)
-            self.processEntries(all_entries, i)
-            self.time+=self.time_res
+                arrival_intervals=arrival_intervals[np.where(np.add.accumulate(arrival_intervals)<=self.time_res)[0]]
+                service_entries=np.array([[self.time+i,False] for i in service_intervals]) # False for service
+                service_entries=service_entries.reshape(int(service_entries.size/2),2)
+                time.sleep(1)
+                arrival_entries=np.array([[self.time+i,True] for i in arrival_intervals]) # True for request
+                # print("\n Arrived: ",arrival_entries) ####
+                time.sleep(1)
+                arrival_entries=arrival_entries.reshape(int(arrival_entries.size/2),2)
+                # print(arrival_entries)
+                time.sleep(1)
+                all_entries=np.append(service_entries,arrival_entries,axis=0)
+                all_entries=all_entries[np.argsort(all_entries[:,0])]
+                self.all_times = all_entries
+                # print("\n All Entered After: ",all_entries) ####
+                serv_times = np.random.exponential(2, len(all_entries))
+                serv_times = np.sort(serv_times)
+                self.all_serv_times = serv_times
+                # print("\n Times: ", np.random.exponential(2, len(all_entries)), "\n Arranged: ",serv_times)
+                time.sleep(1)
+                self.processEntries(all_entries, i)
+                self.time+=self.time_res
             
+                # Reset the dispatch data at the end of each interval
+                #if (i + 1) % (interval / self.time_res) == 0:  # Check if the interval has ended
+                #    self.reset_state()
+                # Ensure dispatch data is updated at each step
+                ## self.dispatch_all_queues()
             
-            # Ensure dispatch data is updated at each step
-            self.dispatch_all_queues()
+                self.set_batch_id(i)
             
-            self.set_batch_id(i)
+        except KeyboardInterrupt:
+            print("Simulation interrupted by user.")
+        finally:
+            self.running = False  # Stop the dispatch thread
+            dispatch_thread.join()
+            print("Simulation completed.")    
             
         return
+        
+        
+    def reset_state(self):
+        """
+        Reset the state dictionary to its initial state.
+        """
+        self.dispatch_data = {
+            "server_1": {"num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": []},
+            "server_2": {"num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": []}
+        }
+        print("State has been reset.")
     
     
     def set_batch_id(self, id):
@@ -730,9 +786,9 @@ class RequestQueue:
             return total_service_time / self.total_served_requests_srv2          
 		
 
-    def processEntries(self,entries=np.array([]), batchid=np.int16): # =np.int16
+    def processEntries(self,entries=np.array([]), batchid=np.int16): 
         
-        num_iterations = random.randint(1, 5)  # Random number of iterations between 1 and 5
+        #num_iterations = random.randint(1, 5)  # Random number of iterations between 1 and 5
         
         for entry in entries:
             # print("Processing a new request entry...")
@@ -743,47 +799,25 @@ class RequestQueue:
                 req = self.addNewRequest(entry[0], batchid)
                 self.arr_prev_times = np.append(self.arr_prev_times, entry[0])
                 
-            else:                
-                q_selector = random.randint(1, 2)
-                # observer = {}
-                
-                if q_selector == 1:					
-                    self.queueID = "1" # Server1
-                    
-                    """
-                         Run the serveOneRequest function a random number of times before continuing.
-                    """
-                    
-                    #for _ in range(num_iterations):
-                        #self.serveOneRequest(to_delete, time_entrance, queueID)
-                        # Introduce a short delay to simulate processing time            
-                    self.serveOneRequest(self.queueID) # Server1 = self.dict_queues_obj["1"][0], entry[0],                                                                  
-                    ## self.dispatch_queue_state(self.dict_queues_obj["1"], self.queueID, self.dict_queues_obj["2"]) #, req)
-                    time.sleep(random.uniform(0.1, 0.5))  # Random delay between 0.1 and 0.5 seconds
-                        # time.sleep(1)
-                    
-                    #if self.capacity is not None and len(self.dict_queues_obj["1"]) >= self.capacity:
-                    #    raise Exception("Queue has reached its capacity limit")
-                        # sys.exit(1)
-                        #return 
+            else:
+				# Process the queue for a random number of times before new antrants
+                num_iterations = random.randint(1, self.arr_rate)  # Random number between 1 and 5
+                for _ in range(num_iterations):                
+                    q_selector = random.randint(1, 2)
+                    if q_selector == 1:					
+                        self.queueID = "1" # Server1                    
+                        curr_queue_len = len(self.dict_queues_obj[self.queueID])
+                        if  curr_queue_len > 0:       
+                            self.serveOneRequest(self.queueID) # Server1 = self.dict_queues_obj["1"][0], entry[0],                                                                                      
+                            time.sleep(random.uniform(0.1, 0.5))  # Random delay between 0.1 and 0.5 seconds                        
                         
-                else:
-					#req = self.dict_queues_obj["2"][0]
-                    self.queueID = "2"
-                    #for _ in range(num_iterations):
-                    self.serveOneRequest(self.queueID) # Server2 = self.dict_queues_obj["2"][0], entry[0],                                       
-                    ## self.dispatch_queue_state(self.dict_queues_obj["2"], self.queueID, self.dict_queues_obj["1"]) #, req)
-                    time.sleep(random.uniform(0.1, 0.5))
-                    
-                    #if self.capacity is not None and len(self.dict_queues_obj["2"]) >= self.capacity:
-                    #    raise Exception("Queue has reached its capacity limit")
-                        # sys.exit(1)
-                        #return 
-                        
-                # print("  Wait to Broadcasting the updated queue information...")                
-                #self.broadcastQueueInfo()
-                    
-                    
+                    else:					
+                        self.queueID = "2" 
+                        curr_queue_len = len(self.dict_queues_obj[self.queueID])
+                        if  curr_queue_len > 0:                    
+                            self.serveOneRequest(self.queueID) 
+                            time.sleep(random.uniform(0.1, 0.5))
+                                        
         return
 
 
@@ -921,36 +955,29 @@ class RequestQueue:
     def dispatch_queue_state(self, curr_queue, curr_queue_id, alt_queue, curr_queue_state): #long_run_change_rate,
                                    #sample_interchange_time, steady_state_distribution, simulated_events):
 		
-        rate_srv1,rate_srv2 = self.get_server_rates()
+        rate_srv1, rate_srv2 = self.get_server_rates()
 		
-        if curr_queue_id == "1":
+        if "1" in curr_queue_id:
             alt_queue_id = "2"
             serv_rate = rate_srv1
         else:
             alt_queue_id = "1"
             serv_rate = rate_srv2
 
-        #curr_queue_state = self.get_queue_state(alt_queue_id)
-
         # Compute reneging rate and jockeying rate
-        reneging_rate = self.compute_reneging_rate(curr_queue)
-        jockeying_rate = self.compute_jockeying_rate(curr_queue)
-        
-        # Include additional server statistics
-        #curr_queue_state["long_run_change_rate"] = long_run_change_rate
-        #curr_queue_state["sample_interchange_time"] = sample_interchange_time
-        #curr_queue_state["steady_state_distribution"] = steady_state_distribution
-        #curr_queue_state["simulated_events"] = simulated_events
+        #reneging_rate = self.compute_reneging_rate(curr_queue)
+        #jockeying_rate = self.compute_jockeying_rate(curr_queue)
+
 
         # Append these rates to the state
-        curr_queue_state['reneging_rate'] = reneging_rate
-        curr_queue_state['jockeying_rate'] = jockeying_rate
+        #curr_queue_state['reneging_rate'] = reneging_rate
+        #curr_queue_state['jockeying_rate'] = jockeying_rate
 
         for client in range(len(curr_queue)):
-            req = self.dict_queues_obj[curr_queue_id][client]
+            req = curr_queue[client]  # self.dict_queues_obj[curr_queue_id][client]
             print(f"Dispatching state of server {alt_queue_id} to client {req.customerid} : {curr_queue_state}.")
             
-            if curr_queue_id == "1":
+            if "1" in curr_queue_id: # == "1":
                 self.makeJockeyingDecision(req, curr_queue_id, "2", req.customerid, serv_rate)
                 self.makeRenegingDecision(req, curr_queue_id)
                 curr_queue_id = str(curr_queue_id) # "Server_"+
@@ -961,70 +988,46 @@ class RequestQueue:
                 
         # self.dispatch_data["num_requests"][curr_queue_id].append(len(curr_queue))
         self.dispatch_data[f"server_{curr_queue_id}"]["num_requests"].append(len(curr_queue))
-        self.dispatch_data[f"server_{curr_queue_id}"]["jockeying_rate"].append(jockeying_rate)
-        self.dispatch_data[f"server_{curr_queue_id}"]["reneging_rate"].append(reneging_rate)
+        self.dispatch_data[f"server_{curr_queue_id}"]["jockeying_rate"].append(curr_queue_state['jockeying_rate']) # jockeying_rate)
+        self.dispatch_data[f"server_{curr_queue_id}"]["reneging_rate"].append(curr_queue_state['reneging_rate']) #reneging_rate)
 
-        return reneging_rate, jockeying_rate
+        # return reneging_rate, jockeying_rate
         
     
-    def dispatch_all_queues(self):
+    def dispatch_all_queues(self, interval): #  , interval=None
         """
         Dispatch the status of all queues and collect jockeying and reneging rates.
         """
+
         for queue_id in ["1", "2"]:
             curr_queue = self.dict_queues_obj[queue_id]
             alt_queue_id = "2" if queue_id == "1" else "1"
-            alt_queue = self.dict_queues_obj[alt_queue_id]
-
-            # Instantiate the MarkovQueueModel
-            #arrival_rate = self.arr_rate
-            #service_rate = self.dict_servers_info[queue_id]
-            #markov_model = MarkovQueueModel(arrival_rate, service_rate)
-
-            # Compute additional statistics
-            #long_run_rate = markov_model.long_run_change_rate()
-            #steady_state_distribution = markov_model._steady_state_distribution()
-
-            # Instantiate the MarkovModulatedServiceModel
-            #mu_states = [service_rate, service_rate * 0.8]  # 1000 Example states
-            #Q = [[-0.1, 0.1], [0.1, -0.1]]  #  infinitesmal / transition matrix
-            #modulated_service_model = MarkovModulatedServiceModel(mu_states, Q)
-
-            # Simulate service and queue dynamics
-            #simulated_events = modulated_service_model.simulate(T=10.0)  # Example simulation horizon
+            alt_queue = self.dict_queues_obj[alt_queue_id]         
             
-            # Get the current state of the queue, including statistics
-            curr_queue_state = self.get_queue_state(queue_id)
-            print("\n State: ", curr_queue_state)
-            # Extract additional statistics from the queue state
-            #long_run_change_rate = curr_queue_state["long_run_change_rate"]
-            #sample_interchange_time =  curr_queue_state['sample_interchange_time']
-            #steady_state_distribution = curr_queue_state["steady_state_distribution"]
-            #simulated_events = curr_queue_state["simulated_events"]
+            # Compute rates
+            jockeying_rate = self.compute_jockeying_rate(curr_queue)
+            reneging_rate = self.compute_reneging_rate(curr_queue)
 
-            # Pass the computed data to dispatch_queue_state
-            reneging_rate, jockeying_rate = self.dispatch_queue_state(
-                curr_queue,
-                queue_id,
-                alt_queue,
-                curr_queue_state
-                #long_run_change_rate = long_run_change_rate,
-                #sample_interchange_time = sample_interchange_time,
-                #steady_state_distribution = steady_state_distribution,
-                #simulated_events=simulated_events
-            )
-
+            curr_queue_state = self.get_queue_state(queue_id)         
+            reneging_rate, jockeying_rate = self.dispatch_queue_state( curr_queue, queue_id, alt_queue, curr_queue_state)       
             # Record the statistics
             serv_rate = self.dict_servers_info[queue_id]
             num_requests = len(curr_queue)
-
+            
+            # Append rates to interval-specific dispatch data
+            #self.dispatch_data[interval][f"server_{queue_id}"]["num_requests"].append(num_requests)
+            #self.dispatch_data[interval][f"server_{queue_id}"]["jockeying_rate"].append(jockeying_rate)
+            #self.dispatch_data[interval][f"server_{queue_id}"]["reneging_rate"].append(reneging_rate)
+            #self.dispatch_data[interval][f"server_{queue_id}"]["service_rate"].append(serv_rate)
+            
             self.dispatch_data[f"server_{queue_id}"]["num_requests"].append(num_requests)
             self.dispatch_data[f"server_{queue_id}"]["jockeying_rate"].append(jockeying_rate)
             self.dispatch_data[f"server_{queue_id}"]["reneging_rate"].append(reneging_rate)
             self.dispatch_data[f"server_{queue_id}"]["service_rate"].append(serv_rate)
+            self.dispatch_data[f"server_{queue_id}"]["intervals"].append(interval)
 
-            print(f"Server {queue_id} - Num requests: {num_requests}, Jockeying rate: {jockeying_rate}, "
-                  f"Reneging rate: {reneging_rate}, Service rate: {serv_rate}, Long-run rate: {curr_queue_state['long_run_change_rate']}")                
+            #print(f"Server {queue_id} - Num requests: {num_requests}, Jockeying rate: {jockeying_rate}, "
+            #      f"Reneging rate: {reneging_rate}, Service rate: {serv_rate}, Long-run rate: {curr_queue_state['long_run_change_rate']}")                
             
 
     def plot_rates(self):
@@ -1047,10 +1050,13 @@ class RequestQueue:
         server_2_reneging_rate = self.dispatch_data["server_2"]["reneging_rate"]
         server_2_service_rate = self.dispatch_data["server_2"]["service_rate"]
 
-        min_len = min(len(num_requests), len(num_requests_srv1), len(num_requests_srv2),len(server_1_jockeying_rate), len(server_1_reneging_rate), len(server_1_service_rate),
-                      len(server_2_jockeying_rate), len(server_2_reneging_rate), len(server_2_service_rate))                                    
+        min_len = min(len(num_requests_srv1), len(num_requests_srv2),
+                  len(server_1_jockeying_rate), len(server_1_reneging_rate), len(server_1_service_rate),
+                  len(server_2_jockeying_rate), len(server_2_reneging_rate), len(server_2_service_rate))
+                                   
 
-        num_requests = num_requests[:min_len]
+        num_requests_srv1 = num_requests_srv1[:min_len]
+        num_requests_srv2 = num_requests_srv2[:min_len]
         server_1_jockeying_rate = server_1_jockeying_rate[:min_len]
         server_1_reneging_rate = server_1_reneging_rate[:min_len]
         server_1_service_rate = server_1_service_rate[:min_len]
@@ -1058,44 +1064,131 @@ class RequestQueue:
         server_2_reneging_rate = server_2_reneging_rate[:min_len]
         server_2_service_rate = server_2_service_rate[:min_len]
 
-        fig, axs = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
-        
-        axs[0].plot(num_requests, server_1_jockeying_rate, label='Server 1 Jockeying Rate')
-        axs[0].plot(num_requests, server_1_reneging_rate, label='Server 1 Reneging Rate')
-        axs[0].plot(num_requests, server_1_service_rate, label='Server 1 Service Rate')
+        # Define intervals (example: every 10 requests)
+        interval_markers = range(0, len(num_requests_srv1), 10)
+
+        fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+
+        # Plot for Server 1
+        axs[0].plot(num_requests_srv1, server_1_jockeying_rate, label='Jockeying Rate', color='blue')
+        axs[0].plot(num_requests_srv1, server_1_reneging_rate, label='Reneging Rate', color='red')
+        axs[0].plot(num_requests_srv1, server_1_service_rate, label='Service Rate', color='green')
+        axs[0].scatter([num_requests_srv1[i] for i in interval_markers],
+                   [server_1_jockeying_rate[i] for i in interval_markers],
+                   color='blue', marker='o', label='Interval Marker (Jockeying)')
+        axs[0].scatter([num_requests_srv1[i] for i in interval_markers],
+                   [server_1_reneging_rate[i] for i in interval_markers],
+                   color='red', marker='x', label='Interval Marker (Reneging)')
         axs[0].set_title('Server 1 Rates')
         axs[0].set_ylabel('Rate')
         axs[0].legend()
-        
-        axs[1].plot(num_requests, server_2_jockeying_rate, label='Server 2 Jockeying Rate')
-        axs[1].plot(num_requests, server_2_reneging_rate, label='Server 2 Reneging Rate')
-        axs[1].plot(num_requests, server_2_service_rate, label='Server 2 Service Rate')
+
+        # Plot for Server 2
+        axs[1].plot(num_requests_srv2, server_2_jockeying_rate, label='Jockeying Rate', color='blue')
+        axs[1].plot(num_requests_srv2, server_2_reneging_rate, label='Reneging Rate', color='red')
+        axs[1].plot(num_requests_srv2, server_2_service_rate, label='Service Rate', color='green')
+        axs[1].scatter([num_requests_srv2[i] for i in interval_markers],
+                   [server_2_jockeying_rate[i] for i in interval_markers],
+                   color='blue', marker='o', label='Interval Marker (Jockeying)')
+        axs[1].scatter([num_requests_srv2[i] for i in interval_markers],
+                   [server_2_reneging_rate[i] for i in interval_markers],
+                   color='red', marker='x', label='Interval Marker (Reneging)')
         axs[1].set_title('Server 2 Rates')
         axs[1].set_xlabel('Number of Requests')
         axs[1].set_ylabel('Rate')
         axs[1].legend()
-        
+
         plt.tight_layout()
         plt.show()
         
+        
+    def plot_rates_by_intervals(self):
+        """
+        Plot separate graphs of jockeying and reneging rates for each dispatch interval.
+        """
+        intervals = [10, 30, 60]  # Dispatch intervals in seconds
+        interval_labels = {10: "10 seconds", 30: "30 seconds", 60: "60 seconds"}
     
-    def setup_dispatch_intervals(self):
+        # Iterate over each interval and create separate plots
+        for interval in intervals:
+            # Extract data for the interval
+            if interval not in self.dispatch_data:
+                print(f"No data available for the {interval_labels[interval]} interval.")
+                continue
+        
+            # Extract data for Server 1
+            num_requests_srv1 = self.dispatch_data["server_1"]["num_requests"]
+            jockeying_rate_srv1 = self.dispatch_data["server_1"]["jockeying_rate"]
+            reneging_rate_srv1 = self.dispatch_data["server_1"]["reneging_rate"]
+            service_rate_srv1 = self.dispatch_data["server_1"]["service_rate"]
+        
+            # Extract data for Server 2
+            num_requests_srv2 = self.dispatch_data["server_2"]["num_requests"]
+            jockeying_rate_srv2 = self.dispatch_data["server_2"]["jockeying_rate"]
+            reneging_rate_srv2 = self.dispatch_data["server_2"]["reneging_rate"]
+            service_rate_srv2 = self.dispatch_data["server_2"]["service_rate"]
+
+            # Plot data for Server 1
+            fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+            axs[0].plot(num_requests_srv1, jockeying_rate_srv1, label='Jockeying Rate', color='blue')
+            axs[0].plot(num_requests_srv1, reneging_rate_srv1, label='Reneging Rate', color='red')
+            axs[0].plot(num_requests_srv1, service_rate_srv1, label='Service Rate', color='green')
+            axs[0].set_title(f'Server 1 Rates ({interval_labels[interval]})')
+            axs[0].set_ylabel('Rate')
+            axs[0].legend()
+
+            # Plot data for Server 2
+            axs[1].plot(num_requests_srv2, jockeying_rate_srv2, label='Jockeying Rate', color='blue')
+            axs[1].plot(num_requests_srv2, reneging_rate_srv2, label='Reneging Rate', color='red')
+            axs[1].plot(num_requests_srv2, service_rate_srv2, label='Service Rate', color='green')
+            axs[1].set_title(f'Server 2 Rates ({interval_labels[interval]})')
+            axs[1].set_xlabel('Number of Requests')
+            axs[1].set_ylabel('Rate') 
+            axs[1].legend()
+
+            # Adjust layout and show the plot  
+            plt.tight_layout()
+            plt.show()
+        
+    
+    def setup_dispatch_intervals(self, intervals):
         """
-        Set up the intervals for dispatching the queue status information.
+        Set up a timer-based interval for dispatching queue status.
+        Queue operations like arrivals and departures continue during the interval.
         """
-        schedule.every(10).seconds.do(self.dispatch_all_queues)
-        schedule.every(30).seconds.do(self.dispatch_all_queues)
-        schedule.every(60).seconds.do(self.dispatch_all_queues)       
+        
+        print(f"Starting dispatch scheduler with interval: {interval} seconds")
+        # Start the dispatch timer thread
+        dispatch_thread = threading.Thread(target=self.dispatch_timer, args=(interval,))
+        dispatch_thread.start()
+
+        # Start the background queue operations
+        background_thread = threading.Thread(target=self.background_operations)
+        background_thread.start()
+
+        # Join threads to ensure proper termination
+        dispatch_thread.join()
+        background_thread.join()
+        
+        #schedule.every(10).seconds.do(self.dispatch_all_queues)
+        #schedule.every(30).seconds.do(self.dispatch_all_queues)
+        # schedule.every(60).seconds.do(self.dispatch_all_queues)      
             
 
-    def run_scheduler(self):
+    def run_scheduler(self): # , duration=None
         """
         Run the scheduler to dispatch queue status at different intervals.
         """
         self.setup_dispatch_intervals()
+        start_time = time.time()
         while True:
             schedule.run_pending()
             time.sleep(1)
+            
+            # Check for termination condition
+            #if duration is not None and (time.time() - start_time) >= duration:
+            #    print("Scheduler terminated after running for {:.2f} seconds.".format(duration))
+            #    break
     
     
     def get_long_run_avg_service_time(self, queue_id):
@@ -1121,7 +1214,7 @@ class RequestQueue:
                        
     def get_queue_state(self, queueid):
 		
-        rate_srv1,rate_srv2 = self.get_server_rates()
+        rate_srv1, rate_srv2 = self.get_server_rates()
         curr_queue = self.dict_queues_obj[queueid]
         
         reneging_rate = self.compute_reneging_rate(curr_queue)
@@ -1131,6 +1224,7 @@ class RequestQueue:
             queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv1    
             customers_in_queue = self.dict_queues_obj["1"]   
             # Instantiate MarkovQueueModel
+            #print("\n --> ", self.arr_rate, self.srvrates_1)
             markov_model = MarkovQueueModel(self.arr_rate, self.srvrates_1, max_states=len(customers_in_queue)) # 1000)
             long_run_change_rate = markov_model.long_run_change_rate()
             sample_interchange_time = markov_model.sample_interchange_time() # _steady_state_distribution()
@@ -1154,7 +1248,7 @@ class RequestQueue:
             steady_state_distribution_list = steady_state_distribution.tolist()  # Convert to list
             sample_interchange_time = markov_model.sample_interchange_time()          
 		       
-        state = {
+        self.curr_state = {
             "total_customers": len(customers_in_queue),
             "intensity": queue_intensity,
             "capacity": self.capacity,              
@@ -1173,8 +1267,9 @@ class RequestQueue:
                 #    {"time": event[0], "event_type": event[1], "state": event[2]} for event in simulated_events ]
                 #"simulated_events": simulated_events
         }
-           
-        return state
+        print("\n Current State of Server",queue_id, " => ", self.curr_state)
+        
+        return self.curr_state
   
 
     def serveOneRequest(self, queueID): # to_delete, serv_time, 
@@ -1413,9 +1508,6 @@ class RequestQueue:
                 self. max_cloud_delay = self.calculate_max_cloud_delay(req.pos_in_queue, queue_intensity, req)
                 ## self.max_cloud_delay=stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=1/serv_rate)
                 #self.max_cloud_delay=stats.erlang.ppf(self.certainty,loc=0,scale=mean_interval,a=req.pos_in_queue)
-                
-                
-            #print("\n ==>> LOCAL and CLOUD: ", self.max_local_delay," ==== ",self.max_cloud_delay)
             
             if "Server1" in queueid:
                 self.queue = self.dict_queues_obj["1"]            
@@ -1480,12 +1572,7 @@ class RequestQueue:
         # In the case of reneging, you only get a reward if the time.entrance plus
         # the current time minus the time _to_service_end is greater than the time_local_service
         
-            reward = self.getRenegeRewardPenalty(req, time_local_service, time_to_service_end)
-        # self.objObserv.set_obs(queueid, True, serv_rate, queue_intensity, False,self.time-req.time_entrance,self.generateLocalCompUtility(req), reward, len(self.queue))
-
-        #for t in range(len(self.queue)):
-        #    if self.queue[t].customerid == customerid:self.arr_rate
-        #        curr_pose = t                                       
+            reward = self.getRenegeRewardPenalty(req, time_local_service, time_to_service_end)                                    
         
             self.objObserv.set_renege_obs(curr_pose, queue_intensity, decision,time_local_service, time_to_service_end, reward, queueid, "reneged")
         
@@ -1649,13 +1736,17 @@ class RequestQueue:
                other queue and jockey if the other queue is better than the current one.
                The better state is defined by first-order stochatsic dorminance and the jockeying rate (orprobability)
             ''' 
-            # if alt_steady_state[0] > curr_steady_state[0]:  # Higher probability of being empty
             
             # queue_states_compared = self.compare_queues(alt_queue_state['steady_state_distribution'], curr_queue_state['steady_state_distribution'], K=1)
             queue_states_compared = self.compare_queues(alt_steady_state, curr_steady_state, K=1) # compare_steady_state_distributions()   state of alt queue is better than the current one 
-            print("\n Compared state: ", queue_states_compared) # curr_steady_state, "Alt state: ", alt_steady_state) 
+            # print("\n Compared state: ", queue_states_compared) # curr_steady_state, "Alt state: ", alt_steady_state) 
             
-            if queue_states_compared['first_order_dominance']: #and (alt_queue_state['jockeying_rate'] <  curr_queue_state['jockeying_rate']):    #        
+            ##if queue_states_compared['first_order_dominance']: #and (alt_queue_state['jockeying_rate'] <  curr_queue_state['jockeying_rate']):
+            
+            # For high throughput as objective, a low interchange_time shows a better state, if stability is the objective, a high value is better 
+            if alt_queue_state['sample_interchange_time'] > curr_queue_state['sample_interchange_time']: #and alt_queue_state['total_customers'] < curr_queue_state['total_customers']:
+                #alt_queue_state['long_avg_serv_time'] < time_to_get_served:
+                # alt_queue_state['total_customers'] < curr_queue_state['total_customers']: # 'long_run_change_rate':       
                 decision = True
                 self.reqJockey(curr_queue_id, alt_queue_id, req, req.customerid, serv_rate, dest_queue, self.avg_delay, decision, curr_pose, self.dict_queues_obj.get(curr_queue_id))
                 
@@ -1683,6 +1774,7 @@ class MarkovQueueModel:
         """
         self.lambda_ = arrival_rate
         self.mu = service_rate
+        # print("\n ==> ", arrival_rate, service_rate)
         self.rho = arrival_rate / service_rate
         self.max_states = max_states
         self.pi = self._steady_state_distribution()
@@ -1864,16 +1956,70 @@ def main():
     utility_basic = 1.0
     discount_coef = 0.1
     requestObj = RequestQueue(utility_basic, discount_coef)
-    duration = 10
+    duration = 10 # 0
     
     # Start the scheduler
-    scheduler_thread = threading.Thread(target=requestObj.run_scheduler)
-    scheduler_thread.start()
+    # scheduler_thread = threading.Thread(target=requestObj.run_scheduler)
+    # scheduler_thread.start()
     
-    requestObj.run(duration)   
+    # Set intervals for dispatching queue states
+    intervals = [10, 20, 30]
+    
+    # Iterate through each interval in the intervals array
+    all_reneging_rates = []
+    all_jockeying_rates = []
+
+    for interval in intervals:
+        print(f"Running simulation with interval: {interval} seconds")
+        requestObj.run(duration, interval)
+    
+        # Collect reneging and jockeying rates for this interval
+        reneging_rates = {
+            "server_1": requestObj.dispatch_data["server_1"]["reneging_rate"],
+            "server_2": requestObj.dispatch_data["server_2"]["reneging_rate"]
+        }
+        jockeying_rates = {
+            "server_1": requestObj.dispatch_data["server_1"]["jockeying_rate"],
+            "server_2": requestObj.dispatch_data["server_2"]["jockeying_rate"]
+        }
+    
+        all_reneging_rates.append(reneging_rates)
+        all_jockeying_rates.append(jockeying_rates)
+
+    # After all interval runs, plot the aggregated results
+    fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+
+    # Plot reneging rates
+    for i, interval in enumerate(intervals):
+        axs[0].plot(range(len(all_reneging_rates[i]["server_1"])), all_reneging_rates[i]["server_1"], label=f'Server 1 - Interval {interval}s')
+        axs[0].plot(range(len(all_reneging_rates[i]["server_2"])), all_reneging_rates[i]["server_2"], label=f'Server 2 - Interval {interval}s', linestyle='--')
+
+    axs[0].set_title('Reneging Rates Across Intervals')
+    axs[0].set_ylabel('Reneging Rate')
+    axs[0].legend()
+
+    # Plot jockeying rates
+    for i, interval in enumerate(intervals):
+        axs[1].plot(range(len(all_jockeying_rates[i]["server_1"])), all_jockeying_rates[i]["server_1"], label=f'Server 1 - Interval {interval}s')
+        axs[1].plot(range(len(all_jockeying_rates[i]["server_2"])), all_jockeying_rates[i]["server_2"], label=f'Server 2 - Interval {interval}s', linestyle='--')
+
+    axs[1].set_title('Jockeying Rates Across Intervals')
+    axs[1].set_xlabel('Number of Requests')
+    axs[1].set_ylabel('Jockeying Rate')
+    axs[1].legend()
+
+    plt.tight_layout()
+    plt.show()
+
+    # Run the dispatch intervals
+    # requestObj.setup_dispatch_intervals(intervals)
+    
+    ### requestObj.run(duration, intervals[0])
+    
+    #requestObj.run_scheduler(duration=100)   
     
     # Plot the rates after the simulation
-    requestObj.plot_rates()             
+    ### requestObj.plot_rates()       # plot_rates_by_intervals() #       
 	 
 if __name__ == "__main__":
     main()
