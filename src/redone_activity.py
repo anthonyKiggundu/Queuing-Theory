@@ -457,7 +457,7 @@ class RequestQueue:
         self.dict_servers_info = self.objQueues.get_dict_servers()
         self.jockey_threshold = 1
         self.reward = 0.0
-        self.curr_state = {} # ["Busy","Empty"]
+        # self.curr_state = {} # ["Busy","Empty"]
 
         self.arr_rate = 0.0 #self.objQueues.get_arrivals_rates()
 
@@ -491,7 +491,7 @@ class RequestQueue:
         self.total_served_requests_srv2 = 0 
         self.srvrates_1 = 0
         self.srvrates_2 = 0  
-        self.curr_state = {}                     
+        # self.curr_state = {}                     
         
         BROADCAST_INTERVAL = 5
         
@@ -582,7 +582,7 @@ class RequestQueue:
         srvrate1 = self.dict_servers_info.get("1")# Server1
         srvrate2 = self.dict_servers_info.get("2") # Server2
 
-        return [srvrate1, srvrate2]
+        return [self.srvrates_1, self.srvrates_2] # srvrate1, srvrate2]
 
 
     def get_all_times(self):
@@ -620,9 +620,12 @@ class RequestQueue:
                 jockeying_rate = self.compute_jockeying_rate(curr_queue)
                 reneging_rate = self.compute_reneging_rate(curr_queue)
 
-                self.curr_state = self.get_queue_state(queue_id)         
-                 
-                self.dispatch_queue_state( curr_queue, queue_id, alt_queue, self.curr_state)
+                curr_queue_state = self.get_queue_state(queue_id) 
+                curr_queue_state["jockeying_rate"] = jockeying_rate
+                curr_queue_state["reneging_rate"] = reneging_rate  
+                
+                print("\n Current State of Server",queue_id, " => ", curr_queue_state)
+                self.dispatch_queue_state( curr_queue, alt_queue_id, alt_queue, curr_queue_state)
                        
                 # Record the statistics
                 if "1" in queue_id:
@@ -952,8 +955,7 @@ class RequestQueue:
         return self.curr_state
 
   
-    def dispatch_queue_state(self, curr_queue, curr_queue_id, alt_queue, curr_queue_state): #long_run_change_rate,
-                                   #sample_interchange_time, steady_state_distribution, simulated_events):
+    def dispatch_queue_state(self, curr_queue, curr_queue_id, alt_queue, curr_queue_state): 
 		
         rate_srv1, rate_srv2 = self.get_server_rates()
 		
@@ -967,11 +969,6 @@ class RequestQueue:
         # Compute reneging rate and jockeying rate
         #reneging_rate = self.compute_reneging_rate(curr_queue)
         #jockeying_rate = self.compute_jockeying_rate(curr_queue)
-
-
-        # Append these rates to the state
-        #curr_queue_state['reneging_rate'] = reneging_rate
-        #curr_queue_state['jockeying_rate'] = jockeying_rate
 
         for client in range(len(curr_queue)):
             req = curr_queue[client]  # self.dict_queues_obj[curr_queue_id][client]
@@ -1214,33 +1211,29 @@ class RequestQueue:
                        
     def get_queue_state(self, queueid):
 		
-        rate_srv1, rate_srv2 = self.get_server_rates()
-        curr_queue = self.dict_queues_obj[queueid]
-        
-        reneging_rate = self.compute_reneging_rate(curr_queue)
-        jockeying_rate = self.compute_jockeying_rate(curr_queue)      
+        rate_srv1, rate_srv2 = self.get_server_rates()                            
 	
-        if queueid == "1":		
+        if "1" in queueid:		
             queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv1    
-            customers_in_queue = self.dict_queues_obj["1"]   
+            customers_in_queue = self.dict_queues_obj["1"] 
+            curr_queue = self.dict_queues_obj[queueid]  
+            reneging_rate = self.compute_reneging_rate(curr_queue)
+            jockeying_rate = self.compute_jockeying_rate(curr_queue)
             # Instantiate MarkovQueueModel
             #print("\n --> ", self.arr_rate, self.srvrates_1)
             markov_model = MarkovQueueModel(self.arr_rate, self.srvrates_1, max_states=len(customers_in_queue)) # 1000)
             long_run_change_rate = markov_model.long_run_change_rate()
             sample_interchange_time = markov_model.sample_interchange_time() # _steady_state_distribution()
             steady_state_distribution = markov_model._steady_state_distribution()
-            steady_state_distribution_list = steady_state_distribution.tolist()  # Convert to list
-            
-            # Instantiate MarkovModulatedServiceModel
-            #mu_states = [rate_srv1, rate_srv2 * 0.8]  # Example states for server 2
-            #Q = [[-0.1, 0.1], [0.1, -0.1]]  # Example transition matrix
-            #modulated_service_model = MarkovModulatedServiceModel(mu_states, Q)
-            #simulated_events = modulated_service_model.simulate(T=10.0)  # Simulate for 10 time units                
+            steady_state_distribution_list = steady_state_distribution.tolist()  # Convert to list                    
       
         else:
 			#serv_rate = self.get_server_rates()[1] #dict_servers_info["2"] 
             queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv2            
             customers_in_queue = self.dict_queues_obj["2"]
+            curr_queue = self.dict_queues_obj[queueid]
+            reneging_rate = self.compute_reneging_rate(curr_queue)
+            jockeying_rate = self.compute_jockeying_rate(curr_queue)
             # Instantiate MarkovQueueModel
             markov_model = MarkovQueueModel(self.arr_rate, self.srvrates_2, max_states=len(customers_in_queue)) # 1000)
             long_run_change_rate = markov_model.long_run_change_rate()
@@ -1248,7 +1241,7 @@ class RequestQueue:
             steady_state_distribution_list = steady_state_distribution.tolist()  # Convert to list
             sample_interchange_time = markov_model.sample_interchange_time()          
 		       
-        self.curr_state = {
+        curr_queue_state = {
             "total_customers": len(customers_in_queue),
             "intensity": queue_intensity,
             "capacity": self.capacity,              
@@ -1261,15 +1254,11 @@ class RequestQueue:
                 "mean": sum(steady_state_distribution_list) / len(steady_state_distribution_list),
             },
             "reneging_rate": reneging_rate,
-            "jockeying_rate" : jockeying_rate 
-            #,
-                #"simulated_events": [
-                #    {"time": event[0], "event_type": event[1], "state": event[2]} for event in simulated_events ]
-                #"simulated_events": simulated_events
+            "jockeying_rate" : jockeying_rate             
         }
-        print("\n Current State of Server",queue_id, " => ", self.curr_state)
         
-        return self.curr_state
+        #print("\n Internal Server State of ",queueid, " => ", curr_queue_state)
+        return curr_queue_state
   
 
     def serveOneRequest(self, queueID): # to_delete, serv_time, 
