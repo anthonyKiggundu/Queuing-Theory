@@ -726,7 +726,7 @@ class RequestQueue:
                 self.all_serv_times = serv_times
                 # print("\n Times: ", np.random.exponential(2, len(all_entries)), "\n Arranged: ",serv_times)
                 time.sleep(1)
-                self.processEntries(all_entries, i)
+                self.processEntries(all_entries, i, interval)
                 self.time+=self.time_res
             
                 # Reset the dispatch data at the end of each interval
@@ -794,7 +794,7 @@ class RequestQueue:
             return total_service_time / self.total_served_requests_srv2          
 		
 
-    def processEntries(self,entries=np.array([]), batchid=np.int16): 
+    def processEntries(self,entries=np.array([]), batchid=np.int16, interval=None): 
         
         #num_iterations = random.randint(1, 5)  # Random number of iterations between 1 and 5
         
@@ -816,14 +816,14 @@ class RequestQueue:
                         self.queueID = "1" # Server1                    
                         curr_queue_len = len(self.dict_queues_obj[self.queueID])
                         if  curr_queue_len > 0:       
-                            self.serveOneRequest(self.queueID) # Server1 = self.dict_queues_obj["1"][0], entry[0],                                                                                      
+                            self.serveOneRequest(self.queueID, interval) # Server1 = self.dict_queues_obj["1"][0], entry[0],                                                                                      
                             time.sleep(random.uniform(0.1, 0.5))  # Random delay between 0.1 and 0.5 seconds                        
                         
                     else:					
                         self.queueID = "2" 
                         curr_queue_len = len(self.dict_queues_obj[self.queueID])
                         if  curr_queue_len > 0:                    
-                            self.serveOneRequest(self.queueID) 
+                            self.serveOneRequest(self.queueID, interval) 
                             time.sleep(random.uniform(0.1, 0.5))
                                         
         return
@@ -1153,28 +1153,110 @@ class RequestQueue:
 
             # Plot data for Server 1
             fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
-            #axs[0].plot(num_requests_srv1, jockeying_rate_srv1, label='Jockeying Rate', color='blue')
-            #axs[0].plot(num_requests_srv1, reneging_rate_srv1, label='Reneging Rate', color='red')
-            #axs[0].plot(num_requests_srv1, service_rate_srv1, label='Service Rate', color='green')
-            axs[0].plot(service_rate_srv1, jockeying_rate_srv1, label='Jockeying Rate', color='blue')
-            axs[0].plot(service_rate_srv1, reneging_rate_srv1, label='Reneging Rate', color='red')
+            #axs[0].plot(service_rate_srv1, jockeying_rate_srv1, label='Jockeying Rate', color='blue')
+            #axs[0].plot(service_rate_srv1, reneging_rate_srv1, label='Reneging Rate', color='red')
             # axs[0].plot(num_requests_srv1, service_rate_srv1, label='Service Rate', color='green')
-            axs[0].set_title(f'Server 1 Rates ({interval_labels[interval]})')
-            axs[0].set_ylabel('Rate')
-            axs[0].legend()
+            #axs[0].set_title(f'Server 1 Rates ({interval_labels[interval]})')
+            # Sort service rates and associated values
+            srv1_sorted = sorted(zip(service_rate_srv1, jockeying_rate_srv1, reneging_rate_srv1))
+            if srv1_sorted:
+                srv1_service, srv1_jockey, srv1_reneg = zip(*srv1_sorted)
+                axs[0].plot(srv1_service, srv1_jockey, label='Jockeying Rate', color='blue')
+                axs[0].plot(srv1_service, srv1_reneg, label='Reneging Rate', color='red')
+                axs[0].set_xlabel('Service Rate')
+                axs[0].set_ylabel('Rate')
+                axs[0].legend()
 
             # Plot data for Server 2
-            axs[1].plot(service_rate_srv2, jockeying_rate_srv2, label='Jockeying Rate', color='blue')
-            axs[1].plot(service_rate_srv2, reneging_rate_srv2, label='Reneging Rate', color='red')
+            #axs[1].plot(service_rate_srv2, jockeying_rate_srv2, label='Jockeying Rate', color='blue')
+            #axs[1].plot(service_rate_srv2, reneging_rate_srv2, label='Reneging Rate', color='red')
             # axs[1].plot(num_requests_srv2, service_rate_srv2, label='Service Rate', color='green')
-            axs[1].set_title(f'Server 2 Rates ({interval_labels[interval]})')
-            axs[1].set_xlabel('Service rates')
-            axs[1].set_ylabel('Rate') 
-            axs[1].legend()
+            srv2_sorted = sorted(zip(service_rate_srv2, jockeying_rate_srv2, reneging_rate_srv2))
+            if srv2_sorted:
+                srv2_service, srv2_jockey, srv2_reneg = zip(*srv2_sorted)
+                axs[1].plot(srv2_service, srv2_jockey, label='Jockeying Rate', color='blue')
+                axs[1].plot(srv2_service, srv2_reneg, label='Reneging Rate', color='red')
+                axs[1].set_xlabel('Service Rate')
+                axs[1].set_title(f'Server 2 Rates ({interval_labels[interval]})')
+                axs[1].set_xlabel('Service rates')
+                axs[1].set_ylabel('Rate') 
+                axs[1].legend()
 
             # Adjust layout and show the plot  
             plt.tight_layout()
             plt.show()
+            
+    def plot_waiting_time_vs_rates(self):    
+
+        # Ensure data is available and of same length
+        w1 = getattr(self, 'waiting_times_srv1', [])
+        w2 = getattr(self, 'waiting_times_srv2', [])
+        j1 = self.dispatch_data["server_1"]["jockeying_rate"]
+        r1 = self.dispatch_data["server_1"]["reneging_rate"]
+        j2 = self.dispatch_data["server_2"]["jockeying_rate"]
+        r2 = self.dispatch_data["server_2"]["reneging_rate"]
+
+        # Truncate to same lengths
+        min_len1 = min(len(w1), len(j1), len(r1))
+        min_len2 = min(len(w2), len(j2), len(r2))
+        w1, j1, r1 = w1[:min_len1], j1[:min_len1], r1[:min_len1]
+        w2, j2, r2 = w2[:min_len2], j2[:min_len2], r2[:min_len2]
+
+        fig, axs = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+        axs[0].plot(w1, j1, label='Jockeying Rate', color='blue')
+        axs[0].plot(w1, r1, label='Reneging Rate', color='red')
+        axs[0].set_title('Server 1: Waiting Time vs Rates')
+        axs[0].set_ylabel('Rate')
+        axs[0].legend()
+
+        axs[1].plot(w2, j2, label='Jockeying Rate', color='blue')
+        axs[1].plot(w2, r2, label='Reneging Rate', color='red')
+        axs[1].set_title('Server 2: Waiting Time vs Rates')
+        axs[1].set_xlabel('Waiting Time')
+        axs[1].set_ylabel('Rate')
+        axs[1].legend()
+
+        plt.tight_layout()
+        plt.show()
+        
+        
+    def plot_waiting_time_vs_rates_by_interval(self):
+    
+
+        intervals = sorted(self.dispatch_data.keys())
+        servers = ["server_1", "server_2"]
+
+        fig, axs = plt.subplots(len(intervals), len(servers), figsize=(6 * len(servers), 4 * len(intervals)), sharex=False)
+        if len(intervals) == 1 and len(servers) == 1:
+            axs = [[axs]]
+        elif len(intervals) == 1 or len(servers) == 1:
+            axs = [axs] if len(intervals) == 1 else [[a] for a in axs]
+
+        for i, interval in enumerate(intervals):
+            for j, server in enumerate(servers):
+                waiting_times = self.dispatch_data[interval][server].get("waiting_times", [])
+                jockeying_rates = self.dispatch_data[interval][server].get("jockeying_rate", [])
+                reneging_rates = self.dispatch_data[interval][server].get("reneging_rate", [])
+
+                min_len = min(len(waiting_times), len(jockeying_rates), len(reneging_rates))
+                if min_len == 0:
+                    continue  # Skip empty panels
+
+                w = waiting_times[:min_len]
+                j_rate = jockeying_rates[:min_len]
+                r_rate = reneging_rates[:min_len]
+
+                ax = axs[i][j]
+                ax.plot(w, j_rate, label="Jockeying Rate", color="blue", marker='o')
+                ax.plot(w, r_rate, label="Reneging Rate", color="red", marker='x')
+                ax.set_xlabel("Waiting Time")
+                ax.set_ylabel("Rate")
+                ax.set_title(f"{server.replace('_', ' ').title()} | Interval: {interval}s")
+                ax.legend()
+                ax.grid(True)
+
+        plt.tight_layout()
+        plt.show()
         
     
     def setup_dispatch_intervals(self, intervals):
@@ -1291,7 +1373,7 @@ class RequestQueue:
         return curr_queue_state
   
 
-    def serveOneRequest(self, queueID): # to_delete, serv_time, 
+    def serveOneRequest(self, queueID, interval): # to_delete, serv_time, 
         #randomly select which queue to process at a time t+1
         q_selector = random.randint(1, 2)                            
         
@@ -1299,21 +1381,31 @@ class RequestQueue:
         # before admitting more into the queue
         len_queue_1,len_queue_2 = self.get_queue_sizes()
         
+        if not hasattr(self, 'waiting_times_srv1'):
+             self.waiting_times_srv1 = []
+        if not hasattr(self, 'waiting_times_srv2'):
+             self.waiting_times_srv2 = []
+        
         if "1" in queueID:   # Server1               
             req =  self.dict_queues_obj["1"][0] # Server1
             serv_rate = self.dict_servers_info["1"] # Server1
             queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate
             queueID = "1" # Server1
     
-            reward = self.get_jockey_reward(req)       
-            # serve request in queue            
-                    
+            reward = self.get_jockey_reward(req)
+                   
+            # serve request in queue                                
             self.queueID = queueID
             self.dict_queues_obj["1"] = self.dict_queues_obj["1"][1:self.dict_queues_obj["1"].size]       # Server1 
             self.total_served_requests_srv2+=1                       
             
             # Set the exit time
-            req.time_exit = self.time              
+            req.time_exit = self.time 
+            
+            waiting_time = req.time_exit - req.time_entrance
+            self.waiting_times_srv1.append(waiting_time)   
+            
+            self.record_waiting_time(interval, queueID, waiting_time)          
             
             # take note of the observation ... self.time  queue_id,  serv_rate, intensity, time_in_serv, activity, rewarded, curr_pose
             self.objObserv.set_obs(self.queueID, serv_rate, queue_intensity, req.time_exit-req.time_entrance, reward, len_queue_1, 2)   # req.exp_time_service_end,                                    
@@ -1342,12 +1434,13 @@ class RequestQueue:
          
             self.queueID = queueID 
             self.dict_queues_obj["S2"] = self.dict_queues_obj["2"][1:self.dict_queues_obj["2"].size]      # Server2 
-            self.total_served_requests_srv1+=1
-            
-            #print("\n ==> ", self.total_served_requests_srv1)
+            self.total_served_requests_srv1+=1                        
             
             # Set the exit time
-            req.time_exit = self.time                 
+            req.time_exit = self.time   
+            
+            waiting_time = req.time_exit - req.time_entrance
+            self.waiting_times_srv2.append(waiting_time)              
             
             self.objObserv.set_obs(self.queueID, serv_rate, queue_intensity, req.time_exit-req.time_entrance, reward, len_queue_2, 2)    # req.exp_time_service_end,                                  
             self.history.append(self.objObserv.get_obs())                   
@@ -1376,7 +1469,17 @@ class RequestQueue:
         self.curr_req = req
                                                                   
         return
-
+    
+    
+    def record_waiting_time(self, interval, server_id, waiting_time):
+		
+        if interval not in self.dispatch_data:
+            self.dispatch_data[interval] = {
+                "server_1": {"waiting_times": [], "num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": [] },              
+                "server_2": {"waiting_times": [], "num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": [] }
+            }
+        self.dispatch_data[interval][server_id]["waiting_times"].append(waiting_time)
+    
 
     def get_jockey_reward(self, req):
 		
@@ -2039,6 +2142,8 @@ def main():
     plt.show()
     
     requestObj.plot_rates_by_intervals()
+    
+    requestObj.plot_waiting_time_vs_rates_by_interval() #plot_waiting_time_vs_rates()
 
     # Run the dispatch intervals
     # requestObj.setup_dispatch_intervals(intervals)
