@@ -1129,8 +1129,8 @@ class RequestQueue:
         """
         Plot separate graphs of jockeying and reneging rates for each dispatch interval.
         """
-        intervals = [10, 30, 60]  # Dispatch intervals in seconds
-        interval_labels = {10: "10 seconds", 30: "30 seconds", 60: "60 seconds"}
+        intervals = [10, 20, 30]  # Dispatch intervals in seconds
+        interval_labels = {10: "10 seconds", 20: "20 seconds", 30: "30 seconds"}
     
         # Iterate over each interval and create separate plots
         for interval in intervals:
@@ -1140,32 +1140,35 @@ class RequestQueue:
                 continue
         
             # Extract data for Server 1
-            num_requests_srv1 = self.dispatch_data["server_1"]["num_requests"]
-            jockeying_rate_srv1 = self.dispatch_data["server_1"]["jockeying_rate"]
-            reneging_rate_srv1 = self.dispatch_data["server_1"]["reneging_rate"]
-            service_rate_srv1 = self.dispatch_data["server_1"]["service_rate"]
+            num_requests_srv1 = self.dispatch_data[interval]["server_1"]["num_requests"]
+            jockeying_rate_srv1 = self.dispatch_data[interval]["server_1"]["jockeying_rate"]
+            reneging_rate_srv1 = self.dispatch_data[interval]["server_1"]["reneging_rate"]
+            service_rate_srv1 = self.dispatch_data[interval]["server_1"]["service_rate"]
         
             # Extract data for Server 2
-            num_requests_srv2 = self.dispatch_data["server_2"]["num_requests"]
-            jockeying_rate_srv2 = self.dispatch_data["server_2"]["jockeying_rate"]
-            reneging_rate_srv2 = self.dispatch_data["server_2"]["reneging_rate"]
-            service_rate_srv2 = self.dispatch_data["server_2"]["service_rate"]
+            num_requests_srv2 = self.dispatch_data[interval]["server_2"]["num_requests"]
+            jockeying_rate_srv2 = self.dispatch_data[interval]["server_2"]["jockeying_rate"]
+            reneging_rate_srv2 = self.dispatch_data[interval]["server_2"]["reneging_rate"]
+            service_rate_srv2 = self.dispatch_data[interval]["server_2"]["service_rate"]
 
             # Plot data for Server 1
             fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
-            axs[0].plot(num_requests_srv1, jockeying_rate_srv1, label='Jockeying Rate', color='blue')
-            axs[0].plot(num_requests_srv1, reneging_rate_srv1, label='Reneging Rate', color='red')
-            axs[0].plot(num_requests_srv1, service_rate_srv1, label='Service Rate', color='green')
+            #axs[0].plot(num_requests_srv1, jockeying_rate_srv1, label='Jockeying Rate', color='blue')
+            #axs[0].plot(num_requests_srv1, reneging_rate_srv1, label='Reneging Rate', color='red')
+            #axs[0].plot(num_requests_srv1, service_rate_srv1, label='Service Rate', color='green')
+            axs[0].plot(service_rate_srv1, jockeying_rate_srv1, label='Jockeying Rate', color='blue')
+            axs[0].plot(service_rate_srv1, reneging_rate_srv1, label='Reneging Rate', color='red')
+            # axs[0].plot(num_requests_srv1, service_rate_srv1, label='Service Rate', color='green')
             axs[0].set_title(f'Server 1 Rates ({interval_labels[interval]})')
             axs[0].set_ylabel('Rate')
             axs[0].legend()
 
             # Plot data for Server 2
-            axs[1].plot(num_requests_srv2, jockeying_rate_srv2, label='Jockeying Rate', color='blue')
-            axs[1].plot(num_requests_srv2, reneging_rate_srv2, label='Reneging Rate', color='red')
-            axs[1].plot(num_requests_srv2, service_rate_srv2, label='Service Rate', color='green')
+            axs[1].plot(service_rate_srv2, jockeying_rate_srv2, label='Jockeying Rate', color='blue')
+            axs[1].plot(service_rate_srv2, reneging_rate_srv2, label='Reneging Rate', color='red')
+            # axs[1].plot(num_requests_srv2, service_rate_srv2, label='Service Rate', color='green')
             axs[1].set_title(f'Server 2 Rates ({interval_labels[interval]})')
-            axs[1].set_xlabel('Number of Requests')
+            axs[1].set_xlabel('Service rates')
             axs[1].set_ylabel('Rate') 
             axs[1].legend()
 
@@ -1580,24 +1583,25 @@ class RequestQueue:
             return
             
         else:
-            print("\n Error: ** ", len(self.queue))
-            self.queue = np.delete(self.queue, curr_pose) # index)        
-            self.queueID = queueid  
+            # print("\n Error: ** ", len(self.queue), curr_pose)
+            if len(self.queue) >= curr_pose:
+                self.queue = np.delete(self.queue, curr_pose) # index)        
+                self.queueID = queueid  
         
-            req.customerid = req.customerid+"_reneged"
+                req.customerid = req.customerid+"_reneged"
         
-        # In the case of reneging, you only get a reward if the time.entrance plus
-        # the current time minus the time _to_service_end is greater than the time_local_service
+                # In the case of reneging, you only get a reward if the time.entrance plus
+                # the current time minus the time _to_service_end is greater than the time_local_service
         
-            reward = self.getRenegeRewardPenalty(req, time_local_service, time_to_service_end)                                    
+                reward = self.getRenegeRewardPenalty(req, time_local_service, time_to_service_end)                                    
         
-            self.objObserv.set_renege_obs(curr_pose, queue_intensity, decision,time_local_service, time_to_service_end, reward, queueid, "reneged")
+                self.objObserv.set_renege_obs(curr_pose, queue_intensity, decision,time_local_service, time_to_service_end, reward, queueid, "reneged")
         
-            self.curr_obs_renege.append(self.objObserv.get_renege_obs(queueid, self.queue)) #queueid, queue_intensity, curr_pose))        
+                self.curr_obs_renege.append(self.objObserv.get_renege_obs(queueid, self.queue)) #queueid, queue_intensity, curr_pose))        
         
-            self.curr_req = req
+                self.curr_req = req
         
-            self.objQueues.update_queue_status(queueid)
+                self.objQueues.update_queue_status(queueid)
 
 
     def get_request_position(self, queue_id, request_id): ######
@@ -1998,12 +2002,12 @@ def main():
     
         # Collect reneging and jockeying rates for this interval
         reneging_rates = {
-            "server_1": requestObj.dispatch_data['interval']["server_1"]["reneging_rate"],
-            "server_2": requestObj.dispatch_data['interval']["server_2"]["reneging_rate"]
+            "server_1": requestObj.dispatch_data[interval]["server_1"]["reneging_rate"],
+            "server_2": requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]
         }
         jockeying_rates = {
-            "server_1": requestObj.dispatch_data['interval']["server_1"]["jockeying_rate"],
-            "server_2": requestObj.dispatch_data['interval']["server_2"]["jockeying_rate"]
+            "server_1": requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"],
+            "server_2": requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]
         }
     
         all_reneging_rates.append(reneging_rates)
