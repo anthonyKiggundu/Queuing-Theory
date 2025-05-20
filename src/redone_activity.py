@@ -618,14 +618,17 @@ class RequestQueue:
             
                 # Compute rates
                 jockeying_rate = self.compute_jockeying_rate(curr_queue)
-                reneging_rate = self.compute_reneging_rate(curr_queue)
-
-                curr_queue_state = self.get_queue_state(queue_id) 
-                curr_queue_state["jockeying_rate"] = jockeying_rate
-                curr_queue_state["reneging_rate"] = reneging_rate  
+                reneging_rate = self.compute_reneging_rate(curr_queue)                                
                 
-                print("\n Current State of Server",queue_id, " => ", curr_queue_state)
-                self.dispatch_queue_state( curr_queue, alt_queue_id, alt_queue, curr_queue_state)
+                # curr_queue_state = self.get_queue_state(queue_id)
+                
+                #print("\n\n AFTER get_queue_state:", id(curr_queue_state), curr_queue_state)
+                 
+                #curr_queue_state["jockeying_rate"] = jockeying_rate
+                #curr_queue_state["reneging_rate"] = reneging_rate  
+                
+                #print("\n Current State of Server",queue_id, " => ", curr_queue_state)
+                self.dispatch_queue_state( curr_queue, alt_queue_id, alt_queue, interval) #, curr_queue_state)
                        
                 # Record the statistics
                 if "1" in queue_id:
@@ -955,38 +958,53 @@ class RequestQueue:
         return self.curr_state
 
   
-    def dispatch_queue_state(self, curr_queue, curr_queue_id, alt_queue, curr_queue_state): 
+    def dispatch_queue_state(self, curr_queue, alt_queue_id, alt_queue, interval): #, curr_queue_state): # curr_queue_id
 		
         rate_srv1, rate_srv2 = self.get_server_rates()
 		
-        if "1" in curr_queue_id:
-            alt_queue_id = "2"
+        if "1" in alt_queue_id:
+            curr_queue_id = "2"
             serv_rate = rate_srv1
         else:
-            alt_queue_id = "1"
+            curr_queue_id = "1"
             serv_rate = rate_srv2
-
+        
+        curr_queue_state = self.get_queue_state(alt_queue_id)
+                
+        print("\n\n From get_queue_state:", curr_queue_state)
+                 
+        #curr_queue_state["jockeying_rate"] = jockeying_rate
+        #curr_queue_state["reneging_rate"] = reneging_rate 
+         
         # Compute reneging rate and jockeying rate
-        #reneging_rate = self.compute_reneging_rate(curr_queue)
-        #jockeying_rate = self.compute_jockeying_rate(curr_queue)
+        reneging_rate = self.compute_reneging_rate(curr_queue)
+        jockeying_rate = self.compute_jockeying_rate(curr_queue)
+        
+        # curr_queue_state.update({'jockeying_rate':jockeying_rate, 'reneging_rate':reneging_rate})
 
         for client in range(len(curr_queue)):
             req = curr_queue[client]  # self.dict_queues_obj[curr_queue_id][client]
             print(f"Dispatching state of server {alt_queue_id} to client {req.customerid} : {curr_queue_state}.")
             
-            if "1" in curr_queue_id: # == "1":
-                self.makeJockeyingDecision(req, curr_queue_id, "2", req.customerid, serv_rate)
-                self.makeRenegingDecision(req, curr_queue_id)
-                curr_queue_id = str(curr_queue_id) # "Server_"+
+            if "1" in alt_queue_id: # == "1":
+                self.makeJockeyingDecision(req, alt_queue_id, curr_queue_id, req.customerid, serv_rate)
+                self.makeRenegingDecision(req, alt_queue_id)
+                alt_queue_id = str(alt_queue_id) # "Server_"+
             else:
-                self.makeJockeyingDecision(req, curr_queue_id, "1", req.customerid, serv_rate)
-                self.makeRenegingDecision(req, curr_queue_id)
-                curr_queue_id = str(curr_queue_id) # "Server_"+
-                
+                self.makeJockeyingDecision(req, alt_queue_id, curr_queue_id, req.customerid, serv_rate)
+                self.makeRenegingDecision(req, alt_queue_id)
+                alt_queue_id = str(alt_queue_id) # "Server_"+
+        
+        # Append rates to interval-specific dispatch data
+        self.dispatch_data[interval][f"server_{alt_queue_id}"]["num_requests"].append(num_requests)
+        self.dispatch_data[interval][f"server_{alt_queue_id}"]["jockeying_rate"].append(jockeying_rate)
+        self.dispatch_data[interval][f"server_{alt_queue_id}"]["reneging_rate"].append(reneging_rate)
+        self.dispatch_data[interval][f"server_{alt_queue_id}"]["service_rate"].append(serv_rate)  
+              
         # self.dispatch_data["num_requests"][curr_queue_id].append(len(curr_queue))
-        self.dispatch_data[f"server_{curr_queue_id}"]["num_requests"].append(len(curr_queue))
-        self.dispatch_data[f"server_{curr_queue_id}"]["jockeying_rate"].append(curr_queue_state['jockeying_rate']) # jockeying_rate)
-        self.dispatch_data[f"server_{curr_queue_id}"]["reneging_rate"].append(curr_queue_state['reneging_rate']) #reneging_rate)
+        #self.dispatch_data[f"server_{alt_queue_id}"]["num_requests"].append(len(curr_queue))
+        #self.dispatch_data[f"server_{alt_queue_id}"]["jockeying_rate"].append(curr_queue_state['jockeying_rate']) # jockeying_rate)
+        #self.dispatch_data[f"server_{alt_queue_id}"]["reneging_rate"].append(curr_queue_state['reneging_rate']) #reneging_rate)
 
         # return reneging_rate, jockeying_rate
         
@@ -1257,7 +1275,8 @@ class RequestQueue:
             "jockeying_rate" : jockeying_rate             
         }
         
-        #print("\n Internal Server State of ",queueid, " => ", curr_queue_state)
+        # print("INSIDE get_queue_state:", id(curr_queue_state), curr_queue_state)
+        # print("\n Internal Server State of ",queueid, " => ", curr_queue_state)
         return curr_queue_state
   
 
@@ -1498,7 +1517,7 @@ class RequestQueue:
                 ## self.max_cloud_delay=stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=1/serv_rate)
                 #self.max_cloud_delay=stats.erlang.ppf(self.certainty,loc=0,scale=mean_interval,a=req.pos_in_queue)
             
-            if "Server1" in queueid:
+            if "1" in queueid:
                 self.queue = self.dict_queues_obj["1"]            
             else:
                 self.queue = self.dict_queues_obj["2"] 
@@ -1507,7 +1526,7 @@ class RequestQueue:
                 decision=True
                 curr_pose = self.get_request_position(queueid, req.customerid)
         
-                if curr_pose >= len(self.queue): #if curr_pose is None:
+                if curr_pose is None: #  if curr_pose >= len(self.queue): # 
                     print(f"Request ID {req.customerid} not found in queue {queueid}. Continuing with processing...")
                     return 
                 else:               
@@ -1580,16 +1599,22 @@ class RequestQueue:
         :param request_id: The ID of the request.
         :return: The position of the request in the queue (0-indexed).
         """
-        if queue_id == "1":
+        if "1" in queue_id:
             queue = self.dict_queues_obj["1"]  # Queue1
+            #for t in queue:
+            #print("\n -> ", request_id ,t.customerid)
         else:
-            queue = self.dict_queues_obj["2"]  # Queue2
-
+            queue = self.dict_queues_obj["2"]  
+            #for j in queue:
+            #print("\n => ", request_id,j.customerid)
+				
         for position, req in enumerate(queue):            
-            if req.customerid == request_id:
+            if request_id in req.customerid:
                 return position
+            else:
+                continue	
 
-        return None
+        #return None
     
         
     def compare_steady_state_distributions(self, dist_alt_queue, dist_curr_queue):
