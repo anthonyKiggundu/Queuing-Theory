@@ -412,10 +412,12 @@ class RequestQueue:
                  para_local_delay=[1.0,2.0,10.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, batchid=np.int16):
                  
         
-        self.dispatch_data = {
-            "server_1": {"num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": []},
-            "server_2": {"num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": []}
-        }
+        self.dispatch_data = {}
+        #self.dispatch_data = {
+        #    "server_1": {"num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": []},
+        #    "server_2": {"num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": []}
+        #}
+        
         self.markov_model=msm.StateMachine(orig=markov_model)
         # self.arr_rate=float(arr_rate) arr_rate, queue=np.array([])
         ## self.customerid = self.set_customer_id()
@@ -617,8 +619,8 @@ class RequestQueue:
                 alt_queue = self.dict_queues_obj[alt_queue_id]         
             
                 # Compute rates
-                jockeying_rate = self.compute_jockeying_rate(curr_queue)
-                reneging_rate = self.compute_reneging_rate(curr_queue)                                
+                #jockeying_rate = self.compute_jockeying_rate(curr_queue)
+                #reneging_rate = self.compute_reneging_rate(curr_queue)                                
                 
                 # curr_queue_state = self.get_queue_state(queue_id)
                 
@@ -631,12 +633,12 @@ class RequestQueue:
                 self.dispatch_queue_state( curr_queue, alt_queue_id, alt_queue, interval) #, curr_queue_state)
                        
                 # Record the statistics
-                if "1" in queue_id:
-                    serv_rate = self.srvrates_1
-                else:
-                    serv_rate = self.srvrates_2
+                #if "1" in queue_id:
+                #    serv_rate = self.srvrates_1
+                #else:
+                #    serv_rate = self.srvrates_2
 					                
-                num_requests = len(curr_queue)
+                #num_requests = len(curr_queue)
             
                 # Append rates to interval-specific dispatch data
                 #self.dispatch_data[interval][f"server_{queue_id}"]["num_requests"].append(num_requests)
@@ -644,11 +646,11 @@ class RequestQueue:
                 #self.dispatch_data[interval][f"server_{queue_id}"]["reneging_rate"].append(reneging_rate)
                 #self.dispatch_data[interval][f"server_{queue_id}"]["service_rate"].append(serv_rate)
             
-                self.dispatch_data[f"server_{queue_id}"]["num_requests"].append(num_requests)
-                self.dispatch_data[f"server_{queue_id}"]["jockeying_rate"].append(jockeying_rate)
-                self.dispatch_data[f"server_{queue_id}"]["reneging_rate"].append(reneging_rate)
-                self.dispatch_data[f"server_{queue_id}"]["service_rate"].append(serv_rate)
-                self.dispatch_data[f"server_{queue_id}"]["intervals"].append(interval)
+                #self.dispatch_data[f"server_{queue_id}"]["num_requests"].append(num_requests)
+                #self.dispatch_data[f"server_{queue_id}"]["jockeying_rate"].append(jockeying_rate)
+                #self.dispatch_data[f"server_{queue_id}"]["reneging_rate"].append(reneging_rate)
+                #self.dispatch_data[f"server_{queue_id}"]["service_rate"].append(serv_rate)
+                #self.dispatch_data[f"server_{queue_id}"]["intervals"].append(interval)
 
                 #print(f"Server {queue_id} - Num requests: {num_requests}, Jockeying rate: {jockeying_rate}, "
                 #     f"Reneging rate: {reneging_rate}, Service rate: {serv_rate}, Long-run rate: {curr_queue_state['long_run_change_rate']}")
@@ -959,6 +961,12 @@ class RequestQueue:
 
   
     def dispatch_queue_state(self, curr_queue, alt_queue_id, alt_queue, interval): #, curr_queue_state): # curr_queue_id
+    
+        if interval not in self.dispatch_data:
+            self.dispatch_data[interval] = {
+                "server_1": {"num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": []},
+                "server_2": {"num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": []}
+            }
 		
         rate_srv1, rate_srv2 = self.get_server_rates()
 		
@@ -971,7 +979,7 @@ class RequestQueue:
         
         curr_queue_state = self.get_queue_state(alt_queue_id)
                 
-        print("\n\n From get_queue_state:", curr_queue_state)
+        # print("\n\n From get_queue_state:", curr_queue_state)
                  
         #curr_queue_state["jockeying_rate"] = jockeying_rate
         #curr_queue_state["reneging_rate"] = reneging_rate 
@@ -979,8 +987,7 @@ class RequestQueue:
         # Compute reneging rate and jockeying rate
         reneging_rate = self.compute_reneging_rate(curr_queue)
         jockeying_rate = self.compute_jockeying_rate(curr_queue)
-        
-        # curr_queue_state.update({'jockeying_rate':jockeying_rate, 'reneging_rate':reneging_rate})
+        num_requests = curr_queue_state['total_customers'] # len(curr_queue)        
 
         for client in range(len(curr_queue)):
             req = curr_queue[client]  # self.dict_queues_obj[curr_queue_id][client]
@@ -996,6 +1003,7 @@ class RequestQueue:
                 alt_queue_id = str(alt_queue_id) # "Server_"+
         
         # Append rates to interval-specific dispatch data
+        self.dispatch_data[interval][f"server_{alt_queue_id}"]["intervals"].append(interval)
         self.dispatch_data[interval][f"server_{alt_queue_id}"]["num_requests"].append(num_requests)
         self.dispatch_data[interval][f"server_{alt_queue_id}"]["jockeying_rate"].append(jockeying_rate)
         self.dispatch_data[interval][f"server_{alt_queue_id}"]["reneging_rate"].append(reneging_rate)
@@ -1572,6 +1580,7 @@ class RequestQueue:
             return
             
         else:
+            print("\n Error: ** ", len(self.queue))
             self.queue = np.delete(self.queue, curr_pose) # index)        
             self.queueID = queueid  
         
@@ -1974,8 +1983,8 @@ def main():
     
     # Start the scheduler
     # scheduler_thread = threading.Thread(target=requestObj.run_scheduler)
-    # scheduler_thread.start()
-    
+    # scheduler_thread.start()        
+     
     # Set intervals for dispatching queue states
     intervals = [10, 20, 30]
     
@@ -1989,12 +1998,12 @@ def main():
     
         # Collect reneging and jockeying rates for this interval
         reneging_rates = {
-            "server_1": requestObj.dispatch_data["server_1"]["reneging_rate"],
-            "server_2": requestObj.dispatch_data["server_2"]["reneging_rate"]
+            "server_1": requestObj.dispatch_data['interval']["server_1"]["reneging_rate"],
+            "server_2": requestObj.dispatch_data['interval']["server_2"]["reneging_rate"]
         }
         jockeying_rates = {
-            "server_1": requestObj.dispatch_data["server_1"]["jockeying_rate"],
-            "server_2": requestObj.dispatch_data["server_2"]["jockeying_rate"]
+            "server_1": requestObj.dispatch_data['interval']["server_1"]["jockeying_rate"],
+            "server_2": requestObj.dispatch_data['interval']["server_2"]["jockeying_rate"]
         }
     
         all_reneging_rates.append(reneging_rates)
@@ -2024,6 +2033,8 @@ def main():
 
     plt.tight_layout()
     plt.show()
+    
+    requestObj.plot_rates_by_intervals()
 
     # Run the dispatch intervals
     # requestObj.setup_dispatch_intervals(intervals)
