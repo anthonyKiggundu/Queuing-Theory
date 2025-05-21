@@ -1037,12 +1037,6 @@ class RequestQueue:
             serv_rate = self.dict_servers_info[queue_id]
             num_requests = len(curr_queue)
             
-            # Append rates to interval-specific dispatch data
-            #self.dispatch_data[interval][f"server_{queue_id}"]["num_requests"].append(num_requests)
-            #self.dispatch_data[interval][f"server_{queue_id}"]["jockeying_rate"].append(jockeying_rate)
-            #self.dispatch_data[interval][f"server_{queue_id}"]["reneging_rate"].append(reneging_rate)
-            #self.dispatch_data[interval][f"server_{queue_id}"]["service_rate"].append(serv_rate)
-            
             self.dispatch_data[f"server_{queue_id}"]["num_requests"].append(num_requests)
             self.dispatch_data[f"server_{queue_id}"]["jockeying_rate"].append(jockeying_rate)
             self.dispatch_data[f"server_{queue_id}"]["reneging_rate"].append(reneging_rate)
@@ -1129,8 +1123,8 @@ class RequestQueue:
         """
         Plot separate graphs of jockeying and reneging rates for each dispatch interval.
         """
-        intervals = [10, 20, 30]  # Dispatch intervals in seconds
-        interval_labels = {10: "10 seconds", 20: "20 seconds", 30: "30 seconds"}
+        intervals = [3, 6, 9]  # Dispatch intervals in seconds
+        interval_labels = {3: "3 seconds", 6: "6 seconds", 9: "9 seconds"}
     
         # Iterate over each interval and create separate plots
         for interval in intervals:
@@ -1184,44 +1178,20 @@ class RequestQueue:
 
             # Adjust layout and show the plot  
             plt.tight_layout()
-            plt.show()
-            
-    def plot_waiting_time_vs_rates(self):    
-
-        # Ensure data is available and of same length
-        w1 = getattr(self, 'waiting_times_srv1', [])
-        w2 = getattr(self, 'waiting_times_srv2', [])
-        j1 = self.dispatch_data["server_1"]["jockeying_rate"]
-        r1 = self.dispatch_data["server_1"]["reneging_rate"]
-        j2 = self.dispatch_data["server_2"]["jockeying_rate"]
-        r2 = self.dispatch_data["server_2"]["reneging_rate"]
-
-        # Truncate to same lengths
-        min_len1 = min(len(w1), len(j1), len(r1))
-        min_len2 = min(len(w2), len(j2), len(r2))
-        w1, j1, r1 = w1[:min_len1], j1[:min_len1], r1[:min_len1]
-        w2, j2, r2 = w2[:min_len2], j2[:min_len2], r2[:min_len2]
-
-        fig, axs = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-        axs[0].plot(w1, j1, label='Jockeying Rate', color='blue')
-        axs[0].plot(w1, r1, label='Reneging Rate', color='red')
-        axs[0].set_title('Server 1: Waiting Time vs Rates')
-        axs[0].set_ylabel('Rate')
-        axs[0].legend()
-
-        axs[1].plot(w2, j2, label='Jockeying Rate', color='blue')
-        axs[1].plot(w2, r2, label='Reneging Rate', color='red')
-        axs[1].set_title('Server 2: Waiting Time vs Rates')
-        axs[1].set_xlabel('Waiting Time')
-        axs[1].set_ylabel('Rate')
-        axs[1].legend()
-
-        plt.tight_layout()
-        plt.show()
+            plt.show()            
         
         
-    def plot_waiting_time_vs_rates_by_interval(self):
-    
+    def plot_waiting_time_vs_rates_by_interval(self, smoothing_window=5):
+        """
+        For each interval and server, plot waiting time vs smoothed jockeying and reneging rates.
+        Ensures all arrays are of the same length before plotting.
+        """
+
+        def moving_average(data, window_size):
+            """Compute the moving average of a 1D array."""
+            if window_size < 2 or len(data) < window_size:
+                return data
+            return np.convolve(data, np.ones(window_size)/window_size, mode='valid')
 
         intervals = sorted(self.dispatch_data.keys())
         servers = ["server_1", "server_2"]
@@ -1242,13 +1212,27 @@ class RequestQueue:
                 if min_len == 0:
                     continue  # Skip empty panels
 
-                w = waiting_times[:min_len]
-                j_rate = jockeying_rates[:min_len]
-                r_rate = reneging_rates[:min_len]
+                w = np.array(waiting_times[:min_len])
+                j_rate = np.array(jockeying_rates[:min_len])
+                r_rate = np.array(reneging_rates[:min_len])
+
+                # Sort by waiting time for better visualization
+                sort_idx = np.argsort(w)
+                w, j_rate, r_rate = w[sort_idx], j_rate[sort_idx], r_rate[sort_idx]
+
+                # Apply smoothing
+                w_smooth = w
+                j_smooth = moving_average(j_rate, smoothing_window)
+                r_smooth = moving_average(r_rate, smoothing_window)
+                # Truncate w to match smoothing result length
+                min_smooth_len = min(len(w_smooth), len(j_smooth), len(r_smooth))
+                w_smooth = w_smooth[:min_smooth_len]
+                j_smooth = j_smooth[:min_smooth_len]
+                r_smooth = r_smooth[:min_smooth_len]
 
                 ax = axs[i][j]
-                ax.plot(w, j_rate, label="Jockeying Rate", color="blue", marker='o')
-                ax.plot(w, r_rate, label="Reneging Rate", color="red", marker='x')
+                ax.plot(w_smooth, j_smooth, label="Jockeying Rate (smoothed)", color="blue", marker='o')
+                ax.plot(w_smooth, r_smooth, label="Reneging Rate (smoothed)", color="red", marker='x')
                 ax.set_xlabel("Waiting Time")
                 ax.set_ylabel("Rate")
                 ax.set_title(f"{server.replace('_', ' ').title()} | Interval: {interval}s")
@@ -1257,6 +1241,74 @@ class RequestQueue:
 
         plt.tight_layout()
         plt.show()
+
+        
+        
+    def plot_reneged_waiting_times_by_interval(self):
+        """
+        For each dispatch interval, plot the waiting times of requests that were reneged.
+        """
+        if not hasattr(self, 'reneged_waiting_times_by_interval'):
+            print("No reneged waiting times data collected.")
+            return
+
+        intervals = sorted(self.reneged_waiting_times_by_interval.keys())
+        servers = ["server_1", "server_2"]
+        fig, axs = plt.subplots(len(intervals), len(servers), figsize=(6 * len(servers), 4 * len(intervals)), sharex=True)
+        if len(intervals) == 1 and len(servers) == 1:
+            axs = [[axs]]
+        elif len(intervals) == 1 or len(servers) == 1:
+            axs = [axs] if len(intervals) == 1 else [[a] for a in axs]
+
+        for i, interval in enumerate(intervals):
+            for j, server in enumerate(servers):
+                waiting_times = self.reneged_waiting_times_by_interval[interval][server]
+                ax = axs[i][j]
+                if waiting_times:
+                    ax.hist(waiting_times, bins=10, color='red', alpha=0.7)
+                    ax.set_title(f"{server.replace('_', ' ').title()} | Interval: {interval}s\n(Reneged)")
+                    ax.set_xlabel("Waiting Time")
+                    ax.set_ylabel("Count")
+                else:
+                    ax.set_title(f"{server.replace('_', ' ').title()} | Interval: {interval}s (No reneged)")
+                    ax.set_xlabel("Waiting Time")
+                    ax.set_ylabel("Count")
+        plt.tight_layout()
+        plt.show()
+        
+        
+    def plot_jockeyed_waiting_times_by_interval(self):
+        """
+        For each dispatch interval, plot the waiting times of requests that were jockeyed.
+        """
+        if not hasattr(self, 'jockeyed_waiting_times_by_interval'):
+            print("No jockeyed waiting times data collected.")
+            return
+
+        intervals = sorted(self.jockeyed_waiting_times_by_interval.keys())
+        servers = ["server_1", "server_2"]
+        fig, axs = plt.subplots(len(intervals), len(servers), figsize=(6 * len(servers), 4 * len(intervals)), sharex=True)
+        if len(intervals) == 1 and len(servers) == 1:
+            axs = [[axs]]
+        elif len(intervals) == 1 or len(servers) == 1:
+            axs = [axs] if len(intervals) == 1 else [[a] for a in axs]
+
+        for i, interval in enumerate(intervals):
+            for j, server in enumerate(servers):
+                waiting_times = self.jockeyed_waiting_times_by_interval[interval][server]
+                ax = axs[i][j]
+                if waiting_times:
+                    ax.hist(waiting_times, bins=10, color='blue', alpha=0.7)
+                    ax.set_title(f"{server.replace('_', ' ').title()} | Interval: {interval}s\n(Jockeyed)")
+                    ax.set_xlabel("Waiting Time")
+                    ax.set_ylabel("Count")
+                else:
+                    ax.set_title(f"{server.replace('_', ' ').title()} | Interval: {interval}s (No jockeyed)")
+                    ax.set_xlabel("Waiting Time")
+                    ax.set_ylabel("Count")
+        plt.tight_layout()
+        plt.show()
+
         
     
     def setup_dispatch_intervals(self, intervals):
@@ -1385,6 +1437,15 @@ class RequestQueue:
              self.waiting_times_srv1 = []
         if not hasattr(self, 'waiting_times_srv2'):
              self.waiting_times_srv2 = []
+        # New: Initialize per-interval storage for jockeyed and reneged waiting times
+        if not hasattr(self, 'jockeyed_waiting_times_by_interval'):
+            self.jockeyed_waiting_times_by_interval = {}
+        if not hasattr(self, 'reneged_waiting_times_by_interval'):
+            self.reneged_waiting_times_by_interval = {}
+        if interval not in self.jockeyed_waiting_times_by_interval:
+            self.jockeyed_waiting_times_by_interval[interval] = {"server_1": [], "server_2": []}
+        if interval not in self.reneged_waiting_times_by_interval:
+            self.reneged_waiting_times_by_interval[interval] = {"server_1": [], "server_2": []}
         
         if "1" in queueID:   # Server1               
             req =  self.dict_queues_obj["1"][0] # Server1
@@ -1405,7 +1466,13 @@ class RequestQueue:
             waiting_time = req.time_exit - req.time_entrance
             self.waiting_times_srv1.append(waiting_time)   
             
-            self.record_waiting_time(interval, queueID, waiting_time)          
+            self.record_waiting_time(interval, "server_1", waiting_time) 
+            
+            # Track jockeyed and reneged waiting times for this interval and server
+            if "_jockeyed" in req.customerid:
+                self.jockeyed_waiting_times_by_interval[interval]["server_1"].append(waiting_time)
+            if "_reneged" in req.customerid:
+                self.reneged_waiting_times_by_interval[interval]["server_1"].append(waiting_time)         
             
             # take note of the observation ... self.time  queue_id,  serv_rate, intensity, time_in_serv, activity, rewarded, curr_pose
             self.objObserv.set_obs(self.queueID, serv_rate, queue_intensity, req.time_exit-req.time_entrance, reward, len_queue_1, 2)   # req.exp_time_service_end,                                    
@@ -1440,10 +1507,17 @@ class RequestQueue:
             req.time_exit = self.time   
             
             waiting_time = req.time_exit - req.time_entrance
-            self.waiting_times_srv2.append(waiting_time)              
+            self.waiting_times_srv2.append(waiting_time) 
+            self.record_waiting_time(interval, "server_2", waiting_time)             
             
             self.objObserv.set_obs(self.queueID, serv_rate, queue_intensity, req.time_exit-req.time_entrance, reward, len_queue_2, 2)    # req.exp_time_service_end,                                  
-            self.history.append(self.objObserv.get_obs())                   
+            self.history.append(self.objObserv.get_obs())
+            
+            # Track jockeyed and reneged waiting times for this interval and server
+            if "_jockeyed" in req.customerid:
+                self.jockeyed_waiting_times_by_interval[interval]["server_2"].append(waiting_time)
+            if "_reneged" in req.customerid:
+                self.reneged_waiting_times_by_interval[interval]["server_2"].append(waiting_time)                   
                
             #if time_local_service < time_to_service_end:   
 		    #   reqObj.customerid = reqObj.customerid+"_reneged"                 
@@ -1478,6 +1552,10 @@ class RequestQueue:
                 "server_1": {"waiting_times": [], "num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": [] },              
                 "server_2": {"waiting_times": [], "num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": [] }
             }
+        # Ensure waiting_times exists
+        if "waiting_times" not in self.dispatch_data[interval][server_id]:
+            self.dispatch_data[interval][server_id]["waiting_times"] = []
+            
         self.dispatch_data[interval][server_id]["waiting_times"].append(waiting_time)
     
 
@@ -1687,7 +1765,7 @@ class RequestQueue:
             
         else:
             # print("\n Error: ** ", len(self.queue), curr_pose)
-            if len(self.queue) >= curr_pose:
+            if len(self.queue) > curr_pose:
                 self.queue = np.delete(self.queue, curr_pose) # index)        
                 self.queueID = queueid  
         
@@ -2086,14 +2164,14 @@ def main():
     utility_basic = 1.0
     discount_coef = 0.1
     requestObj = RequestQueue(utility_basic, discount_coef)
-    duration = 10 # 0
+    duration = 20 # 0
     
     # Start the scheduler
     # scheduler_thread = threading.Thread(target=requestObj.run_scheduler)
     # scheduler_thread.start()        
      
     # Set intervals for dispatching queue states
-    intervals = [10, 20, 30]
+    intervals = [3, 6, 9]
     
     # Iterate through each interval in the intervals array
     all_reneging_rates = []
@@ -2141,7 +2219,11 @@ def main():
     plt.tight_layout()
     plt.show()
     
+    # service rates and jockeying/reneging rates not smooth
     requestObj.plot_rates_by_intervals()
+    
+    requestObj.plot_reneged_waiting_times_by_interval()
+    requestObj.plot_jockeyed_waiting_times_by_interval()
     
     requestObj.plot_waiting_time_vs_rates_by_interval() #plot_waiting_time_vs_rates()
 
