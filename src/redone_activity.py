@@ -801,6 +801,7 @@ class RequestQueue:
         reneging_rate = curr_queue_state["reneging_rate"]
         jockeying_rate = curr_queue_state["jockeying_rate"]
         sample_interchange_time = curr_queue_state["sample_interchange_time"]
+        steady_state_distribution = curr_queue_state["steady_state_distribution"]
         return [
             queue_length,
             arrival_rate,
@@ -810,6 +811,7 @@ class RequestQueue:
             reneging_rate,
             jockeying_rate,
             sample_interchange_time,
+            steady_state_distribution,
         ]
 
     # After each dispatch or user action, record observation and update model/policy
@@ -922,14 +924,14 @@ class RequestQueue:
     # In your request arrival/service/renege/jockey events in your simulation, log each request like this:
     # Example (you may need to adapt field names to your code):
 
-    def log_request(self, arrival_time, outcome, exit_time, queue=None):
+    def log_request(self, arrival_time, outcome, exit_time): # , queue=None
         request_log.append({
             'arrival_time': arrival_time,
             'outcome': outcome,  # "served", "reneged", "jockeyed"
             'departure_time': exit_time if outcome == "served" else None,
             'reneged_time': exit_time if outcome == "reneged" else None,
-            'jockeyed_time': exit_time if outcome == "jockeyed" else None,
-            'queue': queue
+            'jockeyed_time': exit_time if outcome == "jockeyed" else None #,
+            #'queue': queue
         })
       
         
@@ -1731,7 +1733,7 @@ class RequestQueue:
             self.dict_queues_obj["1"] = self.dict_queues_obj["1"][1:self.dict_queues_obj["1"].size]       # Server1 
             
             # When a request is served:
-            self.log_request(req.time_entrance, "served", req.time_res, self.dict_queues_obj["1"]) # req.queue) arrival_time= outcome= exit_time= queue=
+            self.log_request(req.time_entrance, "served", req.time_res) #, self.dict_queues_obj["1"]) # req.queue) arrival_time= outcome= exit_time= queue=
 
             self.total_served_requests_srv2+=1                       
             
@@ -1776,7 +1778,7 @@ class RequestQueue:
          
             self.queueID = queueID 
             self.dict_queues_obj["S2"] = self.dict_queues_obj["2"][1:self.dict_queues_obj["2"].size]      
-            self.log_request(req.time_entrance, "served", req.time_res, self.dict_queues_obj["2"]) # req.queue)  arrival_time= outcome=  exit_time= queue=
+            self.log_request(req.time_entrance, "served", req.time_res) # , self.dict_queues_obj["2"]) # req.queue)  arrival_time= outcome=  exit_time= queue=
             self.total_served_requests_srv1+=1                        
             
             # Set the exit time
@@ -1972,6 +1974,7 @@ class RequestQueue:
         
         total = 0.0
         per_outcome = {}
+        # print("\n ----> ", request_log, type(request_log))
         for req in request_log:
             # Optionally filter by queue
             if queue_id is not None and req.get('queue', req.get('queue_id', None)) != queue_id:
@@ -2091,7 +2094,8 @@ class RequestQueue:
             # print("\n Error: ** ", len(self.queue), curr_pose)
             if len(self.queue) > curr_pose:
                 self.queue = np.delete(self.queue, curr_pose) # index)  
-                self.log_request(req.time_entrance, "reneged", req.time_res, self.queue) # req.queue)    arrival_time=    outcome= exit_time= queue=
+                self.log_request(req.time_entrance, "reneged", req.time_res) # , self.queue) # req.queue)    arrival_time=    outcome= exit_time= queue=
+                # print("\n ********* ", request_log[0])
                 self.queueID = queueid  
         
                 req.customerid = req.customerid+"_reneged"
@@ -2169,7 +2173,8 @@ class RequestQueue:
             
         else:	
             np.delete(curr_queue, curr_pose) # np.where(id_queue==req_id)[0][0])
-            self.log_request(req.time_entrance, "reneged", req.time_res, curr_queue) # req.queue) arrival_time= outcome= exit_time= queue=
+            self.log_request(req.time_entrance, "reneged", req.time_res ) #, curr_queue) # req.queue) arrival_time= outcome= exit_time= queue=
+            #print("\n ********* ", request_log[0])
             reward = 1.0
             req.time_entrance = self.time # timer()
             dest_queue = np.append( dest_queue, req)
@@ -2717,14 +2722,15 @@ def main():
     
         all_reneging_rates.append(reneging_rates)
         all_jockeying_rates.append(jockeying_rates)
-        
-        # Make sure request_log is cleared before each run!
-        request_log.clear()
+                
         # --- (run simulation, log each request with log_request(...)) ---
         # After the run, calculate wasted waiting time:
         total_wasted, per_outcome = requestObj.total_wasted_waiting_time(request_log)
         wasted_by_interval.append(total_wasted)
         per_outcome_by_interval.append(per_outcome)
+        
+        # Make sure request_log is cleared before each run!
+        request_log.clear()
     
     waiting_times, outcomes, time_stamps = extract_waiting_times_and_outcomes(requestObj)
     
