@@ -35,7 +35,8 @@ class PredictiveModel:
     ACTION_IDX = {a: i for i, a in enumerate(ACTIONS)}
     
     def __init__(self):
-        self.model = LogisticRegression(multi_class='multinomial', max_iter=200)
+        # self.model = LogisticRegression(multi_class='multinomial', max_iter=200)
+        self.model = LogisticRegression(max_iter=200)
         self.scaler = StandardScaler()
         self.X = []
         self.y = []
@@ -69,17 +70,19 @@ class PredictiveModel:
     def predict_proba(self, features):
         """Return probability vector for each action given features."""
         if self.is_fitted:
-            X_scaled = self.scaler.transform([features])
-            # return self.model.predict_proba(X_scaled)[0]
-            proba_out = self.model.predict_proba(X_scaled)[0]
-            proba = np.zeros(len(self.ACTIONS))
-            for idx, cls in enumerate(self.model.classes_):
-                # If your y is string labels:
-                if isinstance(cls, str):
-                    proba[self.ACTION_IDX[cls]] = proba_out[idx]
-                else:
-                    proba[cls] = proba_out[idx]
-            return proba
+            try:
+                X_scaled = self.scaler.transform([features])
+                proba_out = self.model.predict_proba(X_scaled)[0]
+                proba = np.zeros(len(self.ACTIONS))
+                for idx, cls in enumerate(self.model.classes_):
+                    if isinstance(cls, str):
+                        proba[self.ACTION_IDX[cls]] = proba_out[idx]
+                    else:
+                        proba[cls] = proba_out[idx]
+                return proba
+            except AttributeError:
+                # Scaler/model not fit yet
+                return np.ones(len(self.ACTIONS)) / len(self.ACTIONS)
         else:
             # Uniform probabilities if not enough data
             return np.ones(len(self.ACTIONS)) / len(self.ACTIONS)
@@ -138,6 +141,10 @@ class ServerPolicy:
             "new_rate": self.current_service_rate
         })
         return self.current_service_rate
+        
+        
+    def get_policy_history(self):
+        return self.history
 
 
 
@@ -148,7 +155,7 @@ class Queues(object):
         self.num_of_queues = 2
         self.dict_queues = {}
         self.dict_servers = {}
-        self.arrival_rates = [3,5,7,9,11,13,15]
+        self.arrival_rates = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
         rand_idx = random.randrange(len(self.arrival_rates))
         self.sampled_arr_rate = self.randomize_arrival_rate() #self.arrival_rates[rand_idx] 
         self.queueID = ""             
@@ -802,6 +809,7 @@ class RequestQueue:
         jockeying_rate = curr_queue_state["jockeying_rate"]
         sample_interchange_time = curr_queue_state["sample_interchange_time"]
         steady_state_distribution = curr_queue_state["steady_state_distribution"]
+        
         return [
             queue_length,
             arrival_rate,
@@ -811,7 +819,9 @@ class RequestQueue:
             reneging_rate,
             jockeying_rate,
             sample_interchange_time,
-            steady_state_distribution,
+            steady_state_distribution["max"],
+            steady_state_distribution["min"],
+            steady_state_distribution["mean"],
         ]
 
     # After each dispatch or user action, record observation and update model/policy
@@ -2095,7 +2105,7 @@ class RequestQueue:
             if len(self.queue) > curr_pose:
                 self.queue = np.delete(self.queue, curr_pose) # index)  
                 self.log_request(req.time_entrance, "reneged", req.time_res) # , self.queue) # req.queue)    arrival_time=    outcome= exit_time= queue=
-                # print("\n ********* ", request_log[0])
+                #print("\n ********* ", request_log[0])
                 self.queueID = queueid  
         
                 req.customerid = req.customerid+"_reneged"
@@ -2685,16 +2695,18 @@ def in_old_function_main():
     axs[1].set_xlabel('Number of Requests')
     axs[1].set_ylabel('Jockeying Rate')
     axs[1].legend()
+   
        
 ######### Globals ########
 request_log = []
+
 
 def main():
 	
     utility_basic = 1.0
     discount_coef = 0.1
     requestObj = RequestQueue(utility_basic, discount_coef)
-    duration = 5 #100     
+    duration = 15 #100     
      
     # Set intervals for dispatching queue states
     intervals = [3, 6, 9]
@@ -2725,9 +2737,10 @@ def main():
                 
         # --- (run simulation, log each request with log_request(...)) ---
         # After the run, calculate wasted waiting time:
-        total_wasted, per_outcome = requestObj.total_wasted_waiting_time(request_log)
-        wasted_by_interval.append(total_wasted)
-        per_outcome_by_interval.append(per_outcome)
+        #print("\n => ", request_log)
+        #total_wasted, per_outcome = requestObj.total_wasted_waiting_time(request_log)
+        #wasted_by_interval.append(total_wasted)
+        #per_outcome_by_interval.append(per_outcome)
         
         # Make sure request_log is cleared before each run!
         request_log.clear()
