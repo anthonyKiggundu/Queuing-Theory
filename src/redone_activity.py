@@ -173,7 +173,7 @@ class Queues(object):
     def queue_setup_manager(self):
                 
         # deltalambda controls the difference between the service rate of either queues    
-        deltaLambda=random.randint(1, 2)
+        deltaLambda=random.uniform(.5, 2.0)
         
         serv_rate_one=self.sampled_arr_rate + deltaLambda 
         serv_rate_two=self.sampled_arr_rate - deltaLambda
@@ -2713,6 +2713,8 @@ def main():
     wasted_by_interval = []
     per_outcome_by_interval = []
     
+    jockey_stats = ["steady_state_distribution", "inter_change_time"]
+    
     # Iterate through each interval in the intervals array
     all_reneging_rates = []
     all_jockeying_rates = []
@@ -2753,6 +2755,7 @@ def main():
     polyorder = 2
 
     # Plot reneging rates
+    '''
     for i, interval in enumerate(intervals):
         for server, style in zip(["server_1", "server_2"], ["-", "--"]):
             y = np.array(all_reneging_rates[i][server])
@@ -2769,11 +2772,29 @@ def main():
                 y_smooth = y
                 x_smooth = x
             axs[0].plot(x_smooth, y_smooth, label=f'{server.replace("_", " ").title()} - Interval {interval}s', linestyle=style)
+    '''
+    
+    for i, interval in enumerate(intervals):
+        for server, style in zip(["server_1", "server_2"], ["-", "--"]):
+            y = np.array(all_reneging_rates[i][server])
+            x = np.arange(len(y))
+            if len(y) >= window_length:
+                y_smooth = savgol_filter(y, window_length=window_length, polyorder=polyorder)
+            elif len(y) >= 3:
+                wl = len(y) if len(y)%2==1 else len(y)-1
+                y_smooth = savgol_filter(y, window_length=wl, polyorder=2)
+            else:
+                y_smooth = y
+            axs[0].plot(x, y_smooth, label=f'{server.replace("_", " ").title()} - Interval {interval}s', linestyle=style)
+            # Optional: show end marker
+            axs[0].scatter([x[-1]], [y_smooth[-1]], color='black')
+
     axs[0].set_title('Reneging Rates Across Intervals (Smoothed)')
     axs[0].set_ylabel('Reneging Rate')
     axs[0].legend()
     
     # Plot jockeying rates
+    '''
     for i, interval in enumerate(intervals):
         for server, style in zip(["server_1", "server_2"], ["-", "--"]):
             y = np.array(all_jockeying_rates[i][server])
@@ -2789,6 +2810,22 @@ def main():
                 y_smooth = y
                 x_smooth = x
             axs[1].plot(x_smooth, y_smooth, label=f'{server.replace("_", " ").title()} - Interval {interval}s', linestyle=style)
+    '''
+    
+    for i, interval in enumerate(intervals):
+        for server, style in zip(["server_1", "server_2"], ["-", "--"]):
+            y = np.array(all_jockeying_rates[i][server])
+            x = np.arange(len(y))
+            if len(y) >= window_length:
+                y_smooth = savgol_filter(y, window_length=window_length, polyorder=polyorder)
+            elif len(y) >= 3:
+                wl = len(y) if len(y)%2==1 else len(y)-1
+                y_smooth = savgol_filter(y, window_length=wl, polyorder=2)
+            else:
+                y_smooth = y
+            axs[1].plot(x, y_smooth, label=f'{server.replace("_", " ").title()} - Interval {interval}s', linestyle=style)
+            # Optional: show end marker
+            axs[1].scatter([x[-1]], [y_smooth[-1]], color='black')
     axs[1].set_title('Jockeying Rates Across Intervals (Smoothed)')
     axs[1].set_xlabel('Number of Requests')
     axs[1].set_ylabel('Jockeying Rate')
@@ -2828,3 +2865,4 @@ def main():
 	 
 if __name__ == "__main__":
     main()
+    
