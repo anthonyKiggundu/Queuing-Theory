@@ -901,7 +901,10 @@ class RequestQueue:
                     self.queue = srv_1
                     srv_rate = self.srvrates_2 # self.dict_servers_info.get("1") # Server1                                
                               
-                service_intervals=np.random.exponential(1/srv_rate,max(int(srv_rate*self.time_res*5),2)) # to ensure they exceed one sampling interval
+                # service_intervals=np.random.exponential(1/srv_rate,max(int(srv_rate*self.time_res*5),2)) # to ensure they exceed one sampling interval
+                
+                safe_srv_rate = srv_rate if abs(srv_rate) > 1e-8 else 1e-3
+                service_intervals = np.random.exponential(1/safe_srv_rate, max(int(safe_srv_rate * self.time_res * 5), 2))
                 service_intervals=service_intervals[np.where(np.add.accumulate(service_intervals)<=self.time_res)[0]]
                 service_intervals=service_intervals[0:np.min([len(service_intervals),self.queue.size])]
                 arrival_intervals=np.random.exponential(1/self.arr_rate, max(int(self.arr_rate*self.time_res*5),2))
@@ -2790,7 +2793,7 @@ def main():
     utility_basic = 1.0
     discount_coef = 0.1
     requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True)
-    duration = 5 #100 
+    duration = 100 
     
     # Set intervals for dispatching queue states
     intervals = [3, 6, 9]
@@ -2807,7 +2810,7 @@ def main():
     all_reneging_rates = []
     all_jockeying_rates = []             
     
-    def run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled):
+    def run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled, jockey_anchors):
 		
         results = {
             interval: {
@@ -2816,32 +2819,31 @@ def main():
             }
             for interval in intervals
         }
-        
         for interval in intervals:
-            requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=policy_enabled)
-            requestObj.run(duration, interval)
-            # Collect rates per server for this interval
-            results[interval]["reneging_rates"] = {
-                "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
-                "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"])
-            }
-            results[interval]["jockeying_rates"] = {
-                "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
-                "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"])
-            }
-            # Clear log if needed
-            if hasattr(requestObj, "request_log"):
-                requestObj.request_log.clear()
-            elif "request_log" in globals():
-                request_log.clear()
-                
+            for anchor in jockey_anchors:
+                requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=policy_enabled)
+                requestObj.jockey_anchor = anchor  # Make sure this attribute is respected in RequestQueue
+                requestObj.run(duration, interval)
+                results[interval]["reneging_rates"][anchor] = {
+                    "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
+                    "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
+                }
+                results[interval]["jockeying_rates"][anchor] = {
+                    "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
+                    "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
+                }
+                # Clear log if needed
+                if hasattr(requestObj, "request_log"):
+                    requestObj.request_log.clear()
+                elif "request_log" in globals():
+                    request_log.clear()
         return results
     
     # With policy-driven service rates
-    results_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=True)
+    results_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=True,  jockey_anchors=jockey_anchors)
 
     # With static/non-policy-driven service rates
-    results_no_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=False)          
+    results_no_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=False,  jockey_anchors=jockey_anchors)          
 
     '''
     for interval in intervals:
@@ -3001,9 +3003,9 @@ def main():
     requestObj.plot_reneged_waiting_times_by_interval()
     requestObj.plot_jockeyed_waiting_times_by_interval()
     
-    plot_six_panels(results_policy, intervals, jockey_anchors)
-    
     plot_six_panels(results_no_policy, intervals, jockey_anchors)
+    
+    plot_six_panels(results_policy, intervals, jockey_anchors)       
     
     # --- New: Plot policy and model histories ---
     print("\n[Diagnostics] Plotting policy evolution...")
