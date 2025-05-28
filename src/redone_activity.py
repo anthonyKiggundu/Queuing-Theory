@@ -155,7 +155,7 @@ class Queues(object):
         self.num_of_queues = 2
         self.dict_queues = {}
         self.dict_servers = {}
-        self.arrival_rates = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+        self.arrival_rates = [2,3,4,5,6,7,8,9,10,11,12,13,14,15]
         rand_idx = random.randrange(len(self.arrival_rates))
         self.sampled_arr_rate = self.randomize_arrival_rate() #self.arrival_rates[rand_idx] 
         self.queueID = ""             
@@ -173,7 +173,7 @@ class Queues(object):
     def queue_setup_manager(self):
                 
         # deltalambda controls the difference between the service rate of either queues    
-        deltaLambda=random.uniform(.5, 2.0)
+        deltaLambda=random.uniform(0.1, 0.9)
         
         serv_rate_one=self.sampled_arr_rate + deltaLambda 
         serv_rate_two=self.sampled_arr_rate - deltaLambda
@@ -184,7 +184,7 @@ class Queues(object):
         self.dict_servers["1"] = _serv_rate_one # Server1
         self.dict_servers["2"] = _serv_rate_two # Server2
         
-        #print("\n Current Arrival Rate:", self.sampled_arr_rate, "Server1:", _serv_rate_one, "Server2:", _serv_rate_two) 
+        # print("\n Current Arrival Rate:", self.sampled_arr_rate, "Server1:", _serv_rate_one, "Server2:", _serv_rate_two, " Lambda: ",deltaLambda) 
 
 
     def get_dict_servers(self):
@@ -261,7 +261,7 @@ class Request:
         self.certainty=1.0-float(outage_risk)
         self.exp_time_service_end = exp_time_service_end
         self.time_exit = None  # To be set when the request leaves the queue
-        self.service_time = service_time
+        self.service_time = service_time # self.objQueues.get_dict_servers()
         #self.certainty=float(outage_risk)
 
 
@@ -443,10 +443,10 @@ class Request:
 
 
 class Observations:
-    def __init__(self, reneged=False, serv_rate=0.0, queue_intensity=0.0, jockeyed=False, time_waited=0.0,end_utility=0.0, reward=0.0, queue_size=0): # reward=0.0, 
+    def __init__(self, reneged=False, serv_rate=0.0, jockeyed=False, time_waited=0.0,end_utility=0.0, reward=0.0, queue_size=0): # reward=0.0, queue_intensity=0.0,
         self.reneged=reneged
         self.serv_rate = serv_rate
-        self.queue_intensity = queue_intensity
+        #self.queue_intensity = queue_intensity
         self.jockeyed=jockeyed
         self.time_waited=float(time_waited)
         self.end_utility=float(end_utility)
@@ -469,7 +469,7 @@ class Observations:
         self.obs = {
 			        "ServerID": _id_, #queue_id,
                     "customerid": req.customerid,
-                    "Intensity":intensity,
+                    #"Intensity":intensity,
                     #"Jockey":jockeyed,
                     "QueueSize": curr_pose,
                     #"Renege":reneged,
@@ -492,7 +492,7 @@ class Observations:
                 "queue": queueid,
                 "at_pose": curr_pose,
                 "reneged": reneged,
-                "this_busy": queue_intensity,
+                #"this_busy": queue_intensity,
                 "expected_local_service":time_local_service,
                 "time_service_took": time_to_service_end,
                 "reward": reward,
@@ -516,7 +516,7 @@ class Observations:
             {
                 "queue": queueid,
                 "at_pose": curr_pose,
-                "this_busy": queue_intensity,
+                #"this_busy": queue_intensity,
                 "jockeyed": jockeyed,
                 "expected_local_service":time_alt_queue,
                 "time_service_took": time_to_service_end,
@@ -538,7 +538,8 @@ class RequestQueue:
     def __init__(self, utility_basic, discount_coef, markov_model=msm.StateMachine(orig=None),
                  time=0.0, outage_risk=0.1, customerid="",learning_mode='online', decision_rule='risk_control',
                  alt_option='fixed_revenue', min_amount_observations=1, dist_local_delay=stats.expon, exp_time_service_end=0.0,
-                 para_local_delay=[1.0,2.0,10.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, batchid=np.int16):
+                 para_local_delay=[1.0,2.0,10.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, 
+                 batchid=np.int16, policy_enabled=True):
                  
         
         self.dispatch_data = {}
@@ -624,6 +625,7 @@ class RequestQueue:
         
         BROADCAST_INTERVAL = 5        
         
+        self.policy_enabled = policy_enabled
         self.predictive_model = PredictiveModel()
         self.policy = ServerPolicy(self.predictive_model, min_rate=1.0, max_rate=15.0)
         
@@ -855,13 +857,17 @@ class RequestQueue:
             
                 # Randomize arrival rate and service rates at each iteration
                 self.arr_rate = self.objQueues.randomize_arrival_rate()  # Randomize arrival rate
+                # self.objQueues.get_dict_servers
                 deltaLambda=random.randint(1, 2)
+                ##deltaLambda=random.uniform(0.1, 0.9)
         
                 serv_rate_one = self.arr_rate + deltaLambda 
                 serv_rate_two = self.arr_rate - deltaLambda
 
                 self.srvrates_1 = serv_rate_one / 2
+                #self.srvrates_1 = self.objQueues.get_dict_servers()["1"]
                 self.srvrates_2 = serv_rate_two / 2
+                #self.srvrates_2 = self.objQueues.get_dict_servers()["2"]
              
                 srv_1 = self.dict_queues_obj.get("1") # Server1
                 srv_2 = self.dict_queues_obj.get("2") 
@@ -869,11 +875,20 @@ class RequestQueue:
                 
                 
                 # --- Predictive modeling: adjust service rates using learned policy ---
+                #features_srv1 = self.extract_features("1")
+                #features_srv2 = self.extract_features("2")
+                # Update server rates based on current policy/model
+                #self.srvrates_1 = self.policy.update_policy(features_srv1)
+                #self.srvrates_2 = self.policy.update_policy(features_srv2)
+                
                 features_srv1 = self.extract_features("1")
                 features_srv2 = self.extract_features("2")
-                # Update server rates based on current policy/model
-                self.srvrates_1 = self.policy.update_policy(features_srv1)
-                self.srvrates_2 = self.policy.update_policy(features_srv2)
+                
+                if getattr(self, "policy_enabled", True):
+                    self.srvrates_1 = self.policy.update_policy(features_srv1)
+                    self.srvrates_2 = self.policy.update_policy(features_srv2)
+                    
+                # else: leave self.srvrates_1 and self.srvrates_2 as initialized/randomized above
                
                 if progress_log:
                     print("Step",i,"/",steps)                 
@@ -1091,7 +1106,7 @@ class RequestQueue:
                
         lengthQueOne = len(self.dict_queues_obj["1"]) # Server1
         lengthQueTwo = len(self.dict_queues_obj["2"]) # Server1 
-        rate_srv1,rate_srv2 = self.get_server_rates()
+        #rate_srv1,rate_srv2 = self.get_server_rates()
         
         # self.set_customer_id()       
 
@@ -1101,7 +1116,7 @@ class RequestQueue:
             server_id = "1" # Server1
             self.customerid = self.get_customer_id()
             self.customerid = "Batch"+str(self.get_batch_id())+"_"+self.customerid
-            queue_intensity = self.arr_rate/rate_srv1
+            #queue_intensity = self.arr_rate/rate_srv1
             #expected_time_to_service_end = self.estimateMarkovWaitingTime(float(pose)) # , queue_intensity, time_entered)
             #time_local_service = self.generateLocalCompUtility(req)
 
@@ -1111,7 +1126,7 @@ class RequestQueue:
             self.customerid = self.get_customer_id()
             self.customerid = "Batch"+str(self.get_batch_id())+"_"+self.customerid
             time_entered = self.time #self.estimateMarkovWaitingTime(lengthQueTwo)
-            queue_intensity = self.arr_rate/rate_srv2
+            #queue_intensity = self.arr_rate/rate_srv2
             #expected_time_to_service_end = self.estimateMarkovWaitingTime(float(pose)) #, queue_intensity, time_entered)
             #time_local_service = self.generateLocalCompUtility(req)
             
@@ -1656,11 +1671,11 @@ class RequestQueue:
                        
     def get_queue_state(self, queueid):
 		
-        rate_srv1, rate_srv2 = self.get_server_rates()
+        #rate_srv1, rate_srv2 = self.get_server_rates()
         # print("\n >>> ", rate_srv1, " === ", rate_srv2, " === ", self.objQueues.get_arrivals_rates())                            
 	
         if "1" in queueid:		
-            queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv1    
+            #queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv1    
             customers_in_queue = self.dict_queues_obj["1"] 
             curr_queue = self.dict_queues_obj[queueid]  
             reneging_rate = self.compute_reneging_rate(curr_queue)
@@ -1674,13 +1689,14 @@ class RequestQueue:
             steady_state_distribution_list = steady_state_distribution.tolist()  # Convert to list                    
       
         else:
-			#serv_rate = self.get_server_rates()[1] #dict_servers_info["2"] 
-            queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv2            
+			 
+            #queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv2            
             customers_in_queue = self.dict_queues_obj["2"]
             curr_queue = self.dict_queues_obj[queueid]
             reneging_rate = self.compute_reneging_rate(curr_queue)
             jockeying_rate = self.compute_jockeying_rate(curr_queue)
             # Instantiate MarkovQueueModel
+            #print("\n **> ", self.arr_rate, self.srvrates_2)
             markov_model = MarkovQueueModel(self.arr_rate, self.srvrates_2, max_states=len(customers_in_queue)) # 1000)
             long_run_change_rate = markov_model.long_run_change_rate()
             steady_state_distribution = markov_model._steady_state_distribution()
@@ -1689,7 +1705,7 @@ class RequestQueue:
 		       
         curr_queue_state = {
             "total_customers": len(customers_in_queue),
-            "intensity": queue_intensity,
+            #"intensity": queue_intensity,
             "capacity": self.capacity,              
             "long_avg_serv_time": self.get_long_run_avg_service_time(queueid),
             "sample_interchange_time": sample_interchange_time,
@@ -1703,8 +1719,6 @@ class RequestQueue:
             "jockeying_rate" : jockeying_rate             
         }
         
-        # print("INSIDE get_queue_state:", id(curr_queue_state), curr_queue_state)
-        # print("\n Internal Server State of ",queueid, " => ", curr_queue_state)
         return curr_queue_state
   
 
@@ -2262,7 +2276,7 @@ class RequestQueue:
         #alt_simulated_events = alt_queue_state["simulated_events"]
                 
         decision=False                
-        queue_intensity = self.arr_rate/self.dict_servers_info[alt_queue_id]
+        # queue_intensity = self.arr_rate/self.dict_servers_info[alt_queue_id]
         curr_queue = self.dict_queues_obj.get(curr_queue_id)
         dest_queue = self.dict_queues_obj.get(alt_queue_id)
 
@@ -2293,17 +2307,32 @@ class RequestQueue:
                The better state is defined by first-order stochatsic dorminance and the jockeying rate (orprobability)
             ''' 
                         
-            queue_states_compared = self.compare_queues(alt_steady_state, curr_steady_state, K=1) # compare_steady_state_distributions()   state of alt queue is better than the current one 
-            # print("\n Compared state: ", queue_states_compared) # curr_steady_state, "Alt state: ", alt_steady_state) 
+            queue_states_compared = self.compare_queues(alt_steady_state, curr_steady_state, K=1) 
             
-            if queue_states_compared['first_order_dominance']: #and (alt_queue_state['jockeying_rate'] <  curr_queue_state['jockeying_rate']):
+            anchor = getattr(self, "jockey_anchor", "steady_state_distribution")
+            
+            if anchor == "steady_state_distribution":
+                # Use steady-state distribution comparison (as currently implemented)
+                queue_states_compared = self.compare_queues(alt_steady_state, curr_steady_state, K=1)
+                if queue_states_compared['first_order_dominance']:
+                    decision = True
+                    self.reqJockey(curr_queue_id, alt_queue_id, req, req.customerid, serv_rate, dest_queue, self.avg_delay, decision, curr_pose, self.dict_queues_obj.get(curr_queue_id))
+            
+            # For high throughput as objective, a low interchange_time shows a better state, if stability is the objective, a high value is better                       
+            elif anchor == "inter_change_time":
+                # Use interchange time
+                if alt_queue_state["sample_interchange_time"] > curr_queue_state["sample_interchange_time"]:
+                    decision = True 
+                    self.reqJockey(curr_queue_id, alt_queue_id, req, req.customerid, serv_rate, dest_queue, self.avg_delay, decision, curr_pose, self.dict_queues_obj.get(curr_queue_id))
+                    
+            #if queue_states_compared['first_order_dominance']: #and (alt_queue_state['jockeying_rate'] <  curr_queue_state['jockeying_rate']):
             
             # For high throughput as objective, a low interchange_time shows a better state, if stability is the objective, a high value is better 
             ## if alt_queue_state['sample_interchange_time'] > curr_queue_state['sample_interchange_time']: 
                 #alt_queue_state['long_avg_serv_time'] < time_to_get_served:
                 # alt_queue_state['total_customers'] < curr_queue_state['total_customers']: # 'long_run_change_rate':       
-                decision = True
-                self.reqJockey(curr_queue_id, alt_queue_id, req, req.customerid, serv_rate, dest_queue, self.avg_delay, decision, curr_pose, self.dict_queues_obj.get(curr_queue_id))
+            #    decision = True
+            #    self.reqJockey(curr_queue_id, alt_queue_id, req, req.customerid, serv_rate, dest_queue, self.avg_delay, decision, curr_pose, self.dict_queues_obj.get(curr_queue_id))
                 
             #elif len(alt_simulated_events) < len(curr_simulated_events):  # Fewer events might indicate less congestion
                 #decision = True
@@ -2329,8 +2358,13 @@ class MarkovQueueModel:
         """
         self.lambda_ = arrival_rate
         self.mu = service_rate
-        # print("\n ==> ", arrival_rate, service_rate)
-        self.rho = arrival_rate / service_rate
+        #print("\n IN MORSKOV MODEL CLASS: ==> ", arrival_rate, service_rate)
+        
+        if abs(service_rate) < 1e-8:
+            self.rho = 0.0  # fallback value; choose np.inf or another value if more appropriate for your model
+        else:
+            self.rho = arrival_rate / service_rate
+            
         self.max_states = max_states
         self.pi = self._steady_state_distribution()
                
@@ -2695,7 +2729,57 @@ def in_old_function_main():
     axs[1].set_xlabel('Number of Requests')
     axs[1].set_ylabel('Jockeying Rate')
     axs[1].legend()
-   
+
+
+def plot_six_panels(results, intervals, jockey_anchors):
+    fig, axs = plt.subplots(2, 3, figsize=(18, 8), sharex=False)
+    colors = {
+        "steady_state_distribution": "blue",
+        "inter_change_time": "green"
+    }
+    linestyles = {
+        "steady_state_distribution": "-",
+        "inter_change_time": "--"
+    }
+
+    for col, interval in enumerate(intervals):
+        # Reneging rate plots
+        ax_ren = axs[0, col]
+        for anchor in jockey_anchors:
+            for server in ["server_1", "server_2"]:
+                y = np.array(results[interval]["reneging_rates"][anchor][server])
+                x = np.arange(len(y))
+                ax_ren.plot(
+                    x, y,
+                    label=f"{anchor} | {server.replace('_',' ').title()}",
+                    color=colors[anchor],
+                    linestyle=linestyles[anchor] if server == "server_1" else ':'
+                )
+        ax_ren.set_title(f"Reneging Rates | Interval {interval}s")
+        ax_ren.set_xlabel("Steps")
+        ax_ren.set_ylabel("Reneging Rate")
+        ax_ren.legend()
+
+        # Jockeying rate plots
+        ax_jky = axs[1, col]
+        for anchor in jockey_anchors:
+            for server in ["server_1", "server_2"]:
+                y = np.array(results[interval]["jockeying_rates"][anchor][server])
+                x = np.arange(len(y))
+                ax_jky.plot(
+                    x, y,
+                    label=f"{anchor} | {server.replace('_',' ').title()}",
+                    color=colors[anchor],
+                    linestyle=linestyles[anchor] if server == "server_1" else ':'
+                )
+        ax_jky.set_title(f"Jockeying Rates | Interval {interval}s")
+        ax_jky.set_xlabel("Steps")
+        ax_jky.set_ylabel("Jockeying Rate")
+        ax_jky.legend()
+
+    plt.tight_layout()
+    plt.show()
+      
        
 ######### Globals ########
 request_log = []
@@ -2705,20 +2789,61 @@ def main():
 	
     utility_basic = 1.0
     discount_coef = 0.1
-    requestObj = RequestQueue(utility_basic, discount_coef)
-    duration = 15 #100     
-     
+    requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True)
+    duration = 5 #100 
+    
     # Set intervals for dispatching queue states
     intervals = [3, 6, 9]
     wasted_by_interval = []
     per_outcome_by_interval = []
     
-    jockey_stats = ["steady_state_distribution", "inter_change_time"]
+    jockey_anchors = ["steady_state_distribution", "inter_change_time"]
+
+    all_results = {anchor: [] for anchor in jockey_anchors}
+    
+    
     
     # Iterate through each interval in the intervals array
     all_reneging_rates = []
-    all_jockeying_rates = []
+    all_jockeying_rates = []             
+    
+    def run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled):
+		
+        results = {
+            interval: {
+                "reneging_rates": {anchor: {} for anchor in jockey_anchors},
+                "jockeying_rates": {anchor: {} for anchor in jockey_anchors}
+            }
+            for interval in intervals
+        }
+        
+        for interval in intervals:
+            requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=policy_enabled)
+            requestObj.run(duration, interval)
+            # Collect rates per server for this interval
+            results[interval]["reneging_rates"] = {
+                "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
+                "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"])
+            }
+            results[interval]["jockeying_rates"] = {
+                "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
+                "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"])
+            }
+            # Clear log if needed
+            if hasattr(requestObj, "request_log"):
+                requestObj.request_log.clear()
+            elif "request_log" in globals():
+                request_log.clear()
+                
+        return results
+    
+    # With policy-driven service rates
+    results_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=True)
 
+    # With static/non-policy-driven service rates
+    results_no_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=False)          
+
+    '''
     for interval in intervals:
         print(f"Running simulation with interval: {interval} seconds")
         #requestObj = RequestQueue(utility_basic, discount_coef)
@@ -2737,22 +2862,45 @@ def main():
         all_reneging_rates.append(reneging_rates)
         all_jockeying_rates.append(jockeying_rates)
                 
-        # --- (run simulation, log each request with log_request(...)) ---
-        # After the run, calculate wasted waiting time:
-        #print("\n => ", request_log)
+
         #total_wasted, per_outcome = requestObj.total_wasted_waiting_time(request_log)
         #wasted_by_interval.append(total_wasted)
         #per_outcome_by_interval.append(per_outcome)
         
         # Make sure request_log is cleared before each run!
         request_log.clear()
+    '''
+    
+    ######## block that works starts here  ########
+    '''
+    for anchor in jockey_anchors:
+        for interval in intervals:
+            print(f"Running simulation for anchor: {anchor}, interval: {interval}s")
+            requestObj = RequestQueue(utility_basic, discount_coef)
+            requestObj.jockey_anchor = anchor   # <-- Add this attribute
+
+            requestObj.run(duration, interval)
+            
+            results[interval]["reneging_rates"][anchor] = {
+                "server_1": requestObj.dispatch_data[interval]["server_1"]["reneging_rate"],
+                "server_2": requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]
+            }
+            results[interval]["jockeying_rates"][anchor] = {
+                "server_1": requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"],
+                "server_2": requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]
+            }         
+
+            # Clear request log for next run
+            request_log.clear()
+    '''
+    ######## block that works ends here  ########
     
     waiting_times, outcomes, time_stamps = extract_waiting_times_and_outcomes(requestObj)
     
     # After all interval runs, plot the aggregated results with smoothing
-    fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
-    window_length = 9  # Must be odd and <= length of data
-    polyorder = 2
+    #fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+    #window_length = 9  # Must be odd and <= length of data
+    #polyorder = 2
 
     # Plot reneging rates
     '''
@@ -2772,7 +2920,8 @@ def main():
                 y_smooth = y
                 x_smooth = x
             axs[0].plot(x_smooth, y_smooth, label=f'{server.replace("_", " ").title()} - Interval {interval}s', linestyle=style)
-    '''
+            
+    ######## new functionality ########
     
     for i, interval in enumerate(intervals):
         for server, style in zip(["server_1", "server_2"], ["-", "--"]):
@@ -2793,6 +2942,8 @@ def main():
     axs[0].set_ylabel('Reneging Rate')
     axs[0].legend()
     
+    '''
+    
     # Plot jockeying rates
     '''
     for i, interval in enumerate(intervals):
@@ -2810,7 +2961,8 @@ def main():
                 y_smooth = y
                 x_smooth = x
             axs[1].plot(x_smooth, y_smooth, label=f'{server.replace("_", " ").title()} - Interval {interval}s', linestyle=style)
-    '''
+    
+    ######## new functionality ########
     
     for i, interval in enumerate(intervals):
         for server, style in zip(["server_1", "server_2"], ["-", "--"]):
@@ -2833,16 +2985,25 @@ def main():
     
     plt.tight_layout()
     plt.show()
+    
+    '''
         
     plot_waiting_time_cdf(waiting_times)
-    plot_boxplot_waiting_times_by_outcome(waiting_times, outcomes)
-    plot_avg_waiting_time_over_time(waiting_times, time_stamps, window=10)
+    '''
+     come back to the functions below
+    '''
+    #plot_boxplot_waiting_times_by_outcome(waiting_times, outcomes)
+    #plot_avg_waiting_time_over_time(waiting_times, time_stamps, window=10)
     
     # service rates and jockeying/reneging rates not smooth
     requestObj.plot_rates_by_intervals()
     
     requestObj.plot_reneged_waiting_times_by_interval()
     requestObj.plot_jockeyed_waiting_times_by_interval()
+    
+    plot_six_panels(results_policy, intervals, jockey_anchors)
+    
+    plot_six_panels(results_no_policy, intervals, jockey_anchors)
     
     # --- New: Plot policy and model histories ---
     print("\n[Diagnostics] Plotting policy evolution...")
@@ -2865,4 +3026,3 @@ def main():
 	 
 if __name__ == "__main__":
     main()
-    
