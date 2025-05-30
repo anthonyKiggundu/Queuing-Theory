@@ -2782,7 +2782,139 @@ def plot_six_panels(results, intervals, jockey_anchors):
 
     plt.tight_layout()
     plt.show()
-      
+ 
+
+'''
+    Simulation step (or time, or customer index):
+       This allows you to plot moving averages or windowed averages for each outcome (served, jockeyed, reneged) as the simulation progresses.
+    
+'''
+import matplotlib.pyplot as plt
+import numpy as np
+
+def plot_line_avg_waiting_time_comparison(
+    history_policy,
+    history_no_policy,
+    window=20,
+    title="Average Waiting Time per Class (Policy vs No Policy)"
+):
+    """
+    Plots a line chart comparing average waiting times for served, jockeyed, and reneged requests
+    for both policy and no-policy runs. Each line is a moving average over simulation steps.
+
+    Args:
+        history_policy (list): List of dicts (history) for policy-enabled simulation.
+        history_no_policy (list): List of dicts (history) for no-policy simulation.
+        window (int): Moving average window size.
+        title (str): Plot title.
+    """
+    def get_class_waiting(history):
+        class_waits = {'served': [], 'jockeyed': [], 'reneged': []}
+        class_indices = {'served': [], 'jockeyed': [], 'reneged': []}
+        for idx, obs in enumerate(history):
+            waited = obs.get('Waited', None)
+            cid = obs.get('customerid', '')
+            if waited is not None:
+                if '_reneged' in cid:
+                    class_waits['reneged'].append(waited)
+                    class_indices['reneged'].append(idx)
+                elif '_jockeyed' in cid:
+                    class_waits['jockeyed'].append(waited)
+                    class_indices['jockeyed'].append(idx)
+                else:
+                    class_waits['served'].append(waited)
+                    class_indices['served'].append(idx)
+        return class_indices, class_waits
+
+    indices_p, waits_p = get_class_waiting(history_policy)
+    indices_np, waits_np = get_class_waiting(history_no_policy)
+
+    color_map = {
+        'served': 'tab:green',
+        'jockeyed': 'tab:blue',
+        'reneged': 'tab:red'
+    }
+    style_map = {
+        'Policy': '-',
+        'No Policy': '--'
+    }
+
+    plt.figure(figsize=(12,7))
+    for outcome in ['served', 'jockeyed', 'reneged']:
+        # Policy
+        xs_p = np.array(indices_p[outcome])
+        ys_p = np.array(waits_p[outcome])
+        if len(xs_p) >= window:
+            ys_p_smooth = np.convolve(ys_p, np.ones(window)/window, mode='valid')
+            xs_p_smooth = xs_p[window-1:]
+            plt.plot(xs_p_smooth, ys_p_smooth,
+                     label=f"Policy: {outcome.capitalize()}",
+                     color=color_map[outcome],
+                     linestyle=style_map['Policy'])
+        elif len(xs_p) > 0:
+            plt.plot(xs_p, ys_p,
+                     label=f"Policy: {outcome.capitalize()}",
+                     color=color_map[outcome],
+                     linestyle=style_map['Policy'],
+                     marker='o')
+
+        # No Policy
+        xs_np = np.array(indices_np[outcome])
+        ys_np = np.array(waits_np[outcome])
+        if len(xs_np) >= window:
+            ys_np_smooth = np.convolve(ys_np, np.ones(window)/window, mode='valid')
+            xs_np_smooth = xs_np[window-1:]
+            plt.plot(xs_np_smooth, ys_np_smooth,
+                     label=f"No Policy: {outcome.capitalize()}",
+                     color=color_map[outcome],
+                     linestyle=style_map['No Policy'])
+        elif len(xs_np) > 0:
+            plt.plot(xs_np, ys_np,
+                     label=f"No Policy: {outcome.capitalize()}",
+                     color=color_map[outcome],
+                     linestyle=style_map['No Policy'],
+                     marker='x')
+
+    plt.xlabel('Customer Index (Simulation Step)')
+    plt.ylabel('Average Waiting Time (Moving Avg)')
+    plt.title(title)
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.show()
+       
+
+def plot_rates_vs_requests(results, intervals, anchors, metric="jockeying_rates"):
+    """
+    Plot jockeying or reneging rates vs. number of requests (simulation step), for each anchor and interval.
+    Args:
+        results: the nested data structure with rates
+        intervals: list of intervals (e.g., [3, 6, 9])
+        anchors: list of anchor names (e.g., ["steady_state_distribution", "inter_change_time"])
+        metric: either 'jockeying_rates' or 'reneging_rates'
+    """
+    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple", "tab:brown"]
+    servers = ["server_1", "server_2"]
+
+    fig, axs = plt.subplots(1, len(intervals), figsize=(6*len(intervals), 5), sharey=True)
+    if len(intervals) == 1:
+        axs = [axs]
+    for j, interval in enumerate(intervals):
+        ax = axs[j]
+        for i, anchor in enumerate(anchors):
+            for k, server in enumerate(servers):
+                y = results[interval][metric][anchor][server]
+                x = np.arange(1, len(y)+1)  # Number of requests as 1-based index
+                label = f"{anchor}, {server.replace('_', ' ').title()}"
+                ax.plot(x, y, label=label, color=colors[i*2 + k])
+        ax.set_title(f"{metric.replace('_',' ').capitalize()} (Interval: {interval}s)")
+        ax.set_xlabel("Number of Requests")
+        ax.set_ylabel(metric.replace('_',' ').capitalize())
+        ax.legend(fontsize=9)
+        ax.grid(True, linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.show()
+    
        
 ######### Globals ########
 request_log = []
@@ -2793,7 +2925,7 @@ def main():
     utility_basic = 1.0
     discount_coef = 0.1
     requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True)
-    duration = 100 
+    duration = 3 # 100 
     
     # Set intervals for dispatching queue states
     intervals = [3, 6, 9]
@@ -2819,6 +2951,10 @@ def main():
             }
             for interval in intervals
         }
+        
+        # Optionally, collect histories for the last interval/anchor run
+        all_histories = []  # To store (interval, anchor, history) for each run
+        
         for interval in intervals:
             for anchor in jockey_anchors:
                 requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=policy_enabled)
@@ -2832,46 +2968,27 @@ def main():
                     "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
                     "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
                 }
+                
+                # ===> Capture the history for this run
+                all_histories.append({
+                    "interval": interval,
+                    "anchor": anchor,
+                    "history": list(requestObj.history)  # Make a copy
+                })
+                
                 # Clear log if needed
                 if hasattr(requestObj, "request_log"):
                     requestObj.request_log.clear()
                 elif "request_log" in globals():
                     request_log.clear()
-        return results
+                    
+        return results, all_histories
     
     # With policy-driven service rates
-    results_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=True,  jockey_anchors=jockey_anchors)
+    results_policy , histories_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=True,  jockey_anchors=jockey_anchors)    
 
     # With static/non-policy-driven service rates
-    results_no_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=False,  jockey_anchors=jockey_anchors)          
-
-    '''
-    for interval in intervals:
-        print(f"Running simulation with interval: {interval} seconds")
-        #requestObj = RequestQueue(utility_basic, discount_coef)
-        requestObj.run(duration, interval)
-    
-        # Collect reneging and jockeying rates for this interval
-        reneging_rates = {
-            "server_1": requestObj.dispatch_data[interval]["server_1"]["reneging_rate"],
-            "server_2": requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]
-        }
-        jockeying_rates = {
-            "server_1": requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"],
-            "server_2": requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]
-        }
-    
-        all_reneging_rates.append(reneging_rates)
-        all_jockeying_rates.append(jockeying_rates)
-                
-
-        #total_wasted, per_outcome = requestObj.total_wasted_waiting_time(request_log)
-        #wasted_by_interval.append(total_wasted)
-        #per_outcome_by_interval.append(per_outcome)
-        
-        # Make sure request_log is cleared before each run!
-        request_log.clear()
-    '''
+    results_no_policy, histories_nopolicy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=False,  jockey_anchors=jockey_anchors)          
     
     ######## block that works starts here  ########
     '''
@@ -3005,7 +3122,16 @@ def main():
     
     plot_six_panels(results_no_policy, intervals, jockey_anchors)
     
-    plot_six_panels(results_policy, intervals, jockey_anchors)       
+    plot_six_panels(results_policy, intervals, jockey_anchors)  
+    
+    print("\n => ", histories_policy, "\n **> ", histories_nopolicy)
+    
+    
+    plot_line_avg_waiting_time_comparison(histories_policy, histories_nopolicy, window=20)     
+    
+    # plot rates for each anchor, interval, against number of requests 
+    #plot_rates_vs_requests(results, intervals=[3,6,9], anchors=["steady_state_distribution", "inter_change_time"], metric="jockeying_rates")
+    #plot_rates_vs_requests(results, intervals=[3,6,9], anchors=["steady_state_distribution", "inter_change_time"], metric="reneging_rates")
     
     # --- New: Plot policy and model histories ---
     print("\n[Diagnostics] Plotting policy evolution...")
@@ -3028,3 +3154,4 @@ def main():
 	 
 if __name__ == "__main__":
     main()
+    
