@@ -2792,7 +2792,115 @@ def plot_six_panels(results, intervals, jockey_anchors):
 import matplotlib.pyplot as plt
 import numpy as np
 
-def plot_line_avg_waiting_time_comparison(
+def plot_all_avg_waiting_time_by_anchor_interval(
+    histories_policy,
+    histories_nopolicy,
+    window=20,
+    title="Average Waiting Time per Class (Policy vs No Policy)"
+):
+    """
+    For each anchor, for each interval, plot a comparison of average waiting times for
+    served, jockeyed, and reneged requests (policy vs no-policy).
+
+    Args:
+        histories_policy: list of dicts with keys 'interval', 'anchor', 'history'
+        histories_nopolicy: same as above
+        window: moving average window
+        title: plot title prefix
+    """
+
+    # Identify all anchors and intervals present
+    anchors = sorted({h['anchor'] for h in histories_policy + histories_nopolicy})
+    intervals = sorted({h['interval'] for h in histories_policy + histories_nopolicy})
+
+    color_map = {
+        'served': 'tab:green',
+        'jockeyed': 'tab:blue',
+        'reneged': 'tab:red'
+    }
+    style_map = {
+        'Policy': '-',
+        'No Policy': '--'
+    }
+
+    def get_class_waiting(history):
+        class_waits = {'served': [], 'jockeyed': [], 'reneged': []}
+        class_indices = {'served': [], 'jockeyed': [], 'reneged': []}
+        for idx, obs in enumerate(history):
+            waited = obs.get('Waited', None)
+            cid = obs.get('customerid', '')
+            if waited is not None:
+                if '_reneged' in cid:
+                    class_waits['reneged'].append(waited)
+                    class_indices['reneged'].append(idx)
+                elif '_jockeyed' in cid:
+                    class_waits['jockeyed'].append(waited)
+                    class_indices['jockeyed'].append(idx)
+                else:
+                    class_waits['served'].append(waited)
+                    class_indices['served'].append(idx)
+        return class_indices, class_waits
+
+    for anchor in anchors:
+        fig, axs = plt.subplots(1, len(intervals), figsize=(6*len(intervals), 5), sharey=True)
+        if len(intervals) == 1:
+            axs = [axs]
+        fig.suptitle(f"{title}\nAnchor: {anchor}", fontsize=16)
+
+        for j, interval in enumerate(intervals):
+            # Get the right history for this anchor/interval
+            policy_hist = next((h['history'] for h in histories_policy if h['anchor'] == anchor and h['interval'] == interval), [])
+            nopolicy_hist = next((h['history'] for h in histories_nopolicy if h['anchor'] == anchor and h['interval'] == interval), [])
+
+            indices_p, waits_p = get_class_waiting(policy_hist)
+            indices_np, waits_np = get_class_waiting(nopolicy_hist)
+
+            ax = axs[j]
+            for outcome in ['served', 'jockeyed', 'reneged']:
+                # Policy
+                xs_p = np.array(indices_p[outcome])
+                ys_p = np.array(waits_p[outcome])
+                if len(xs_p) >= window:
+                    ys_p_smooth = np.convolve(ys_p, np.ones(window)/window, mode='valid')
+                    xs_p_smooth = xs_p[window-1:]
+                    ax.plot(xs_p_smooth, ys_p_smooth,
+                            label=f"Policy: {outcome.capitalize()}",
+                            color=color_map[outcome],
+                            linestyle=style_map['Policy'])
+                elif len(xs_p) > 0:
+                    ax.plot(xs_p, ys_p,
+                            label=f"Policy: {outcome.capitalize()}",
+                            color=color_map[outcome],
+                            linestyle=style_map['Policy'],
+                            marker='o')
+
+                # No Policy
+                xs_np = np.array(indices_np[outcome])
+                ys_np = np.array(waits_np[outcome])
+                if len(xs_np) >= window:
+                    ys_np_smooth = np.convolve(ys_np, np.ones(window)/window, mode='valid')
+                    xs_np_smooth = xs_np[window-1:]
+                    ax.plot(xs_np_smooth, ys_np_smooth,
+                            label=f"No Policy: {outcome.capitalize()}",
+                            color=color_map[outcome],
+                            linestyle=style_map['No Policy'])
+                elif len(xs_np) > 0:
+                    ax.plot(xs_np, ys_np,
+                            label=f"No Policy: {outcome.capitalize()}",
+                            color=color_map[outcome],
+                            linestyle=style_map['No Policy'],
+                            marker='x')
+
+            ax.set_xlabel('Customer Index (Simulation Step)')
+            if j == 0:
+                ax.set_ylabel('Avg Waiting Time (Moving Avg)')
+            ax.set_title(f"Interval: {interval}")
+            ax.grid(True, linestyle='--', alpha=0.5)
+            ax.legend(fontsize=8)
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.show()
+
+def plot_line_avg_waiting_time_comparison_empty(
     history_policy,
     history_no_policy,
     window=20,
@@ -2925,10 +3033,10 @@ def main():
     utility_basic = 1.0
     discount_coef = 0.1
     requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True)
-    duration = 3 # 100 
+    duration = 100 # 100 
     
     # Set intervals for dispatching queue states
-    intervals = [3, 6, 9]
+    intervals = [3, 5, 7, 9]
     wasted_by_interval = []
     per_outcome_by_interval = []
     
@@ -3107,7 +3215,7 @@ def main():
     
     '''
         
-    plot_waiting_time_cdf(waiting_times)
+    # plot_waiting_time_cdf(waiting_times)
     '''
      come back to the functions below
     '''
@@ -3124,10 +3232,12 @@ def main():
     
     plot_six_panels(results_policy, intervals, jockey_anchors)  
     
-    print("\n => ", histories_policy, "\n **> ", histories_nopolicy)
+    #print("\n => ", histories_policy, "\n **> ", histories_nopolicy)
     
+    # Choose a specific simulation (e.g., interval=3, anchor='steady_state_distribution')
+    # histories_policy and histories_nopolicy are lists of dicts, each with 'interval', 'anchor', 'history'
     
-    plot_line_avg_waiting_time_comparison(histories_policy, histories_nopolicy, window=20)     
+    plot_all_avg_waiting_time_by_anchor_interval(histories_policy, histories_nopolicy, window=20)    
     
     # plot rates for each anchor, interval, against number of requests 
     #plot_rates_vs_requests(results, intervals=[3,6,9], anchors=["steady_state_distribution", "inter_change_time"], metric="jockeying_rates")
@@ -3154,4 +3264,3 @@ def main():
 	 
 if __name__ == "__main__":
     main()
-    
