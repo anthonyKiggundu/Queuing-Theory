@@ -51,7 +51,9 @@ class PredictiveModel:
         
 
     def fit(self):
-        if len(self.X) > 15:
+        #if len(self.X) > 15:
+        # Only fit if enough samples and at least two classes present
+        if len(self.X) > 15 and len(set(self.y)) >= 2:
             X_scaled = self.scaler.fit_transform(np.array(self.X))
             self.model.fit(X_scaled, np.array(self.y))
             self.is_fitted = True
@@ -247,7 +249,7 @@ class Request:
 
     def __init__(self,time_entrance,pos_in_queue=0,utility_basic=0.0,service_time=0.0,discount_coef=0.0, outage_risk=0.1, # =timer()
                  customerid="", learning_mode='online',min_amount_observations=1,time_res=1.0,markov_model=msm.StateMachine(orig=None),
-                 exp_time_service_end=0.0, serv_rate=1.0, dist_local_delay=stats.expon,para_local_delay=[1.0,2.0,10.0], batchid=0 ):  #markov_model=a2c.A2C, 
+                 exp_time_service_end=0.0, serv_rate=1.0, dist_local_delay=stats.expon,para_local_delay=[0.0,0.05,1.0], batchid=0 ):  #markov_model=a2c.A2C, 
         
         # self.id=id #uuid.uuid1()
         self.customerid = "Batch"+str(batchid)+"_Customer_"+str(pos_in_queue+1)
@@ -290,7 +292,7 @@ class Request:
             self.serv_rate = queue_srv_rates.get("2") # Server2
 
         self.dist_local_delay=dist_local_delay
-        self.loc_local_delay=np.random.uniform(low=float(para_local_delay[0]),high=(para_local_delay[1]))
+        self.loc_local_delay=np.random.uniform(low=float(para_local_delay[0]),high=(para_local_delay[1])) # 0 and 1
         self.scale_local_delay=float(para_local_delay[0]) #2
         self.max_local_delay=self.dist_local_delay.ppf(self.certainty,loc=self.loc_local_delay,scale=self.scale_local_delay)
         self.max_cloud_delay=float(queueObj.get_arrivals_rates()/self.serv_rate) # np.inf
@@ -538,7 +540,7 @@ class RequestQueue:
     def __init__(self, utility_basic, discount_coef, markov_model=msm.StateMachine(orig=None),
                  time=0.0, outage_risk=0.1, customerid="",learning_mode='online', decision_rule='risk_control',
                  alt_option='fixed_revenue', min_amount_observations=1, dist_local_delay=stats.expon, exp_time_service_end=0.0,
-                 para_local_delay=[1.0,2.0,10.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, 
+                 para_local_delay=[0.01,0.1,1.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, 
                  batchid=np.int16, policy_enabled=True):
                  
         
@@ -2025,8 +2027,76 @@ class RequestQueue:
             per_outcome[outcome] += exit_time - req['arrival_time']
         return total, per_outcome
     
-        
+    
+    
     def makeRenegingDecision(self, req, queueid):
+		# self.dist_local_delay.ppf(self.certainty,loc=self.loc_local_delay,scale=self.scale_local_delay) # 
+        decision=False 
+        curr_queue_state = self.get_queue_state(queueid)                    
+        queue_interchange_time = curr_queue_state["sample_interchange_time"]
+        #T_local = self.dist_local_delay.rvs(loc=self.loc_local_delay, scale=self.scale_local_delay)
+                
+        if queueid == "1":
+            serv_rate = self.dict_servers_info["1"]
+            queue =  self.dict_queues_obj["1"]   
+            alt_queue_id = "2"   
+            curr_arriv_rate = self.objQueues.get_arrivals_rates()
+            queue_intensity = curr_arriv_rate/ serv_rate 
+            alt_queue_state = self.get_queue_state(alt_queue_id)
+            alt_interchange_time = alt_queue_state["sample_interchange_time"] 
+            T_local = stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=0.75/req.pos_in_queue)
+            #self. max_cloud_delay = self.calculate_max_cloud_delay(req.pos_in_queue, queue_intensity, req)  
+            #self.max_cloud_delay=stats.erlang.ppf(self.certainty, loc=0, scale=curr_arriv_rate, a=req.pos_in_queue)
+            
+            # use Little's law to compute expected wait in alternative queue
+            expected_wait_in_alt_queue = float(len(self.dict_queues_obj["2"])/curr_arriv_rate)
+            T_queue = queue_interchange_time + expected_wait_in_alt_queue
+        else:
+            serv_rate = self.dict_servers_info["2"] 
+            queue =  self.dict_queues_obj["2"]
+            alt_queue_id = "1"
+            curr_arriv_rate = self.objQueues.get_arrivals_rates()
+            queue_intensity = curr_arriv_rate/ serv_rate    
+            alt_queue_state = self.get_queue_state(alt_queue_id)  
+            alt_interchange_time = alt_queue_state["sample_interchange_time"]  
+            T_local = stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=0.75/req.pos_in_queue)    
+            #self. max_cloud_delay = self.calculate_max_cloud_delay(len(queue), queue_intensity, req)
+            #self.max_cloud_delay=stats.erlang.ppf(self.certainty, loc=0, scale=curr_arriv_rate, a=req.pos_in_queue)
+            
+            # use Little's law to compute expected wait in alternative queue
+            expected_wait_in_alt_queue = float(len(self.dict_queues_obj["1"])/curr_arriv_rate)
+            T_queue = queue_interchange_time + expected_wait_in_alt_queue
+        
+        if self.learning_mode=='transparent':
+            self.max_cloud_delay=stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=1/serv_rate) 
+        else:                           
+                                  
+            # print("\n Times => ", T_local, " = ", T_queue)
+            # Choose the best option
+            if T_local < T_queue:
+            # local_processing_time = self.dist_local_delay.rvs(loc=self.loc_local_delay, scale=self.scale_local_delay) # => too strict rule    
+            # use a quantile below        
+            #local_processing_time = self.dist_local_delay.ppf(0.9, loc=self.loc_local_delay, scale=self.scale_local_delay)
+                
+            # Decision: renege to local if local is (much) faster than expected queue interchange time
+            # local delay is constant, no waiting is expected
+            # if self.loc_local_delay < queue_interchange_time:
+                self.loc_local_delay = T_local
+                decision = True
+                curr_pose = self.get_request_position(queueid, req.customerid)
+        
+                if curr_pose is None: #  if curr_pose >= len(self.queue): # 
+                    print(f"Request ID {req.customerid} not found in queue {queueid}. Continuing with processing...")
+                    return 
+                else:               
+                    self.reqRenege( req, queueid, curr_pose, serv_rate, queue_intensity, T_local, req.customerid, req.service_time, decision, self.queue)
+            else:
+                decision = False
+            
+        return decision
+    
+      
+    def makeRenegingDecision_original(self, req, queueid):
         # print("   User making reneging decision...")
         decision=False  
         
@@ -2735,7 +2805,8 @@ def in_old_function_main():
 
 
 def plot_six_panels(results, intervals, jockey_anchors):
-    fig, axs = plt.subplots(2, 3, figsize=(18, 8), sharex=False)
+    #fig, axs = plt.subplots(2, 3, figsize=(18, 8), sharex=False)
+    fig, axs = plt.subplots(2, len(intervals), figsize=(6*len(intervals), 8), sharex=False)
     colors = {
         "steady_state_distribution": "blue",
         "inter_change_time": "green"
@@ -3219,7 +3290,7 @@ def main():
     '''
      come back to the functions below
     '''
-    #plot_boxplot_waiting_times_by_outcome(waiting_times, outcomes)
+    plot_boxplot_waiting_times_by_outcome(waiting_times, outcomes)
     #plot_avg_waiting_time_over_time(waiting_times, time_stamps, window=10)
     
     # service rates and jockeying/reneging rates not smooth
