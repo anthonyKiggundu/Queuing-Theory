@@ -2361,11 +2361,11 @@ class RequestQueue:
             #print("\n DOMINANCE ", q1_dominates ,"  = = = " , q2_dominates)
     
             if q1_dominates and not q2_dominates:
-                print("\n **** SS 1 **** ", q1_dominates, self.srvrates_1)
+                #print("\n **** SS 1 **** ", q1_dominates, self.srvrates_1)
                 best_queue = "1"
                 best_cdf = cdf1
             elif q2_dominates and not q1_dominates:
-                print("\n **** SS 2 **** ", q2_dominates, self.srvrates_2)
+                #print("\n **** SS 2 **** ", q2_dominates, self.srvrates_2)
                 best_queue = "2"
                 best_cdf = cdf2
             else:
@@ -2381,7 +2381,7 @@ class RequestQueue:
                 #    best_queue = "2"
                 #   best_cdf = cdf2
                     
-            print("\n BEST => ", best_queue)   
+            # print("\n BEST => ", best_queue)   
             # 4. Compare best queue's CDF to local's step‐CDF
             #    CDF_local(t) = 0 for t < T_local, 1 for t >= T_local.
             #    For local to FSD-dominate best queue, we need
@@ -2389,32 +2389,38 @@ class RequestQueue:
             #    That forces best_cdf(t) = 0 for all t < T_local, and best_cdf(t) <= 1 for t >= T_local.
             #    In practice, check best_cdf at t just below T_local.
             if "0" in best_queue:  
-                print("\n **** SS 0 **** ", T_local, " **** ", best_cdf)              
+                              
                 # Get the relevant queue
                 queue = self.dict_queues_obj[queueid]
     
                 # Find the request's position in the queue (0-based)
-                for pos, req in enumerate(queue):
-                    if req.customerid == customer_id:
-						
-                        break
-                    else:
-                        # Request not found
-                        return False
+                found = False
+                for pos, req_in_queue in enumerate(queue):
+                    #print("\n **** SS 0 **** ", req_in_queue.customerid, " **** ",customer_id )
+                    if customer_id in req_in_queue.customerid:
+                    # Get the current service rate for the queue
+                        if "1" in queueid:
+                            serv_rate = self.srvrates_1  # self.dict_servers_info["1"]
+                        else:
+                            serv_rate = self.srvrates_2  # self.dict_servers_info["2"]
 
-                # Get the current service rate for the queue
-                if "1" in queueid:
-                    serv_rate = self.srvrates_1 # self.dict_servers_info["1"]
-                else:
-                    serv_rate = self.srvrates_1 # self.dict_servers_info["2"]
+                        # Compute remaining waiting time (number of requests ahead * average service time)
+                        # For M/M/1, expected remaining time = position * 1/service_rate
+                        remaining_wait_time = pos * (1.0 / serv_rate) if serv_rate > 0 else 1e4  # avoid zero division
 
-                # Compute remaining waiting time (number of requests ahead * average service time)
-                # For M/M/1, expected remaining time = position * 1/service_rate
-                remaining_wait_time = pos * (1.0 / serv_rate) if serv_rate > 0 else 1e4  # avoid zero division
+                        # If remaining wait exceeds T_local, renege
+                        renege = (remaining_wait_time > T_local)
+                        #print("\n I took the remaining time -> ", renege)
+                        if renege:
+                            decision = True
+                            self.reqRenege(req_in_queue, queueid, pos, serv_rate, queue_intensity, T_local, req_in_queue.customerid, req_in_queue.service_time, decision, queue)
+                            found = True
+                            break
 
-                # If remaining wait exceeds T_local, renege
-                renege = (remaining_wait_time > T_local)
-                print("\n I took the remaining time -> ", renege)
+                if not found:
+                    print(f"Request ID {customer_id} not found in queue {queueid}. Continuing with processing...")
+                    return False
+
                 # If neither queue strictly dominates, we compare both to local.
                 # We must have both best options < local everywhere → renege.
                 # But since neither dominates, we just check both tails at T_local.
@@ -2465,14 +2471,14 @@ class RequestQueue:
                 # return renege
                 
                
-                if renege:
-                    decision = True
-                    self.reqRenege( req, queueid, curr_pose, serv_rate, queue_intensity, T_local, req.customerid, req.service_time, decision, queue)
+                #if renege:
+                #    decision = True
+                #    self.reqRenege( req, queueid, curr_pose, serv_rate, queue_intensity, T_local, req.customerid, req.service_time, decision, queue)
             
             # For high throughput as objective, a low interchange_time shows a better state, if stability is the objective, a high value is better                       
         elif anchor == "inter_change_time":
 			
-            print("\n ====  ICD ==== ")
+            #print("\n ====  ICD ==== ")
             # Use interchange time
             # Example parameters
             #lambda_ = 2.0     # arrival rate
@@ -2483,14 +2489,35 @@ class RequestQueue:
             #time_between_changes = compute_expected_time_between_changes(lambda_, mu)
             lambda1, lambda2 = arrival_rates_divisor(curr_arriv_rate, mu1, mu2)
             
-            renege, t_change_1, t_change_2 = should_renege_using_tchange(lambda1, mu1, lambda2, mu2, T_local, N=200)
+            renege, t_change_1 , t_change_2 = should_renege_using_tchange(lambda1, mu1, lambda2, mu2, T_local, N=len(queue))
 
             #print(f"Rate of queue length change: {rate:.4f} events/sec")
-            #print(f"Expected time between changes: {time_between_changes:.4f} sec")
+            print(f"Expected time between changes in Queue 1: {t_change_1:.4f} sec and Expected time between changes in Queue 2: {t_change_2:.4f} sec")
+            found = False
+            for pos, req_in_queue in enumerate(queue):
+                #print("\n **** SS 0 **** ", req_in_queue.customerid, " **** ",customer_id )
+                if customer_id in req_in_queue.customerid:
+                # Get the current service rate for the queue
+                    if "1" in queueid:
+                        serv_rate = self.srvrates_1  # self.dict_servers_info["1"]
+                        remaining_wait_time = pos * t_change_1 
+                    else:
+                        serv_rate = self.srvrates_2  # self.dict_servers_info["2"]
+                        remaining_wait_time = pos * t_change_2 
+                    # Compute remaining waiting time (number of requests ahead * average service time)
+                    # For M/M/1, expected remaining time = position * 1/service_rate
+                    # remaining_wait_time = pos * (1.0 / serv_rate) if serv_rate > 0 else 1e4  # avoid zero division
+
+                    # If remaining wait exceeds T_local, renege
+                    renege = (remaining_wait_time > T_local)
             
-            if renege: #alt_queue_state["sample_interchange_time"] > curr_queue_state["sample_interchange_time"]:
-                decision = True 
-                self.reqRenege( req, queueid, curr_pose, serv_rate, queue_intensity, T_local, req.customerid, req.service_time, decision, queue)
+                    if renege: #alt_queue_state["sample_interchange_time"] > curr_queue_state["sample_interchange_time"]:
+                        decision = True 
+                        self.reqRenege( req, queueid, pos, serv_rate, queue_intensity, T_local, req.customerid, req.service_time, decision, queue)
+                
+            if not found:
+                    print(f"Request ID {customer_id} not found in queue {queueid}. Continuing with processing...")
+                    return False
 
       
     def makeRenegingDecision_original(self, req, queueid):
