@@ -824,10 +824,12 @@ class RequestQueue:
             reneging_rate,
             jockeying_rate,
             sample_interchange_time,
-            steady_state_distribution["max"],
-            steady_state_distribution["min"],
-            steady_state_distribution["mean"],
+            steady_state_distribution,
         ]
+        
+        #["max"],
+        #steady_state_distribution["min"],
+        #steady_state_distribution["mean"],
 
     # After each dispatch or user action, record observation and update model/policy
     def record_user_reaction(self, queue_id, action_label):
@@ -1214,11 +1216,11 @@ class RequestQueue:
             
             if "1" in alt_queue_id: # == "1":
                 self.makeJockeyingDecision(req, alt_queue_id, curr_queue_id, req.customerid, serv_rate)
-                self.makeRenegingDecision(req, alt_queue_id)
+                self.makeRenegingDecision(req, alt_queue_id, req.customerid)
                 alt_queue_id = str(alt_queue_id) # "Server_"+
             else:
                 self.makeJockeyingDecision(req, alt_queue_id, curr_queue_id, req.customerid, serv_rate)
-                self.makeRenegingDecision(req, alt_queue_id)
+                self.makeRenegingDecision(req, alt_queue_id, req.customerid)
                 alt_queue_id = str(alt_queue_id) # "Server_"+
         
         # Append rates to interval-specific dispatch data
@@ -1677,17 +1679,19 @@ class RequestQueue:
                        
     def get_queue_state(self, queueid):
 		
-	    serv_rates = [self.srvrates_1, self.srvrates_1]
-	    b = 0.4
-	    a = 0.2       
+        serv_rates = [self.srvrates_1, self.srvrates_2]
+        b = 0.4
+        a = 0.2       
 	    
-	    trans_matrix = np.array([
+        trans_matrix = np.array([
             [0.0, a],   # row for state 0 (fill Q[0,0] next)
             [b,  0.0]   # row for state 1 (fill Q[1,1] next)
         ])
         
         for i in range(trans_matrix.shape[0]):
             trans_matrix[i,i] = -np.sum(trans_matrix[i, :]) + trans_matrix[i,i]
+            
+        # print("\n ***> ", self.srvrates_1, self.srvrates_2)
         
         if "1" in queueid:		
             #queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv1    
@@ -1696,13 +1700,13 @@ class RequestQueue:
             reneging_rate = self.compute_reneging_rate(curr_queue)
             jockeying_rate = self.compute_jockeying_rate(curr_queue)
             # Instantiate MarkovQueueModel
-            print("\n --> ", self.srvrates_1, self.srvrates_1)
+            
             markov_model = MarkovQueueModel(self.arr_rate, self.srvrates_1, max_states=len(customers_in_queue)) # 1000)
-            servmarkov_model = MarkovModulatedServiceModel(serv_rates=serv_rates, trans_matrix=trans_matrix)
+            servmarkov_model = MarkovModulatedServiceModel(serv_rates, trans_matrix)
             #long_run_change_rate = markov_model.long_run_change_rate()
-            sample_interchange_time = markov_model.compute_expected_time_between_changes(self.arr_rate, self.srvrates_1, max_states=len(customers_in_queue)) # 1000)
+            sample_interchange_time = markov_model.compute_expected_time_between_changes(self.arr_rate, self.srvrates_1, N=len(customers_in_queue)) # 1000)
             #long_run_change_rate = markov_model.long_run, self.srvrates_1, len(customers_in_queue)) # sample_interchange_time() # _steady_state_distribution()
-            arr_rate1, arr_rate2 = servmarkov_model.arrival_rates_divisor(arrival_rate, self.srvrates_1, self.srvrates_2) #_steady_state_distribution()
+            arr_rate1, arr_rate2 = servmarkov_model.arrival_rates_divisor(self.arr_rate, self.srvrates_1, self.srvrates_2) #_steady_state_distribution()
             steady_state_distribution = servmarkov_model.best_queue_delay(arr_rate1, self.srvrates_1, arr_rate2, self.srvrates_2)
             #steady_state_distribution_list = steady_state_distribution.tolist()  # Convert to list                    
       
@@ -1716,10 +1720,10 @@ class RequestQueue:
             # Instantiate MarkovQueueModel
             #print("\n **> ", self.arr_rate, self.srvrates_2)
             markov_model = MarkovQueueModel(self.arr_rate, self.srvrates_2, max_states=len(customers_in_queue)) # 1000)
-            servmarkov_model = MarkovModulatedServiceModel(serv_rates=serv_rates, trans_matrix=trans_matrix)
+            servmarkov_model = MarkovModulatedServiceModel(serv_rates, trans_matrix)
             #long_run_change_rate = markov_model.long_run_change_rate()
-            sample_interchange_time = markov_model.compute_expected_time_between_changes(self.arr_rate, self.srvrates_1, max_states=len(customers_in_queue)) # 1000)
-            arr_rate1, arr_rate2 = servmarkov_model.arrival_rates_divisor(arrival_rate, self.srvrates_1, self.srvrates_2) #_steady_state_distribution()
+            sample_interchange_time = markov_model.compute_expected_time_between_changes(self.arr_rate, self.srvrates_1, N=len(customers_in_queue)) # 1000)
+            arr_rate1, arr_rate2 = servmarkov_model.arrival_rates_divisor(self.arr_rate, self.srvrates_1, self.srvrates_2) #_steady_state_distribution()
             steady_state_distribution = servmarkov_model.best_queue_delay(arr_rate1, self.srvrates_1, arr_rate2, self.srvrates_2)
             #long_run_change_rate = markov_model.long_run, self.srvrates_2, len(customers_in_queue))
             #steady_state_distribution = markov_model._steady_state_distribution()
@@ -2118,7 +2122,7 @@ class RequestQueue:
         return decision
     
     
-    def makeRenegingDecision(self, req, queueid, t_max=10.0, num_points=1000):	 #  T_local,	
+    def makeRenegingDecision(self, req, queueid, customer_id, t_max=10.0, num_points=1000):	 #  T_local,	
 
         def exp_cdf(mu, t):
             """
@@ -2200,9 +2204,9 @@ class RequestQueue:
                         new_accumulator (int): Updated rem_accumulator.
             """
             if mu1 < mu2:
-                new_accumulator = mu1
+                rem_accumulator = mu1
             else:
-                new_accumulator = mu2
+                rem_accumulator = mu2
 				
             remainder = arrival_rate % 2
             half = arrival_rate // 2
@@ -2291,43 +2295,45 @@ class RequestQueue:
         c = 2
         
         if queueid == "1":
-            serv_rate = self.dict_servers_info["1"]
+            serv_rate = self.srvrates_1 # self.dict_servers_info["1"]
             queue =  self.dict_queues_obj["1"]   
             alt_queue_id = "2"   
             curr_arriv_rate = self.objQueues.get_arrivals_rates()
             queue_intensity = curr_arriv_rate/ serv_rate 
             alt_queue_state = self.get_queue_state(alt_queue_id)
             alt_interchange_time = alt_queue_state["sample_interchange_time"] 
-            T_local = stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=0.75/req.pos_in_queue) # queue_interchange_time
+            # T_local = stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=0.75/req.pos_in_queue) # queue_interchange_time
             #self. max_cloud_delay = self.calculate_max_cloud_delay(req.pos_in_queue, queue_intensity, req)  
             #self.max_cloud_delay=stats.erlang.ppf(self.certainty, loc=0, scale=curr_arriv_rate, a=req.pos_in_queue)
+            T_local = self.generateLocalCompUtility(req)
             
             # use Little's law to compute expected wait in alternative queue
             # instead of Little's Law, use the expected waiting time in steady state using (1 - queue_intensity e^{-(serv_rate - curr_arriv_rate)})
             expected_wait_in_alt_queue = 1 - queue_intensity * math.exp(-(serv_rate - curr_arriv_rate)) # float(len(self.dict_queues_obj["2"])/curr_arriv_rate)
             #T_queue = expected_wait_in_alt_queue # queue_interchange_time + expected_wait_in_alt_queue
         else:
-            serv_rate = self.dict_servers_info["2"] 
+            serv_rate = self.srvrates_2 # self.dict_servers_info["2"] 
             queue =  self.dict_queues_obj["2"]
             alt_queue_id = "1"
             curr_arriv_rate = self.objQueues.get_arrivals_rates()
             queue_intensity = curr_arriv_rate/ serv_rate    
             alt_queue_state = self.get_queue_state(alt_queue_id)  
             alt_interchange_time = alt_queue_state["sample_interchange_time"]  
-            T_local = stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=0.75/req.pos_in_queue)                                                           
+            # T_local = stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=0.75/req.pos_in_queue)  
+            T_local = self.generateLocalCompUtility(req)                                                         
         
         anchor = getattr(self, "jockey_anchor", "steady_state_distribution")
+        mu1 = self.srvrates_1 # self.dict_servers_info["1"]
+        mu2 = self.srvrates_2 # self.dict_servers_info["2"]
         
         if anchor == "steady_state_distribution":
+            
             # Use steady-state distribution comparison (as currently implemented)
             # queue_states_compared = mmc_wait_cdf_and_tail(curr_arriv_rate, serv_rate, c, t): #self.compare_queues(alt_steady_state, curr_steady_state, K=1)
             #if queue_states_compared['first_order_dominance']:
             # If best_cdf[idx_T] <= eps, that means best_cdf(t)=0 (within tol) for all t<T_local
             # so local CDF(t)=0 >= 0 = best_cdf(t) for t<T_local, and at t>=T_local local CDF=1 >= best_cdf(t).
-            # Therefore local FSD-dominates the best queue.
-                
-            mu1 = self.dict_servers_info["1"]
-            mu2 = self.dict_servers_info["2"]
+            # Therefore local FSD-dominates the best queue.                          
          
             # 1) Build time grid
             t_max = 10
@@ -2336,50 +2342,137 @@ class RequestQueue:
     
             # 2) Compute CDFs for both queues on t_vals
             lambda1, lambda2 = arrival_rates_divisor(curr_arriv_rate, mu1, mu2)
-            cdf1 = mmc_wait_cdf_and_tail(lambda1, mu1, c, T_local) # 1 - np.exp(-mu1 * t_vals)  # Exp(mu1)
-            cdf2 = mmc_wait_cdf_and_tail(lambda2, mu2, c, T_local) # 1 - np.exp(-mu2 * t_vals)  # Exp(mu2)
+            # 2. Compute CDFs for each queue at all t
+            cdf1 = np.zeros_like(t_vals)
+            cdf2 = np.zeros_like(t_vals)
+            
+            cdf1 = 1 - np.exp(-self.srvrates_1 * t_vals)  
+            cdf2 = 1 - np.exp(-self.srvrates_2 * t_vals) 
+            #for idx, t in enumerate(t_vals):
+            #    cdf1,_ = 1 - np.exp(-mu1 * t_vals) # mmc_wait_cdf_and_tail(lambda1, mu1, c, t) #[0] # return only the cdf as a float from the turple
+            #    cdf2,_ = 1 - np.exp(-mu2 * t_vals) # mmc_wait_cdf_and_tail(lambda2, mu2, c, t) #[0] # 1 - np.exp(-mu2 * t_vals)  # Exp(mu2)
     
-            eps = 1e-12  # small tolerance
+            eps = 1e-6  # small tolerance
     
             # 3) Check FSD: Q1 ≥_FSD Q2 if CDF1(t) >= CDF2(t) for all t
-            q1_dominates = np.all(cdf1 + eps >= cdf2)
-            q2_dominates = np.all(cdf2 + eps >= cdf1)
+            q1_dominates = np.all(cdf1 > cdf2) # + eps 
+            q2_dominates = np.all(cdf2 > cdf1) #  + eps
+            
+            #print("\n DOMINANCE ", q1_dominates ,"  = = = " , q2_dominates)
     
             if q1_dominates and not q2_dominates:
-                best_q = 1
+                print("\n **** SS 1 **** ", q1_dominates, self.srvrates_1)
+                best_queue = "1"
                 best_cdf = cdf1
             elif q2_dominates and not q1_dominates:
-                best_q = 2
+                print("\n **** SS 2 **** ", q2_dominates, self.srvrates_2)
+                best_queue = "2"
                 best_cdf = cdf2
             else:
-                best_q = 0
+                best_queue = "0"
+                best_cdf = T_local
                 # Tie‐break by comparing mean waiting times: mean(Exp(mu)) = 1/mu
-                mean1 = 1.0 / mu1
-                mean2 = 1.0 / mu2
-                if mean1 < mean2:
-                    best_q = 1
-                    best_cdf = cdf1
-                else:
-                    best_q = 2
-                    best_cdf = cdf2
+                #mean1 = 1.0 / mu1
+                #mean2 = 1.0 / mu2
+                #if mean1 < mean2:
+                #    best_queue = "1"
+                #    best_cdf = cdf1
+                #else:
+                #    best_queue = "2"
+                #   best_cdf = cdf2
+                    
+            print("\n BEST => ", best_queue)   
+            # 4. Compare best queue's CDF to local's step‐CDF
+            #    CDF_local(t) = 0 for t < T_local, 1 for t >= T_local.
+            #    For local to FSD-dominate best queue, we need
+            #      CDF_local(t) >= best_cdf(t) for all t in [0, t_max].
+            #    That forces best_cdf(t) = 0 for all t < T_local, and best_cdf(t) <= 1 for t >= T_local.
+            #    In practice, check best_cdf at t just below T_local.
+            if "0" in best_queue:  
+                print("\n **** SS 0 **** ", T_local, " **** ", best_cdf)              
+                # Get the relevant queue
+                queue = self.dict_queues_obj[queueid]
     
-            # 4) Compare the best queue's CDF to the local CDF:
-            #    Local CDF(t) = 0 for t < T_local, 1 for t >= T_local.
-            #    For local to FSD‐dominate the queue, we need best_cdf(t) = 0 for all t < T_local.
-            #    Numerically: check best_cdf at the largest t < T_local.
-            idx_T = np.searchsorted(t_vals, T_local, side='right') - 1
+                # Find the request's position in the queue (0-based)
+                for pos, req in enumerate(queue):
+                    if req.customerid == customer_id:
+						
+                        break
+                    else:
+                        # Request not found
+                        return False
+
+                # Get the current service rate for the queue
+                if "1" in queueid:
+                    serv_rate = self.srvrates_1 # self.dict_servers_info["1"]
+                else:
+                    serv_rate = self.srvrates_1 # self.dict_servers_info["2"]
+
+                # Compute remaining waiting time (number of requests ahead * average service time)
+                # For M/M/1, expected remaining time = position * 1/service_rate
+                remaining_wait_time = pos * (1.0 / serv_rate) if serv_rate > 0 else 1e4  # avoid zero division
+
+                # If remaining wait exceeds T_local, renege
+                renege = (remaining_wait_time > T_local)
+                print("\n I took the remaining time -> ", renege)
+                # If neither queue strictly dominates, we compare both to local.
+                # We must have both best options < local everywhere → renege.
+                # But since neither dominates, we just check both tails at T_local.
+                #_, tail1 = mmc_wait_cdf_and_tail(lambda1, mu1, c, T_local)
+                #_, tail2 = mmc_wait_cdf_and_tail(lambda2, mu2, c, T_local)
+                # If both P(wait > T_local) > 0 => both CDFs at T_local < 1 => local FSD dominates both.
+                #renege = (tail1 > T_local)  and (tail2 > T_local)  #(tail1 > eps) and (tail2 > eps)
+                #print("\n ***** Renege to local? ", renege)
+            # else:
+                #idx_T = np.searchsorted(t_vals, T_local, side='right') - 1
             
-            if idx_T < 0:
-                idx_T = 0
-            
-            renege = (best_cdf[idx_T] <= eps)
+                #if idx_T < 0:
+                #    idx_T = 0
                 
-            if renege:
-                decision = True
-                self.reqRenege( req, queueid, curr_pose, serv_rate, queue_intensity, T_local, req.customerid, req.service_time, decision, queue)
+                #if isinstance(best_cdf, float):
+                #    renege = (best_cdf <= eps)
+                #else:
+                #    renege = (best_cdf[idx_T] <= eps)
+                
+                #"""
+                #Returns True if the remaining waiting time for the request exceeds T_local,
+                #indicating the request should renege to local processing.
+                #"""
+                # Get the relevant queue
+                #queue = self.dict_queues_obj[queueid]
+    
+                # Find the request's position in the queue (0-based)
+                #for pos, req in enumerate(queue):
+                #    if req.customerid == customer_id:
+                #        break
+                #    else:
+                #        # Request not found
+                #        return False
+
+                # Get the current service rate for the queue
+                #if "1" in queueid:
+                #    serv_rate = self.dict_servers_info["1"]
+                #else:
+                #    serv_rate = self.dict_servers_info["2"]
+
+                # Compute remaining waiting time (number of requests ahead * average service time)
+                # For M/M/1, expected remaining time = position * 1/service_rate
+                #remaining_wait_time = pos * (1.0 / serv_rate) if serv_rate > 0 else 1e4  # avoid zero division
+
+                # If remaining wait exceeds T_local, renege
+                #renege = (remaining_wait_time > T_local)
+                #print("\n I took the remaining time -> ", renege)
+                # return renege
+                
+               
+                if renege:
+                    decision = True
+                    self.reqRenege( req, queueid, curr_pose, serv_rate, queue_intensity, T_local, req.customerid, req.service_time, decision, queue)
             
             # For high throughput as objective, a low interchange_time shows a better state, if stability is the objective, a high value is better                       
         elif anchor == "inter_change_time":
+			
+            print("\n ====  ICD ==== ")
             # Use interchange time
             # Example parameters
             #lambda_ = 2.0     # arrival rate
@@ -2717,9 +2810,9 @@ class RequestQueue:
                     new_accumulator (int): Updated rem_accumulator.
             """
             if mu1 < mu2:
-                new_accumulator = mu1
+                rem_accumulator = mu1
             else:
-                new_accumulator = mu2
+                rem_accumulator = mu2
 				
             remainder = arrival_rate % 2
             half = arrival_rate // 2
@@ -2808,7 +2901,7 @@ class RequestQueue:
             if anchor == "steady_state_distribution":
                 # Use steady-state distribution comparison (as currently implemented)
                 #queue_states_compared = mmc_wait_cdf_and_tail(curr_arriv_rate, serv_rate, c, t): #self.compare_queues(alt_steady_state, curr_steady_state, K=1)
-                arrival_rates_divisor(curr_arriv_rate, self.dict_servers_info["1"], self.dict_servers_info["2"])
+                lambda1, lambda2 = arrival_rates_divisor(curr_arriv_rate, self.dict_servers_info["1"], self.dict_servers_info["2"])
                 jockey_flag = should_jockey_flag(curr_queue_id, lambda1, self.dict_servers_info["1"], lambda2, self.dict_servers_info["2"])
                 if jockey_flag: #queue_states_compared['first_order_dominance']:
                     decision = True
@@ -2941,26 +3034,44 @@ class MarkovQueueModel:
         return np.random.exponential(1.0 / rate)
                     
 
-    def compute_steady_state_probs(rho, N=100):
+    def compute_steady_state_probs(self, rho, N=100):
         """Compute steady-state probabilities for M/M/1 with truncation at N."""
         return np.array([(1 - rho) * rho**n for n in range(N + 1)])
 
-    def compute_rate_of_change(lambda_, mu, N=100):
+    def compute_rate_of_change(self, lambda_, mu, N=100):
         """Compute average rate at which queue length changes."""
+        if mu == 0:
+            # No service possible: no queue-length decrease, only arrivals
+            return 0.0  # or handle as appropriate for your model
+            
         rho = lambda_ / mu
-        pi = compute_steady_state_probs(rho, N)
-    
-        # Compute rate of change: λ for all n, and μ only if n > 0
+        pi = self.compute_steady_state_probs(rho, N)
         R_change = sum(pi[n] * (lambda_ + mu if n > 0 else lambda_) for n in range(N + 1))
         return R_change
+    
+        #rho = lambda_ / mu
+        #pi = self.compute_steady_state_probs(rho, N)
+    
+        # Compute rate of change: λ for all n, and μ only if n > 0
+        #R_change = sum(pi[n] * (lambda_ + mu if n > 0 else lambda_) for n in range(N + 1))
+        #return R_change
 
-    def compute_expected_time_between_changes(lambda_, mu, N=100):
+    def compute_expected_time_between_changes(self, lambda_, mu, N=100):
+		
         """Compute expected time between changes in queue length."""
-        
-        R_change = compute_rate_of_change(lambda_, mu, N)
+        R_change = self.compute_rate_of_change(lambda_, mu, N)
+        if R_change == 0:
+            return 1e-2 #float('inf')  # or another value that makes sense for your model
         T_change = 1 / R_change  # Time = 1 / rate
         
         return T_change
+        
+        #"""Compute expected time between changes in queue length."""
+        
+        #R_change = self.compute_rate_of_change(lambda_, mu, N)
+        #T_change = 1 / R_change  # Time = 1 / rate
+        
+        #return T_change
 
         # Example parameters
         #lambda_ = 2.0     # arrival rate
@@ -3034,34 +3145,66 @@ class MarkovModulatedServiceModel:
             return np.inf
         return np.random.exponential(1.0 / mu)
     
-    def erlang_C(c, rho):
+    def erlang_C(self, c, rho):
         """
         Erlang‐C: probability that an arriving job must wait in an M/M/c queue.
         Requires rho < c for stability.
         """
+        #sum_terms = sum((rho**k) / factorial(k) for k in range(c))
+        #last_term = (rho**c / factorial(c)) * (c / (c - rho))
+        #return last_term / (sum_terms + last_term)
+        # Handle unstable or critically loaded queue (rho >= c)
+        
+        if rho >= c:
+            return 1.0
         sum_terms = sum((rho**k) / factorial(k) for k in range(c))
+        denom = sum_terms + (rho**c / factorial(c)) * (c / (c - rho))
+        if denom == 0:
+            return 1.0  # Or raise an error if this is truly unexpected
         last_term = (rho**c / factorial(c)) * (c / (c - rho))
-        return last_term / (sum_terms + last_term)
+        
+        return last_term / denom
 
-    def mm2_P_wait(lambda_i, mu_i):
+    def mm2_P_wait(self, lambda_i, mu_i):
         """
         Return P_wait for an M/M/2 queue with arrival lambda_i and service mu_i.
         If rho >= 2, returns 1.0 (unstable).
         """
+        #rho_i = lambda_i / mu_i
+        #if rho_i >= 2:
+        #    return 1.0
+        #return self.erlang_C(2, rho_i)
+        
+        rho_i = lambda_i / mu_i if mu_i != 0 else float('inf')
+        if rho_i >= 2 or mu_i == 0:
+            return 1.0
+            
+        return self.erlang_C(2, rho_i)
+        
+    def mm2_mean_wait(self, lambda_i, mu_i):
+        """
+        Expected waiting time in queue (W_q) for M/M/2:
+            W_q = P_wait / (2*mu_i - lambda_i)
+        If rho >= 2, return np.inf.
+        """
+        if mu_i == 0:
+            return 1e-2
+            
         rho_i = lambda_i / mu_i
         if rho_i >= 2:
-            return 1.0
-        return erlang_C(2, rho_i)
+            return np.inf
+        P_wait = self.mm2_P_wait(lambda_i, mu_i)
+        return P_wait / (2*mu_i - lambda_i)
 
-    def compare_mmtwo_fsd(lambda1, mu1, lambda2, mu2, eps=1e-12):
+    def compare_mmtwo_fsd(self, lambda1, mu1, lambda2, mu2, eps=1e-12):
         """
         Check FSD between two M/M/2 queues:
           Returns 1 if Q1 FSD‐dominates Q2,
                   2 if Q2 FSD‐dominates Q1,
                   0 otherwise.
         """
-        P1 = mm2_P_wait(lambda1, mu1)
-        P2 = mm2_P_wait(lambda2, mu2)
+        P1 = self.mm2_P_wait(lambda1, mu1)
+        P2 = self.mm2_P_wait(lambda2, mu2)
         alpha1 = 2*mu1 - lambda1
         alpha2 = 2*mu2 - lambda2
     
@@ -3075,7 +3218,7 @@ class MarkovModulatedServiceModel:
         else:
             return 0
 
-    def arrival_rates_divisor(arrival_rate, mu1, mu2):
+    def arrival_rates_divisor(self, arrival_rate, mu1, mu2):
         # if the arrival rate is an odd number, divide it by two and 
 		# add the reminder to the queue with the higher service rate
 		# Else equal service rates
@@ -3093,9 +3236,9 @@ class MarkovModulatedServiceModel:
                 new_accumulator (int): Updated rem_accumulator.
         """
         if mu1 < mu2:
-            new_accumulator = mu1
+            rem_accumulator = mu1
         else:
-            new_accumulator = mu2
+            rem_accumulator = mu2
 				
         remainder = arrival_rate % 2
         half = arrival_rate // 2
@@ -3103,14 +3246,14 @@ class MarkovModulatedServiceModel:
             
         return half, new_accumulator	
             
-    def best_queue_delay(lambda1, mu1, lambda2, mu2):
+    def best_queue_delay(self, lambda1, mu1, lambda2, mu2):
         """
         Return the expected waiting-time-in-queue (delay) of the FSD-best queue.
         If neither strictly FSD-dominates, return the smaller mean wait of the two.
         """
-        fsd_result = compare_mmtwo_fsd(lambda1, mu1, lambda2, mu2)
-        w1 = mm2_mean_wait(lambda1, mu1)
-        w2 = mm2_mean_wait(lambda2, mu2)
+        fsd_result = self.compare_mmtwo_fsd(lambda1, mu1, lambda2, mu2)
+        w1 = self.mm2_mean_wait(lambda1, mu1)
+        w2 = self.mm2_mean_wait(lambda2, mu2)
         
         if fsd_result == 1:
             return w1
@@ -3708,7 +3851,7 @@ def main():
     utility_basic = 1.0
     discount_coef = 0.1
     requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True)
-    duration = 100 # 100 
+    duration = 10 #100 # 100 
     
     # Set intervals for dispatching queue states
     intervals = [3, 5, 7, 9]
@@ -3894,7 +4037,7 @@ def main():
     '''
      come back to the functions below
     '''
-    plot_boxplot_waiting_times_by_outcome(waiting_times, outcomes)
+    # plot_boxplot_waiting_times_by_outcome(waiting_times, outcomes)
     #plot_avg_waiting_time_over_time(waiting_times, time_stamps, window=10)
     
     # service rates and jockeying/reneging rates not smooth
