@@ -462,7 +462,7 @@ class Observations:
         return
 
 
-    def set_obs (self, queue_id,  serv_rate, intensity, time_in_serv, activity, rewarded, curr_pose, req): # reneged, jockeyed,
+    def set_obs (self, queue_id,  serv_rate, intensity, time_in_serv, activity, rewarded, curr_pose, req, queue_length): # reneged, jockeyed,
         		
         if queue_id == "1": # Server1
             _id_ = 1
@@ -480,6 +480,7 @@ class Observations:
                     "ServRate":serv_rate,
                     "Waited":time_in_serv,
                     "Action":activity,
+                    "queue_length": queue_length
                 }
               
 
@@ -488,7 +489,7 @@ class Observations:
         return dict(self.obs)
         
         
-    def set_renege_obs(self, curr_pose, reneged,time_local_service, time_to_service_end, reward, queueid, activity):		
+    def set_renege_obs(self, curr_pose, reneged,time_local_service, time_to_service_end, reward, queueid, activity, queue_length):		
 
         self.curr_obs_renege.append(
             {   
@@ -499,21 +500,20 @@ class Observations:
                 "expected_local_service":time_local_service,
                 "time_service_took": time_to_service_end,
                 "reward": reward,
-                "action":activity
+                "action":activity,
+                "queue_length": queue_length
             }
         )
         
         
     def get_renege_obs(self, queueid, queue): # , intensity, pose): # get_curr_obs_renege
 		
-        renegs = sum(1 for req in queue if '_reneged' in req.customerid)
-        			    
-        # print("\n Num Reneged in ", queueid, "is =", renegs)
+        renegs = sum(1 for req in queue if '_reneged' in req.customerid)        			         
 	    
         return renegs # self.curr_obs_renege 
   
         
-    def set_jockey_obs(self, curr_pose, jockeyed, time_alt_queue, time_to_service_end, reward, queueid, activity):
+    def set_jockey_obs(self, curr_pose, jockeyed, time_alt_queue, time_to_service_end, reward, queueid, activity, queue_length):
         
         self.curr_obs_jockey.append(
             {
@@ -524,7 +524,8 @@ class Observations:
                 "expected_local_service":time_alt_queue,
                 "time_service_took": time_to_service_end,
                 "reward": reward,
-                "action":activity   			
+                "action":activity,
+                "queue_length": queue_length  			
             }
         )
         
@@ -630,7 +631,9 @@ class RequestQueue:
         
         self.policy_enabled = policy_enabled
         self.predictive_model = PredictiveModel()
-        self.policy = ServerPolicy(self.predictive_model, min_rate=1.0, max_rate=15.0)
+        #self.policy = ServerPolicy(self.predictive_model, min_rate=1.0, max_rate=15.0)
+        self.policy1 = ServerPolicy(self.predictive_model, min_rate=1.0, max_rate=15.0)
+        self.policy2 = ServerPolicy(self.predictive_model, min_rate=1.0, max_rate=15.0)
         
         # Schedule the dispatch function to run every minute (or any preferred interval)
         # schedule.every(1).minutes.do(self.dispatch_queue_state, queue=queue_1, queue_name="Server1")
@@ -717,7 +720,7 @@ class RequestQueue:
 
     def get_service_rates(self, queue_id):
 		
-        return self.srvrates_1 if queue_id == "1" else self.srvrates_2
+        return self.srvrates_1 if "1" in queue_id else self.srvrates_2
         #srvrate1 = self.dict_servers_info.get("1")# Server1
         #srvrate2 = self.dict_servers_info.get("2") # Server2
 
@@ -842,7 +845,10 @@ class RequestQueue:
         self.predictive_model.record_observation(features, action_label)
         self.predictive_model.fit()
         # Optionally: immediately update policy based on new prediction
-        self.policy.update_policy(features)
+        if queue_id == "1":
+            self.policy1.update_policy(features)
+        else:
+            self.policy2.update_policy(features)
 
 
     def run(self,duration, interval, progress_bar=True,progress_log=False):
@@ -892,8 +898,10 @@ class RequestQueue:
                 features_srv2 = self.extract_features("2")
                 
                 if getattr(self, "policy_enabled", True):
-                    self.srvrates_1 = self.policy.update_policy(features_srv1)
-                    self.srvrates_2 = self.policy.update_policy(features_srv2)
+                    self.srvrates_1 = self.policy1.update_policy(features_srv1)
+                    self.srvrates_2 = self.policy2.update_policy(features_srv2)
+                    #self.srvrates_1 = self.policy.update_policy(features_srv1)
+                    #self.srvrates_2 = self.policy.update_policy(features_srv2)
                     
                 
                
@@ -1201,11 +1209,6 @@ class RequestQueue:
             serv_rate = self.get_service_rates(queue_id) # rate_srv2
         
         curr_queue_state = self.get_queue_state(alt_queue_id)
-                
-        # print("\n\n From get_queue_state:", curr_queue_state)
-                 
-        #curr_queue_state["jockeying_rate"] = jockeying_rate
-        #curr_queue_state["reneging_rate"] = reneging_rate 
          
         # Compute reneging rate and jockeying rate
         reneging_rate = self.compute_reneging_rate(curr_queue)
@@ -1680,8 +1683,19 @@ class RequestQueue:
     
                        
     def get_queue_state(self, queueid):
-		
-        serv_rates = [self.srvrates_1, self.srvrates_2]
+		        
+        srvrate1 = self.get_service_rates("1")        
+        srvrate2 = self.get_service_rates("2")
+        
+        # Ensure service rates are set to a default if None
+        if isinstance( None, type(self.srvrates_1)):
+            self.srvrates_1 = 1.0
+        if isinstance( None, type(self.srvrates_2)):
+            self.srvrates_2 = 1.0
+        if isinstance( None, type(self.arr_rate)):
+            self.arr_rate = self.srvrates_1 + self.srvrates_2
+            
+        
         b = 0.4
         a = 0.2       
 	    
@@ -1696,17 +1710,17 @@ class RequestQueue:
         #print("\n Server",queueid ," ******> ", self.get_service_rates(queueid),self.srvrates_1 ,self.srvrates_2 )
         
         if "1" in queueid:		
-            #queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv1    
+            # srvrates = self.get_service_rates(queueid) 
             customers_in_queue = self.dict_queues_obj["1"] 
             curr_queue = self.dict_queues_obj[queueid]  
             reneging_rate = self.compute_reneging_rate(curr_queue)
             jockeying_rate = self.compute_jockeying_rate(curr_queue)
             # Instantiate MarkovQueueModel
             
-            markov_model = MarkovQueueModel(self.arr_rate, self.srvrates_1, max_states=len(customers_in_queue)) # 1000)
-            servmarkov_model = MarkovModulatedServiceModel(serv_rates, trans_matrix)
+            markov_model = MarkovQueueModel(self.arr_rate, srvrate1, max_states=len(customers_in_queue)) # 1000)
+            servmarkov_model = MarkovModulatedServiceModel([srvrate1,srvrate2], trans_matrix)
             #long_run_change_rate = markov_model.long_run_change_rate()
-            sample_interchange_time = markov_model.compute_expected_time_between_changes(self.arr_rate, self.srvrates_1, N=len(customers_in_queue)) # 1000)
+            sample_interchange_time = markov_model.compute_expected_time_between_changes(self.arr_rate, self.srvrates_1, N=100) #len(customers_in_queue)) # 1000)
             #long_run_change_rate = markov_model.long_run, self.srvrates_1, len(customers_in_queue)) # sample_interchange_time() # _steady_state_distribution()
             arr_rate1, arr_rate2 = servmarkov_model.arrival_rates_divisor(self.arr_rate, self.srvrates_1, self.srvrates_2) #_steady_state_distribution()
             steady_state_distribution = servmarkov_model.best_queue_delay(arr_rate1, self.srvrates_1, arr_rate2, self.srvrates_2)
@@ -1714,17 +1728,17 @@ class RequestQueue:
       
         else:
 			 
-            #queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv2            
+            # srvrates = self.get_service_rates(queueid)            
             customers_in_queue = self.dict_queues_obj["2"]
             curr_queue = self.dict_queues_obj[queueid]
             reneging_rate = self.compute_reneging_rate(curr_queue)
             jockeying_rate = self.compute_jockeying_rate(curr_queue)
             # Instantiate MarkovQueueModel
-            #print("\n **> ", self.arr_rate, self.srvrates_2)
-            markov_model = MarkovQueueModel(self.arr_rate, self.srvrates_2, max_states=len(customers_in_queue)) # 1000)
-            servmarkov_model = MarkovModulatedServiceModel(serv_rates, trans_matrix)
+            # print("\n **********> ", self.arr_rate, srvrate2)
+            markov_model = MarkovQueueModel(self.arr_rate, srvrate2, max_states=len(customers_in_queue)) # 1000)
+            servmarkov_model = MarkovModulatedServiceModel([srvrate1,srvrate2], trans_matrix)
             #long_run_change_rate = markov_model.long_run_change_rate()
-            sample_interchange_time = markov_model.compute_expected_time_between_changes(self.arr_rate, self.srvrates_2, N=len(customers_in_queue)) # 1000)
+            sample_interchange_time = markov_model.compute_expected_time_between_changes(self.arr_rate, self.srvrates_2, N=100) # len(customers_in_queue)) # 1000)
             arr_rate1, arr_rate2 = servmarkov_model.arrival_rates_divisor(self.arr_rate, self.srvrates_1, self.srvrates_2) #_steady_state_distribution()
             steady_state_distribution = servmarkov_model.best_queue_delay(arr_rate1, self.srvrates_1, arr_rate2, self.srvrates_2)
             #long_run_change_rate = markov_model.long_run, self.srvrates_2, len(customers_in_queue))
@@ -1805,7 +1819,7 @@ class RequestQueue:
                 self.reneged_waiting_times_by_interval[interval]["server_1"].append(waiting_time)         
             
             # take note of the observation ... self.time  queue_id,  serv_rate, intensity, time_in_serv, activity, rewarded, curr_pose
-            self.objObserv.set_obs(self.queueID, serv_rate, queue_intensity, req.time_exit-req.time_entrance, reward, len_queue_1, 2, req)   # req.exp_time_service_end,                                    
+            self.objObserv.set_obs(self.queueID, serv_rate, queue_intensity, req.time_exit-req.time_entrance, reward, len_queue_1, 2, req, len(self.dict_queues_obj["1"]))   # req.exp_time_service_end,                                    
             self.history.append(self.objObserv.get_obs())
       
             self.arr_prev_times = self.arr_prev_times[1:self.arr_prev_times.size]
@@ -1821,7 +1835,7 @@ class RequestQueue:
 
         else:                        
             req = self.dict_queues_obj["2"][0] # Server2
-            serv_rate = serv_rate = self.get_service_rates(queueID) #self.dict_servers_info["2"] # Server2
+            serv_rate = self.get_service_rates(queueID) #self.dict_servers_info["2"] # Server2
             queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate
             queueid = "2"   # Server2      
                         
@@ -1841,7 +1855,7 @@ class RequestQueue:
             self.waiting_times_srv2.append(waiting_time) 
             self.record_waiting_time(interval, "server_2", waiting_time)             
             
-            self.objObserv.set_obs(self.queueID, serv_rate, queue_intensity, req.time_exit-req.time_entrance, reward, len_queue_2, 2, req)    # req.exp_time_service_end,                                  
+            self.objObserv.set_obs(self.queueID, serv_rate, queue_intensity, req.time_exit-req.time_entrance, reward, len_queue_2, 2, req, len(self.dict_queues_obj["2"]))    # req.exp_time_service_end,                                  
             self.history.append(self.objObserv.get_obs())
             
             # Track jockeyed and reneged waiting times for this interval and server
@@ -2495,7 +2509,7 @@ class RequestQueue:
             #time_between_changes = compute_expected_time_between_changes(lambda_, mu)
             lambda1, lambda2 = arrival_rates_divisor(curr_arriv_rate, mu1, mu2)
             
-            renege, t_change_1 , t_change_2 = should_renege_using_tchange(lambda1, mu1, lambda2, mu2, T_local, len(queue))
+            renege, t_change_1 , t_change_2 = should_renege_using_tchange(lambda1, mu1, lambda2, mu2, T_local, 100)
 
             #print(f"Rate of queue length change: {rate:.4f} events/sec")
             print(f"Expected time between changes in Queue 1: {t_change_1:.4f} sec and Expected time between changes in Queue 2: {t_change_2:.4f} sec")
@@ -2632,10 +2646,10 @@ class RequestQueue:
         
                 reward = self.getRenegeRewardPenalty(req, time_local_service, time_to_service_end)                                    
         
-                self.objObserv.set_renege_obs(curr_pose, decision,time_local_service, time_to_service_end, reward, queueid, "reneged")
+                self.objObserv.set_renege_obs(curr_pose, decision,time_local_service, time_to_service_end, reward, queueid, "reneged", len(curr_queue))
         
                 self.curr_obs_renege.append(self.objObserv.get_renege_obs(queueid, self.queue)) #queueid, queue_intensity, curr_pose))        
-        
+                self.history.append(self.objObserv.get_renege_obs(queueid, self.queue))
                 self.curr_req = req
         
                 self.objQueues.update_queue_status(queueid)
@@ -2701,7 +2715,7 @@ class RequestQueue:
         else:	
             np.delete(curr_queue, curr_pose) # np.where(id_queue==req_id)[0][0])
             self.log_request(req.time_entrance, "reneged", req.time_res ) #, curr_queue) # req.queue) arrival_time= outcome= exit_time= queue=
-            #print("\n ********* ", request_log[0])
+            
             reward = 1.0
             req.time_entrance = self.time # timer()
             dest_queue = np.append( dest_queue, req)
@@ -2716,13 +2730,12 @@ class RequestQueue:
             else:
                 queue_intensity = self.arr_rate/self.get_service_rates(curr_queue_id) # self.dict_servers_info["2"] # Server2
         
-            reward = self.get_jockey_reward(req)
-                  
-            # print("\n Moving ", customerid," from Server ",curr_queue_id, " to Server ", dest_queue_id ) 
+            reward = self.get_jockey_reward(req)                             
             print(colored("%s", 'green') % (req.customerid) + " in Server %s" %(curr_queue_id) + " jockeying now, to Server %s" % (colored(dest_queue_id,'green')))                      
             
-            self.objObserv.set_jockey_obs(curr_pose,  decision, exp_delay, req.exp_time_service_end, reward, 1.0, "jockeyed") # time_alt_queue        
-            self.curr_obs_jockey.append(self.objObserv.get_jockey_obs(curr_queue_id, queue_intensity, curr_pose))                                      
+            self.objObserv.set_jockey_obs(curr_pose,  decision, exp_delay, req.exp_time_service_end, reward, 1.0, "jockeyed", len(curr_queue)) # time_alt_queue        
+            self.curr_obs_jockey.append(self.objObserv.get_jockey_obs(curr_queue_id, queue_intensity, curr_pose)) 
+            self.history.append(self.objObserv.get_jockey_obs(curr_queue_id, queue_intensity, curr_pose))                                     
             self.curr_req = req        
             self.objQueues.update_queue_status(curr_queue_id)# long_avg_serv_time
         
@@ -2979,17 +2992,22 @@ class MarkovQueueModel:
         - service_rate (μ): Exponential service rate
         - max_states: Number of states to approximate infinite sum
         """
-        self.lambda_ = arrival_rate
-        self.mu = service_rate
-        #print("\n IN MORSKOV MODEL CLASS: ==> ", arrival_rate, service_rate)
+        #print("\n ====> ", service_rate)
+        #self.lambda_ = arrival_rate
+        #if isinstance(None, type(service_rate)):
+            # Option 1: Set to a safe small positive value, or raise an explicit error
+        #    self.mu = 1e-2
+            #raise ValueError("service_rate must not be None in MarkovQueueModel")
+        #else:
+        #    self.mu = service_rate
         
-        if abs(service_rate) < 1e-8:
-            self.rho = 0.0  # fallback value; choose np.inf or another value if more appropriate for your model
-        else:
-            self.rho = arrival_rate / service_rate
+        #if abs(service_rate) < 1e-8:
+        #    self.rho = 0.0  # fallback value; choose np.inf or another value if more appropriate for your model
+        #else:
+        #    self.rho = arrival_rate / service_rate
             
-        self.max_states = max_states
-        self.pi = self._steady_state_distribution()
+        #self.max_states = max_states
+        #self.pi = self._steady_state_distribution()
                
     
     def _steady_state_distribution(self):
@@ -3074,9 +3092,13 @@ class MarkovQueueModel:
 
     def compute_rate_of_change(self, lambda_, mu, N=100):
         """Compute average rate at which queue length changes."""
-        if mu == 0:
-            # No service possible: no queue-length decrease, only arrivals
-            return 0.0  # or handle as appropriate for your model
+        
+        if isinstance(None, type(mu)):
+            # Option 1: Set to a safe small positive value, or raise an explicit error
+            mu = 1e-1
+        
+        if isinstance(None, type(lambda_)):
+            lambda_ = 1e-2
             
         rho = lambda_ / mu
         pi = self.compute_steady_state_probs(rho, N)
@@ -3348,33 +3370,6 @@ def plot_boxplot_waiting_times_by_outcome(waiting_times, outcomes, title="Waitin
     plt.show()
     
 
-def plot_avg_waiting_time_over_time(waiting_times, time_stamps, window=10, title="Average Waiting Time Over Time"):
-    """
-    Plots a moving average of waiting time over the simulation time.
-    """
-    # Remove Nones if present
-    mask = [t is not None for t in time_stamps]
-    waiting_times = np.array(waiting_times)[mask]
-    time_stamps = np.array(time_stamps)[mask]
-
-    idx_sorted = np.argsort(time_stamps)
-    waiting_times = waiting_times[idx_sorted]
-    time_stamps = time_stamps[idx_sorted]
-
-    # Compute moving average
-    if len(waiting_times) >= window:
-        avg_wait = np.convolve(waiting_times, np.ones(window)/window, mode='valid')
-        time_avg = time_stamps[window-1:]
-    else:
-        avg_wait = waiting_times
-        time_avg = time_stamps
-    plt.figure(figsize=(8,4))
-    plt.plot(time_avg, avg_wait, marker='.')
-    plt.xlabel("Simulation Time")
-    plt.ylabel("Average Waiting Time")
-    plt.title(title)
-    plt.grid(True)
-    plt.show()
     
     
 def Per_Outcome_Wasted_Waiting_Time_by_Interval():
@@ -3536,7 +3531,6 @@ def plot_all_avg_waiting_time_by_anchor_interval(
     import numpy as np
     import matplotlib.pyplot as plt
 
-    # Identify all anchors and intervals present
     anchors = sorted({h['anchor'] for h in histories_policy + histories_nopolicy})
     intervals = sorted({h['interval'] for h in histories_policy + histories_nopolicy})
 
@@ -3569,19 +3563,19 @@ def plot_all_avg_waiting_time_by_anchor_interval(
         return class_indices, class_waits
 
     for anchor in anchors:
-        fig, axs = plt.subplots(1, len(intervals), figsize=(6*len(intervals), 5), sharey=True)
-        if len(intervals) == 1:
-            axs = [axs]
-        fig.suptitle(f"{title}\nAnchor: {anchor}", fontsize=16)
-
+        fig, axs = plt.subplots(2, 2, figsize=(10, 8), sharey=True)
+        fig.suptitle(f"Information model: {anchor}", fontsize=12)
+        axs = axs.flatten()
         for j, interval in enumerate(intervals):
+            if j >= 4:
+                break  # Only plot first 4 intervals in a 2x2 grid
+            ax = axs[j]
             policy_hist = next((h['history'] for h in histories_policy if h['anchor'] == anchor and h['interval'] == interval), [])
             nopolicy_hist = next((h['history'] for h in histories_nopolicy if h['anchor'] == anchor and h['interval'] == interval), [])
 
             indices_p, waits_p = get_class_waiting(policy_hist)
             indices_np, waits_np = get_class_waiting(nopolicy_hist)
 
-            ax = axs[j]
             for outcome in ['served', 'jockeyed', 'reneged']:
                 # Policy
                 xs_p = np.array(indices_p[outcome])
@@ -3618,14 +3612,190 @@ def plot_all_avg_waiting_time_by_anchor_interval(
                         linestyle=style_map['No Policy'])
 
             ax.set_xlabel('Customer Index (Simulation Step)')
-            if j == 0:
+            if j % 2 == 0:
                 ax.set_ylabel('Avg Waiting Time (Moving Avg)')
-            ax.set_title(f"Interval: {interval}")
             ax.grid(True, linestyle='--', alpha=0.5)
+            ax.set_title(f"Interval: {interval}")
             ax.legend(fontsize=8)
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.show()
         
+
+def plot_avg_wait_by_queue_length(
+    histories_policy, histories_nopolicy, window=1, title="Average Waiting Time vs Queue Length"
+):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from collections import defaultdict
+
+    def extract_queue_length_and_wait(histories, outcome):
+        xs, ys = [], []
+        for h in histories:
+            for obs in h['history']:
+                if isinstance(obs, dict):
+                    waited = obs.get('Waited', None)
+                    cid = obs.get('customerid', '')
+                    queue_length = obs.get('queue_length', None)
+                    if waited is not None and queue_length is not None:
+                        if (outcome == 'served' and not ('_reneged' in cid or '_jockeyed' in cid)) or \
+                           (outcome == 'reneged' and '_reneged' in cid) or \
+                           (outcome == 'jockeyed' and '_jockeyed' in cid):
+                            xs.append(queue_length)
+                            ys.append(waited)
+                elif isinstance(obs, list):
+                    for o in obs:
+                        if not isinstance(o, dict):
+                            continue
+                        waited = o.get('Waited', None)
+                        cid = o.get('customerid', '')
+                        queue_length = o.get('queue_length', None)
+                        if waited is not None and queue_length is not None:
+                            if (outcome == 'served' and not ('_reneged' in cid or '_jockeyed' in cid)) or \
+                               (outcome == 'reneged' and '_reneged' in cid) or \
+                               (outcome == 'jockeyed' and '_jockeyed' in cid):
+                                xs.append(queue_length)
+                                ys.append(waited)
+        return np.array(xs), np.array(ys)
+
+    def binned_average(xs, ys, window=1):
+        # Bin by queue length (integer), average within each bin
+        bins = defaultdict(list)
+        for x, y in zip(xs, ys):
+            bins[int(x)].append(y)
+        bin_xs = sorted(bins.keys())
+        bin_ys = [np.mean(bins[x]) for x in bin_xs]
+        # Optionally smooth with moving average across queue lengths
+        if window > 1 and len(bin_ys) >= window:
+            bin_ys = np.convolve(bin_ys, np.ones(window)/window, mode='same')
+        return np.array(bin_xs), np.array(bin_ys)
+
+    color_map = {
+        'served': 'tab:green',
+        'jockeyed': 'tab:blue',
+        'reneged': 'tab:red'
+    }
+    style_map = {
+        'Policy': '-',
+        'No Policy': '--'
+    }
+
+    for outcome in ['served', 'jockeyed', 'reneged']:
+        plt.figure(figsize=(8,5))
+        # Policy
+        xs_policy, ys_policy = extract_queue_length_and_wait(histories_policy, outcome)
+        bin_xs_p, bin_ys_p = binned_average(xs_policy, ys_policy, window)
+        plt.plot(bin_xs_p, bin_ys_p, style_map['Policy'], label='Policy', color=color_map[outcome])
+        plt.scatter(xs_policy, ys_policy, color=color_map[outcome], alpha=0.3, marker='o')
+
+        # No Policy
+        xs_np, ys_np = extract_queue_length_and_wait(histories_nopolicy, outcome)
+        bin_xs_np, bin_ys_np = binned_average(xs_np, ys_np, window)
+        plt.plot(bin_xs_np, bin_ys_np, style_map['No Policy'], label='No Policy', color=color_map[outcome])
+        plt.scatter(xs_np, ys_np, color=color_map[outcome], alpha=0.3, marker='x')
+
+        plt.xlabel('Queue Length')
+        plt.ylabel('Average Waiting Time')
+        plt.title(f"{title} ({outcome.title()})")
+        plt.legend()
+        plt.grid(True, linestyle='--', alpha=0.5)
+        plt.tight_layout()
+        plt.show()
+
+
+
+def plot_avg_wait_by_queue_length_grouped(
+    histories_policy, histories_nopolicy, window=1, title="Average Waiting Time vs Queue Length (Grouped)"
+):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from collections import defaultdict
+
+    # Only include 'jockeyed' and 'reneged'
+    outcomes = ['jockeyed', 'reneged']
+
+    def extract_by_interval(histories, outcome):
+        by_interval = defaultdict(lambda: ([], []))
+        for h in histories:
+            interval = h.get('interval', None)
+            if interval is None:
+                continue
+            for obs in h['history']:
+                if isinstance(obs, dict):
+                    waited = obs.get('Waited', None)
+                    cid = obs.get('customerid', '')
+                    queue_length = obs.get('queue_length', None)
+                    if waited is not None and queue_length is not None:
+                        if (outcome == 'reneged' and '_reneged' in cid) or \
+                           (outcome == 'jockeyed' and '_jockeyed' in cid):
+                            by_interval[interval][0].append(queue_length)
+                            by_interval[interval][1].append(waited)
+                elif isinstance(obs, list):
+                    for o in obs:
+                        if not isinstance(o, dict):
+                            continue
+                        waited = o.get('Waited', None)
+                        cid = o.get('customerid', '')
+                        queue_length = o.get('queue_length', None)
+                        if waited is not None and queue_length is not None:
+                            if (outcome == 'reneged' and '_reneged' in cid) or \
+                               (outcome == 'jockeyed' and '_jockeyed' in cid):
+                                by_interval[interval][0].append(queue_length)
+                                by_interval[interval][1].append(waited)
+        return by_interval
+
+    def binned_average(xs, ys, window=1):
+        bins = defaultdict(list)
+        for x, y in zip(xs, ys):
+            bins[int(x)].append(y)
+        bin_xs = sorted(bins.keys())
+        bin_ys = [np.mean(bins[x]) for x in bin_xs]
+        if window > 1 and len(bin_ys) >= window:
+            bin_ys = np.convolve(bin_ys, np.ones(window)/window, mode='same')
+        return np.array(bin_xs), np.array(bin_ys)
+
+    color_map = {
+        'Policy': 'tab:blue',
+        'No Policy': 'tab:orange'
+    }
+
+    # Collect all intervals
+    intervals_policy = set(h.get('interval', None) for h in histories_policy)
+    intervals_nopolicy = set(h.get('interval', None) for h in histories_nopolicy)
+    all_intervals = sorted([i for i in intervals_policy | intervals_nopolicy if i is not None])
+
+    nrows = len(all_intervals)
+    ncols = len(outcomes)
+    fig, axs = plt.subplots(nrows, ncols, figsize=(6 * ncols, 4 * nrows), squeeze=False, sharey='row')
+
+    for row, interval in enumerate(all_intervals):
+        for col, outcome in enumerate(outcomes):
+            by_interval_policy = extract_by_interval(histories_policy, outcome)
+            by_interval_nopolicy = extract_by_interval(histories_nopolicy, outcome)
+
+            xs_policy, ys_policy = by_interval_policy.get(interval, ([], []))
+            xs_np, ys_np = by_interval_nopolicy.get(interval, ([], []))
+            bin_xs_p, bin_ys_p = binned_average(xs_policy, ys_policy, window)
+            bin_xs_np, bin_ys_np = binned_average(xs_np, ys_np, window)
+
+            ax = axs[row, col]
+            # Policy curve
+            if len(bin_xs_p) > 0:
+                ax.plot(bin_xs_p, bin_ys_p, '-', label='Policy', color=color_map['Policy'])
+            # No policy curve
+            if len(bin_xs_np) > 0:
+                ax.plot(bin_xs_np, bin_ys_np, '--', label='No Policy', color=color_map['No Policy'])
+
+            if row == 0:
+                ax.set_title(f"{outcome.title()}", fontsize=14)
+            if col == 0:
+                ax.set_ylabel(f"Interval: {interval}\nAverage Waiting Time", fontsize=12)
+            ax.set_xlabel('Queue Length')
+            ax.grid(True, linestyle='--', alpha=0.5)
+            ax.legend(fontsize=9)
+    fig.suptitle(title, fontsize=18)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.show()
+
 
 def plot_all_avg_waiting_time_by_anchor_interval_original(
     histories_policy,
@@ -3734,130 +3904,242 @@ def plot_all_avg_waiting_time_by_anchor_interval_original(
             ax.legend(fontsize=8)
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.show()
-
-def plot_line_avg_waiting_time_comparison_empty(
-    history_policy,
-    history_no_policy,
-    window=20,
-    title="Average Waiting Time per Class (Policy vs No Policy)"
-):
-    """
-    Plots a line chart comparing average waiting times for served, jockeyed, and reneged requests
-    for both policy and no-policy runs. Each line is a moving average over simulation steps.
-
-    Args:
-        history_policy (list): List of dicts (history) for policy-enabled simulation.
-        history_no_policy (list): List of dicts (history) for no-policy simulation.
-        window (int): Moving average window size.
-        title (str): Plot title.
-    """
-    def get_class_waiting(history):
-        class_waits = {'served': [], 'jockeyed': [], 'reneged': []}
-        class_indices = {'served': [], 'jockeyed': [], 'reneged': []}
-        for idx, obs in enumerate(history):
-            waited = obs.get('Waited', None)
-            cid = obs.get('customerid', '')
-            if waited is not None:
-                if '_reneged' in cid:
-                    class_waits['reneged'].append(waited)
-                    class_indices['reneged'].append(idx)
-                elif '_jockeyed' in cid:
-                    class_waits['jockeyed'].append(waited)
-                    class_indices['jockeyed'].append(idx)
-                else:
-                    class_waits['served'].append(waited)
-                    class_indices['served'].append(idx)
-        return class_indices, class_waits
-
-    indices_p, waits_p = get_class_waiting(history_policy)
-    indices_np, waits_np = get_class_waiting(history_no_policy)
-
-    color_map = {
-        'served': 'tab:green',
-        'jockeyed': 'tab:blue',
-        'reneged': 'tab:red'
-    }
-    style_map = {
-        'Policy': '-',
-        'No Policy': '--'
-    }
-
-    plt.figure(figsize=(12,7))
-    for outcome in ['served', 'jockeyed', 'reneged']:
-        # Policy
-        xs_p = np.array(indices_p[outcome])
-        ys_p = np.array(waits_p[outcome])
-        if len(xs_p) >= window:
-            ys_p_smooth = np.convolve(ys_p, np.ones(window)/window, mode='valid')
-            xs_p_smooth = xs_p[window-1:]
-            plt.plot(xs_p_smooth, ys_p_smooth,
-                     label=f"Policy: {outcome.capitalize()}",
-                     color=color_map[outcome],
-                     linestyle=style_map['Policy'])
-        elif len(xs_p) > 0:
-            plt.plot(xs_p, ys_p,
-                     label=f"Policy: {outcome.capitalize()}",
-                     color=color_map[outcome],
-                     linestyle=style_map['Policy'],
-                     marker='o')
-
-        # No Policy
-        xs_np = np.array(indices_np[outcome])
-        ys_np = np.array(waits_np[outcome])
-        if len(xs_np) >= window:
-            ys_np_smooth = np.convolve(ys_np, np.ones(window)/window, mode='valid')
-            xs_np_smooth = xs_np[window-1:]
-            plt.plot(xs_np_smooth, ys_np_smooth,
-                     label=f"No Policy: {outcome.capitalize()}",
-                     color=color_map[outcome],
-                     linestyle=style_map['No Policy'])
-        elif len(xs_np) > 0:
-            plt.plot(xs_np, ys_np,
-                     label=f"No Policy: {outcome.capitalize()}",
-                     color=color_map[outcome],
-                     linestyle=style_map['No Policy'],
-                     marker='x')
-
-    plt.xlabel('Customer Index (Simulation Step)')
-    plt.ylabel('Average Waiting Time (Moving Avg)')
-    plt.title(title)
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.5)
-    plt.tight_layout()
-    plt.show()
        
 
-def plot_rates_vs_requests(results, intervals, anchors, metric="jockeying_rates"):
-    """
-    Plot jockeying or reneging rates vs. number of requests (simulation step), for each anchor and interval.
-    Args:
-        results: the nested data structure with rates
-        intervals: list of intervals (e.g., [3, 6, 9])
-        anchors: list of anchor names (e.g., ["steady_state_distribution", "inter_change_time"])
-        metric: either 'jockeying_rates' or 'reneging_rates'
-    """
-    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple", "tab:brown"]
-    servers = ["server_1", "server_2"]
 
-    fig, axs = plt.subplots(1, len(intervals), figsize=(6*len(intervals), 5), sharey=True)
-    if len(intervals) == 1:
-        axs = [axs]
-    for j, interval in enumerate(intervals):
-        ax = axs[j]
-        for i, anchor in enumerate(anchors):
-            for k, server in enumerate(servers):
-                y = results[interval][metric][anchor][server]
-                x = np.arange(1, len(y)+1)  # Number of requests as 1-based index
-                label = f"{anchor}, {server.replace('_', ' ').title()}"
-                ax.plot(x, y, label=label, color=colors[i*2 + k])
-        ax.set_title(f"{metric.replace('_',' ').capitalize()} (Interval: {interval}s)")
-        ax.set_xlabel("Number of Requests")
-        ax.set_ylabel(metric.replace('_',' ').capitalize())
-        ax.legend(fontsize=9)
-        ax.grid(True, linestyle='--', alpha=0.5)
-    plt.tight_layout()
+def plot_avg_wait_by_queue_length_grouped_by_anchor(
+    histories_policy, histories_nopolicy, window=1, title="Avg Waiting Time vs Queue Length (Grouped by Anchor)"
+):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from collections import defaultdict
+    import itertools
+
+    outcomes = ['jockeyed', 'reneged']
+    # Gather all anchors and intervals present
+    anchors_policy = sorted(set(h.get('anchor', None) for h in histories_policy))
+    anchors_nopolicy = sorted(set(h.get('anchor', None) for h in histories_nopolicy))
+    all_anchors = [a for a in anchors_policy + anchors_nopolicy if a is not None]
+    all_anchors = sorted(set(all_anchors))
+    intervals_policy = set(h.get('interval', None) for h in histories_policy)
+    intervals_nopolicy = set(h.get('interval', None) for h in histories_nopolicy)
+    all_intervals = sorted([i for i in intervals_policy | intervals_nopolicy if i is not None])
+
+    nrows = len(all_intervals)
+    ncols = len(all_anchors) * len(outcomes)
+
+    def extract_by_anchor_interval(histories, anchor, interval, outcome):
+        xs, ys = [], []
+        for h in histories:
+            if h.get('anchor') != anchor or h.get('interval') != interval:
+                continue
+            for obs in h['history']:
+                if isinstance(obs, dict):
+                    waited = obs.get('Waited', None)
+                    cid = obs.get('customerid', '')
+                    queue_length = obs.get('queue_length', None)
+                    if waited is not None and queue_length is not None:
+                        if (outcome == 'reneged' and '_reneged' in cid) or \
+                           (outcome == 'jockeyed' and '_jockeyed' in cid):
+                            xs.append(queue_length)
+                            ys.append(waited)
+                elif isinstance(obs, list):
+                    for o in obs:
+                        if not isinstance(o, dict):
+                            continue
+                        waited = o.get('Waited', None)
+                        cid = o.get('customerid', '')
+                        queue_length = o.get('queue_length', None)
+                        if waited is not None and queue_length is not None:
+                            if (outcome == 'reneged' and '_reneged' in cid) or \
+                               (outcome == 'jockeyed' and '_jockeyed' in cid):
+                                xs.append(queue_length)
+                                ys.append(waited)
+        return np.array(xs), np.array(ys)
+
+    def binned_average(xs, ys, window=1):
+        from collections import defaultdict
+        bins = defaultdict(list)
+        for x, y in zip(xs, ys):
+            bins[int(x)].append(y)
+        bin_xs = sorted(bins.keys())
+        bin_ys = [np.mean(bins[x]) for x in bin_xs]
+        if window > 1 and len(bin_ys) >= window:
+            bin_ys = np.convolve(bin_ys, np.ones(window)/window, mode='same')
+        return np.array(bin_xs), np.array(bin_ys)
+
+    color_map = {
+        'Policy': 'tab:blue',
+        'No Policy': 'tab:orange'
+    }
+
+    fig, axs = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.3 * nrows), squeeze=False, sharey='row')
+
+    for row, interval in enumerate(all_intervals):
+        for col, (anchor, outcome) in enumerate(itertools.product(all_anchors, outcomes)):
+            ax = axs[row, col]
+            # Policy
+            xs_policy, ys_policy = extract_by_anchor_interval(histories_policy, anchor, interval, outcome)
+            bin_xs_p, bin_ys_p = binned_average(xs_policy, ys_policy, window)
+            if len(bin_xs_p) > 0:
+                ax.plot(bin_xs_p, bin_ys_p, '-', label='Policy', color=color_map['Policy'])
+            # No Policy
+            xs_np, ys_np = extract_by_anchor_interval(histories_nopolicy, anchor, interval, outcome)
+            bin_xs_np, bin_ys_np = binned_average(xs_np, ys_np, window)
+            if len(bin_xs_np) > 0:
+                ax.plot(bin_xs_np, bin_ys_np, '--', label='No Policy', color=color_map['No Policy'])
+            # Labels
+            if row == 0:
+                ax.set_title(f"{anchor}\n{outcome.title()}", fontsize=12)
+            if col == 0:
+                ax.set_ylabel(f"Interval: {interval}\nAvg Waiting Time", fontsize=11)
+            ax.set_xlabel('Queue Length')
+            ax.grid(True, linestyle='--', alpha=0.5)
+            ax.legend(fontsize=9)
+    fig.suptitle(title, fontsize=17)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.show()
-    
+
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+from collections import defaultdict
+
+def full_waiting_time_plot(histories_policy, histories_nopolicy, window=1, title="Avg Waiting Time vs Queue Length"):
+    outcomes = ['jockeyed', 'reneged']
+
+    def aggregate_by_anchor_and_interval(histories, outcome):
+        agg = defaultdict(lambda: defaultdict(lambda: ([], [])))
+        for h in histories:
+            anchor = h['anchor']
+            interval = h['interval']
+            for obs in h['history']:
+                waited = obs.get('Waited')
+                cid = obs.get('customerid', '')
+                queue_length = obs.get('queue_length')
+                if waited is not None and queue_length is not None:
+                    if (outcome == 'reneged' and '_reneged' in cid) or \
+                       (outcome == 'jockeyed' and '_jockeyed' in cid):
+                        agg[anchor][interval][0].append(queue_length)
+                        agg[anchor][interval][1].append(waited)
+        return agg
+
+    def binned_average(xs, ys, window=1):
+        bins = defaultdict(list)
+        for x, y in zip(xs, ys):
+            bins[int(x)].append(y)
+        bin_xs = sorted(bins.keys())
+        bin_ys = [np.mean(bins[x]) for x in bin_xs]
+        if window > 1 and len(bin_ys) >= window:
+            bin_ys = np.convolve(bin_ys, np.ones(window)/window, mode='same')
+        return np.array(bin_xs), np.array(bin_ys)
+
+    anchors = sorted(set(h['anchor'] for h in histories_policy + histories_nopolicy))
+    intervals = sorted(set(h['interval'] for h in histories_policy + histories_nopolicy))
+
+    agg_policy = {o: aggregate_by_anchor_and_interval(histories_policy, o) for o in outcomes}
+    agg_nopolicy = {o: aggregate_by_anchor_and_interval(histories_nopolicy, o) for o in outcomes}
+
+    nrows = len(intervals)
+    ncols = len(anchors)
+    fig, axs = plt.subplots(nrows, ncols, figsize=(6 * ncols, 4 * nrows), squeeze=False)
+
+    colors = {'jockeyed': 'tab:blue', 'reneged': 'tab:red'}
+    styles = {'Policy': '-', 'No Policy': '--'}
+
+    for i, interval in enumerate(intervals):
+        for j, anchor in enumerate(anchors):
+            ax = axs[i, j]
+            for outcome in outcomes:
+                # Policy
+                xs_p, ys_p = agg_policy[outcome][anchor][interval]
+                bin_xs_p, bin_ys_p = binned_average(xs_p, ys_p, window)
+                if len(bin_xs_p) > 0:
+                    ax.plot(bin_xs_p, bin_ys_p, styles['Policy'], label=f'Policy - {outcome}', color=colors[outcome])
+                # No Policy
+                xs_np, ys_np = agg_nopolicy[outcome][anchor][interval]
+                bin_xs_np, bin_ys_np = binned_average(xs_np, ys_np, window)
+                if len(bin_xs_np) > 0:
+                    ax.plot(bin_xs_np, bin_ys_np, styles['No Policy'], label=f'No Policy - {outcome}', color=colors[outcome])
+            if i == 0:
+                ax.set_title(f"Anchor: {anchor}", fontsize=14)
+            if j == 0:
+                ax.set_ylabel(f"Interval: {interval}\nAvg Waiting Time", fontsize=12)
+            ax.set_xlabel("Queue Length")
+            ax.grid(True, linestyle='--', alpha=0.5)
+            ax.legend(fontsize=9)
+    fig.suptitle(title, fontsize=18)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.show()
+
+
+def plot_waiting_time_by_anchor_and_interval(     histories_policy, histories_nopolicy, window=1, title="Avg Waiting Time vs Queue Length"):
+    outcomes = ['jockeyed', 'reneged']
+
+    def aggregate_by_anchor_and_interval(histories, outcome):
+        agg = defaultdict(lambda: defaultdict(lambda: ([], [])))
+        for h in histories:
+            anchor = h['anchor']
+            interval = h['interval']
+            for obs in h['history']:
+                waited = obs.get('Waited')
+                cid = obs.get('customerid', '')
+                queue_length = obs.get('queue_length')
+                if waited is not None and queue_length is not None:
+                    if (outcome == 'reneged' and '_reneged' in cid) or \
+                       (outcome == 'jockeyed' and '_jockeyed' in cid):
+                        agg[anchor][interval][0].append(queue_length)
+                        agg[anchor][interval][1].append(waited)
+        return agg
+
+    def binned_average(xs, ys, window=1):
+        bins = defaultdict(list)
+        for x, y in zip(xs, ys):
+            bins[int(x)].append(y)
+        bin_xs = sorted(bins.keys())
+        bin_ys = [np.mean(bins[x]) for x in bin_xs]
+        if window > 1 and len(bin_ys) >= window:
+            bin_ys = np.convolve(bin_ys, np.ones(window)/window, mode='same')
+        return np.array(bin_xs), np.array(bin_ys)
+
+    anchors = sorted(set(h['anchor'] for h in histories_policy + histories_nopolicy))
+    intervals = sorted(set(h['interval'] for h in histories_policy + histories_nopolicy))
+
+    agg_policy = {o: aggregate_by_anchor_and_interval(histories_policy, o) for o in outcomes}
+    agg_nopolicy = {o: aggregate_by_anchor_and_interval(histories_nopolicy, o) for o in outcomes}
+
+    nrows = len(intervals)
+    ncols = len(anchors)
+    fig, axs = plt.subplots(nrows, ncols, figsize=(6 * ncols, 4 * nrows), squeeze=False)
+
+    colors = {'jockeyed': 'tab:blue', 'reneged': 'tab:red'}
+    styles = {'Policy': '-', 'No Policy': '--'}
+
+    for i, interval in enumerate(intervals):
+        for j, anchor in enumerate(anchors):
+            ax = axs[i, j]
+            for outcome in outcomes:
+                # Policy
+                xs_p, ys_p = agg_policy[outcome][anchor][interval]
+                bin_xs_p, bin_ys_p = binned_average(xs_p, ys_p, window)
+                if len(bin_xs_p) > 0:
+                    ax.plot(bin_xs_p, bin_ys_p, styles['Policy'], label=f'Policy - {outcome}', color=colors[outcome])
+                # No Policy
+                xs_np, ys_np = agg_nopolicy[outcome][anchor][interval]
+                bin_xs_np, bin_ys_np = binned_average(xs_np, ys_np, window)
+                if len(bin_xs_np) > 0:
+                    ax.plot(bin_xs_np, bin_ys_np, styles['No Policy'], label=f'No Policy - {outcome}', color=colors[outcome])
+            if i == 0:
+                ax.set_title(f"Anchor: {anchor}", fontsize=14)
+            if j == 0:
+                ax.set_ylabel(f"Interval: {interval}\nAvg Waiting Time", fontsize=12)
+            ax.set_xlabel("Queue Length")
+            ax.grid(True, linestyle='--', alpha=0.5)
+            ax.legend(fontsize=9)
+    fig.suptitle(title, fontsize=18)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.show()
        
 ######### Globals ########
 request_log = []
@@ -3868,7 +4150,7 @@ def main():
     utility_basic = 1.0
     discount_coef = 0.1
     requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True)
-    duration = 50 #100 #  
+    duration = 20 #500 #  
     
     # Set intervals for dispatching queue states
     intervals = [3, 5, 7, 9]
@@ -3877,63 +4159,167 @@ def main():
     
     jockey_anchors = ["steady_state_distribution", "inter_change_time"]
 
-    all_results = {anchor: [] for anchor in jockey_anchors}
-    
-    
+    all_results = {anchor: [] for anchor in jockey_anchors}       
     
     # Iterate through each interval in the intervals array
     all_reneging_rates = []
     all_jockeying_rates = []             
     
-    def run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled, jockey_anchors):
-		
+    ############################## last attempt ######################################
+    
+    def run_simulations_equal_samples(utility_basic, discount_coef, intervals, duration, jockey_anchors, policy_enabled):
         results = {
             interval: {
-                "reneging_rates": {anchor: {} for anchor in jockey_anchors},
-                "jockeying_rates": {anchor: {} for anchor in jockey_anchors}
+                "reneging_rates": {anchor: None for anchor in jockey_anchors},
+                "jockeying_rates": {anchor: None for anchor in jockey_anchors}
             }
             for interval in intervals
         }
-        
-        # Optionally, collect histories for the last interval/anchor run
-        all_histories = []  # To store (interval, anchor, history) for each run
-        
+        all_histories = []
         for interval in intervals:
             for anchor in jockey_anchors:
-                requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=policy_enabled)
-                requestObj.jockey_anchor = anchor  # Make sure this attribute is respected in RequestQueue
+                # Optionally use a fixed seed for reproducibility:
+                seed = hash((interval, anchor, policy_enabled)) % (2**32)
+                requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=policy_enabled, seed=seed)
+                requestObj.jockey_anchor = anchor
                 requestObj.run(duration, interval)
-                results[interval]["reneging_rates"][anchor] = {
-                    "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
-                    "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
-                }
-                results[interval]["jockeying_rates"][anchor] = {
-                    "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
-                    "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
-                }
-                
-                # ===> Capture the history for this run
+                # Example: Calculate rates for this anchor/interval (adjust as needed for your code)
+                reneged = sum(1 for obs in requestObj.history if '_reneged' in getattr(obs, 'customerid', ''))
+                jockeyed = sum(1 for obs in requestObj.history if '_jockeyed' in getattr(obs, 'customerid', ''))
+                total = len(requestObj.history)
+                results[interval]["reneging_rates"][anchor] = reneged / total if total else 0
+                results[interval]["jockeying_rates"][anchor] = jockeyed / total if total else 0
+                # Store full history
                 all_histories.append({
+                    "policy_enabled": policy_enabled,
                     "interval": interval,
                     "anchor": anchor,
-                    "history": list(requestObj.history)  # Make a copy
+                    "history": list(requestObj.history)
                 })
-                
-                # Clear log if needed
-                if hasattr(requestObj, "request_log"):
-                    requestObj.request_log.clear()
-                elif "request_log" in globals():
-                    request_log.clear()
-                    
+        return results, all_histories 
+        
+        
+    def run_simulations_with_results(  utility_basic,    discount_coef,    intervals,    duration,    jockey_anchors,    policy_enabled,    RequestQueueClass ):
+        """
+        Returns:
+            results: Nested dict [interval][stat_name][anchor] = rate
+            all_histories: List of dicts (histories for plotting)
+        """
+        results = {
+            interval: {
+                "reneging_rates": {anchor: None for anchor in jockey_anchors},
+                "jockeying_rates": {anchor: None for anchor in jockey_anchors}
+            }
+            for interval in intervals
+        }
+        all_histories = []
+        for interval in intervals:
+            for anchor in jockey_anchors:
+                # Optional: Use a fixed seed for reproducibility
+                seed = hash((interval, anchor, policy_enabled)) % (2**32)
+                rq = requestObj(
+                    utility_basic,
+                    discount_coef,
+                    policy_enabled=policy_enabled,
+                    seed=seed  # Only include if your class supports it
+                )
+                rq.jockey_anchor = anchor
+                rq.run(duration, interval)
+                # Convert history to dicts if not already
+                event_list = []
+                reneged = 0
+                jockeyed = 0
+                total = 0
+                for obs in rq.history:
+                    if isinstance(obs, dict):
+                        event_list.append(obs)
+                        cid = obs.get("customerid", "")
+                    else:
+                        d = {
+                            "Waited": getattr(obs, "Waited", None),
+                            "queue_length": getattr(obs, "queue_length", None),
+                            "customerid": getattr(obs, "customerid", "")
+                        }
+                        event_list.append(d)
+                        cid = d["customerid"]
+                    total += 1
+                    if "_reneged" in cid:
+                        reneged += 1
+                    if "_jockeyed" in cid:
+                        jockeyed += 1
+                results[interval]["reneging_rates"][anchor] = reneged / total if total else 0
+                results[interval]["jockeying_rates"][anchor] = jockeyed / total if total else 0
+                all_histories.append({
+                    "policy_enabled": policy_enabled,
+                    "interval": interval,
+                    "anchor": anchor,
+                    "history": event_list
+                })
         return results, all_histories
-    
+        
+        # Run for both policy modes
+    results_nopolicy, histories_nopolicy = run_simulations_with_results(    utility_basic,    discount_coef,    intervals,    duration,    jockey_anchors,    False,    requestObj)
+    results_policy, histories_policy = run_simulations_with_results(    utility_basic,    discount_coef,    intervals,    duration,    jockey_anchors,    True,    requestObj)
+
+    #histories_nopolicy = run_simulations(    utility_basic,    discount_coef,    intervals,    duration,    jockey_anchors,    policy_enabled=False,    RequestQueueClass=RequestQueue)
+
+           
     # With policy-driven service rates
-    results_policy , histories_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=True,  jockey_anchors=jockey_anchors)    
+    #####results_policy , histories_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, jockey_anchors=jockey_anchors, policy_enabled=True)    
 
     # With static/non-policy-driven service rates
-    results_no_policy, histories_nopolicy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=False,  jockey_anchors=jockey_anchors)          
+    #####results_no_policy, histories_nopolicy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, jockey_anchors=jockey_anchors, policy_enabled=False)   
+   
+    ##################################### End of last attempt ##################################               
     
-    ######## block that works starts here  ########
+    waiting_times, outcomes, time_stamps = extract_waiting_times_and_outcomes(requestObj)
+    
+   
+    '''
+     come back to the functions below
+    '''
+    # plot_boxplot_waiting_times_by_outcome(waiting_times, outcomes)
+    #plot_avg_waiting_time_over_time(waiting_times, time_stamps, window=10)
+    
+    # service rates and jockeying/reneging rates not smooth
+    requestObj.plot_rates_by_intervals()
+    
+    requestObj.plot_reneged_waiting_times_by_interval()
+    requestObj.plot_jockeyed_waiting_times_by_interval()
+    
+    plot_six_panels(results_no_policy, intervals, jockey_anchors)
+    
+    plot_six_panels(results_policy, intervals, jockey_anchors)
+    
+    plot_waiting_time_by_anchor_and_interval(histories_policy, histories_nopolicy, window=2)
+    
+    ###### plot_avg_wait_by_queue_length_grouped_by_anchor(histories_policy, histories_nopolicy, window=2)
+    ###### plot_avg_wait_by_queue_length(histories_policy, histories_nopolicy, window=2)
+    
+    ###### plot_avg_wait_by_queue_length_grouped(histories_policy, histories_nopolicy, window=2)
+    
+    # Choose a specific simulation (e.g., interval=3, anchor='steady_state_distribution')
+    # histories_policy and histories_nopolicy are lists of dicts, each with 'interval', 'anchor', 'history'
+    
+    ###### plot_all_avg_waiting_time_by_anchor_interval(histories_policy, histories_nopolicy, window=20)        
+    
+    # --- New: Plot policy and model histories ---
+    print("\n[Diagnostics] Plotting policy evolution...")
+    plot_policy_history(requestObj.policy1.get_policy_history())
+    plot_policy_history(requestObj.policy2.get_policy_history())
+
+    print("\n[Diagnostics] Plotting predictive model fit history...")
+    plot_predictive_model_history(requestObj.predictive_model.get_fit_history())
+      
+	 
+if __name__ == "__main__":
+    main()
+    
+# plot rates for each anchor, interval, against number of requests 
+#plot_rates_vs_requests(results, intervals=[3,6,9], anchors=["steady_state_distribution", "inter_change_time"], metric="jockeying_rates")
+#plot_rates_vs_requests(results, intervals=[3,6,9], anchors=["steady_state_distribution", "inter_change_time"], metric="reneging_rates")
+
+######## block that works starts here  ########
     '''
     for anchor in jockey_anchors:
         for interval in intervals:
@@ -3957,9 +4343,7 @@ def main():
     '''
     ######## block that works ends here  ########
     
-    waiting_times, outcomes, time_stamps = extract_waiting_times_and_outcomes(requestObj)
-    
-    # After all interval runs, plot the aggregated results with smoothing
+     # After all interval runs, plot the aggregated results with smoothing
     #fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
     #window_length = 9  # Must be odd and <= length of data
     #polyorder = 2
@@ -4051,51 +4435,3 @@ def main():
     '''
         
     # plot_waiting_time_cdf(waiting_times)
-    '''
-     come back to the functions below
-    '''
-    # plot_boxplot_waiting_times_by_outcome(waiting_times, outcomes)
-    #plot_avg_waiting_time_over_time(waiting_times, time_stamps, window=10)
-    
-    # service rates and jockeying/reneging rates not smooth
-    requestObj.plot_rates_by_intervals()
-    
-    requestObj.plot_reneged_waiting_times_by_interval()
-    requestObj.plot_jockeyed_waiting_times_by_interval()
-    
-    plot_six_panels(results_no_policy, intervals, jockey_anchors)
-    
-    plot_six_panels(results_policy, intervals, jockey_anchors)  
-    
-    #print("\n => ", histories_policy, "\n **> ", histories_nopolicy)
-    
-    # Choose a specific simulation (e.g., interval=3, anchor='steady_state_distribution')
-    # histories_policy and histories_nopolicy are lists of dicts, each with 'interval', 'anchor', 'history'
-    
-    plot_all_avg_waiting_time_by_anchor_interval(histories_policy, histories_nopolicy, window=20)    
-    
-    # plot rates for each anchor, interval, against number of requests 
-    #plot_rates_vs_requests(results, intervals=[3,6,9], anchors=["steady_state_distribution", "inter_change_time"], metric="jockeying_rates")
-    #plot_rates_vs_requests(results, intervals=[3,6,9], anchors=["steady_state_distribution", "inter_change_time"], metric="reneging_rates")
-    
-    # --- New: Plot policy and model histories ---
-    print("\n[Diagnostics] Plotting policy evolution...")
-    plot_policy_history(requestObj.policy.get_policy_history())
-
-    print("\n[Diagnostics] Plotting predictive model fit history...")
-    plot_predictive_model_history(requestObj.predictive_model.get_fit_history())
-    
-    # requestObj.plot_waiting_time_vs_rates_by_interval() #plot_waiting_time_vs_rates()
-
-    # Run the dispatch intervals
-    # requestObj.setup_dispatch_intervals(intervals)
-    
-    ### requestObj.run(duration, intervals[0])
-    
-    #requestObj.run_scheduler(duration=100)   
-    
-    # Plot the rates after the simulation
-    ### requestObj.plot_rates()       # plot_rates_by_intervals() #       
-	 
-if __name__ == "__main__":
-    main()
