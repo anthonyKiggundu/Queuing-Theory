@@ -3484,7 +3484,7 @@ def in_old_function_main():
     axs[1].legend()
 
 
-def plot_six_panels(results, intervals, jockey_anchors):
+def plot_six_panels(results, intervals, jockey_anchors): # results
     #fig, axs = plt.subplots(2, 3, figsize=(18, 8), sharex=False)
     fig, axs = plt.subplots(2, len(intervals), figsize=(6*len(intervals), 8), sharex=False)
     colors = {
@@ -4255,6 +4255,12 @@ def main():
                 )
                 rq.jockey_anchor = anchor
                 rq.run(duration, interval)
+                
+                results[interval]["reneging_rates"][anchor]["server_1"] = requestObj.interval_stats["reneging_rate"]["server_1"]
+                results[interval]["jockeying_rates"][anchor]["server_1"] = requestObj.interval_stats["jockeying_rate"]["server_1"]
+                results[interval]["reneging_rates"][anchor]["server_2"] = requestObj.interval_stats["reneging_rate"]["server_2"]
+                results[interval]["jockeying_rates"][anchor]["server_2"] = requestObj.interval_stats["jockeying_rate"]["server_2"]
+                
                 # Convert history to dicts if not already
                 event_list = []
                 reneged = 0
