@@ -543,7 +543,7 @@ class RequestQueue:
                  time=0.0, outage_risk=0.1, customerid="",learning_mode='online', decision_rule='risk_control',
                  alt_option='fixed_revenue', min_amount_observations=1, dist_local_delay=stats.expon, exp_time_service_end=0.0,
                  para_local_delay=[0.01,0.1,1.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, 
-                 batchid=np.int16, policy_enabled=True):
+                 batchid=np.int16, policy_enabled=True, seed=None):
                  
         
         self.dispatch_data = {}
@@ -635,6 +635,11 @@ class RequestQueue:
         self.policy1 = ServerPolicy(self.predictive_model, min_rate=1.0, max_rate=15.0)
         self.policy2 = ServerPolicy(self.predictive_model, min_rate=1.0, max_rate=15.0)
         
+        self.interval_stats = {
+            "reneging_rate": {"server_1": [], "server_2": []},
+            "jockeying_rate": {"server_1": [], "server_2": []}
+        }
+        
         # Schedule the dispatch function to run every minute (or any preferred interval)
         # schedule.every(1).minutes.do(self.dispatch_queue_state, queue=queue_1, queue_name="Server1")
         # schedule.every(1).minutes.do(dispatch_queue_state, queue=queue_2, queue_name="Server2")
@@ -642,9 +647,20 @@ class RequestQueue:
         # Start the scheduler     
         #scheduler_thread = threading.Thread(target=self.run_scheduler)
         #scheduler_thread.start()
+        seed=None
         
         return
     
+    
+    def record_interval_rates(self):
+        for server_id in ["1", "2"]:
+            server_label = f"server_{server_id}"
+            curr_queue = self.dict_queues_obj[server_id]
+            ren_rate = self.compute_reneging_rate(curr_queue)
+            jky_rate = self.compute_jockeying_rate(curr_queue)
+            self.interval_stats["reneging_rate"][server_label].append(ren_rate)
+            self.interval_stats["jockeying_rate"][server_label].append(jky_rate)
+            
         
     def compute_reneging_rate(self, queue):
         """Compute the reneging rate for a given queue."""
@@ -945,6 +961,8 @@ class RequestQueue:
                 time.sleep(1)
                 self.processEntries(all_entries, i, interval)
                 self.time+=self.time_res
+                
+                self.record_interval_rates()
             
                 # Reset the dispatch data at the end of each interval
                 #if (i + 1) % (interval / self.time_res) == 0:  # Check if the interval has ended
@@ -2737,7 +2755,7 @@ class RequestQueue:
             self.curr_obs_jockey.append(self.objObserv.get_jockey_obs(curr_queue_id, queue_intensity, curr_pose)) 
             self.history.append(self.objObserv.get_jockey_obs(curr_queue_id, queue_intensity, curr_pose))                                     
             self.curr_req = req        
-            self.objQueues.update_queue_status(curr_queue_id)# long_avg_serv_time
+            self.objQueues.update_queue_status(curr_queue_id) # long_avg_serv_time
         
         return
         
@@ -3485,6 +3503,8 @@ def plot_six_panels(results, intervals, jockey_anchors):
             for server in ["server_1", "server_2"]:
                 y = np.array(results[interval]["reneging_rates"][anchor][server])
                 x = np.arange(len(y))
+                #y = np.array([results[interval]["reneging_rates"][anchor][server]])
+                #x = np.arange(len(y))
                 ax_ren.plot(
                     x, y,
                     label=f"{anchor} | {server.replace('_',' ').title()}",
@@ -3500,7 +3520,9 @@ def plot_six_panels(results, intervals, jockey_anchors):
         ax_jky = axs[1, col]
         for anchor in jockey_anchors:
             for server in ["server_1", "server_2"]:
-                y = np.array(results[interval]["jockeying_rates"][anchor][server])
+                #y = np.array(results[interval]["jockeying_rates"][anchor][server])
+                #x = np.arange(len(y))
+                y = np.array([results[interval]["jockeying_rates"][anchor][server]])
                 x = np.arange(len(y))
                 ax_jky.plot(
                     x, y,
@@ -4150,7 +4172,7 @@ def main():
     utility_basic = 1.0
     discount_coef = 0.1
     requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True)
-    duration = 20 #500 #  
+    duration = 5 # 0   
     
     # Set intervals for dispatching queue states
     intervals = [3, 5, 7, 9]
@@ -4174,7 +4196,8 @@ def main():
                 "jockeying_rates": {anchor: None for anchor in jockey_anchors}
             }
             for interval in intervals
-        }
+        }                
+        
         all_histories = []
         for interval in intervals:
             for anchor in jockey_anchors:
@@ -4183,6 +4206,12 @@ def main():
                 requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=policy_enabled, seed=seed)
                 requestObj.jockey_anchor = anchor
                 requestObj.run(duration, interval)
+                
+                results[interval]["reneging_rates"][anchor]["server_1"] = requestObj.interval_stats["reneging_rate"]["server_1"]
+                results[interval]["jockeying_rates"][anchor]["server_1"] = requestObj.interval_stats["jockeying_rate"]["server_1"]
+                results[interval]["reneging_rates"][anchor]["server_2"] = requestObj.interval_stats["reneging_rate"]["server_2"]
+                results[interval]["jockeying_rates"][anchor]["server_2"] = requestObj.interval_stats["jockeying_rate"]["server_2"]
+                
                 # Example: Calculate rates for this anchor/interval (adjust as needed for your code)
                 reneged = sum(1 for obs in requestObj.history if '_reneged' in getattr(obs, 'customerid', ''))
                 jockeyed = sum(1 for obs in requestObj.history if '_jockeyed' in getattr(obs, 'customerid', ''))
@@ -4196,10 +4225,11 @@ def main():
                     "anchor": anchor,
                     "history": list(requestObj.history)
                 })
+                
         return results, all_histories 
         
         
-    def run_simulations_with_results(  utility_basic,    discount_coef,    intervals,    duration,    jockey_anchors,    policy_enabled,    RequestQueueClass ):
+    def run_simulations_with_results(  utility_basic,    discount_coef,    intervals,    duration,    jockey_anchors,    policy_enabled,    RequestQueue ):
         """
         Returns:
             results: Nested dict [interval][stat_name][anchor] = rate
@@ -4217,11 +4247,11 @@ def main():
             for anchor in jockey_anchors:
                 # Optional: Use a fixed seed for reproducibility
                 seed = hash((interval, anchor, policy_enabled)) % (2**32)
-                rq = requestObj(
+                rq = RequestQueue(
                     utility_basic,
                     discount_coef,
                     policy_enabled=policy_enabled,
-                    seed=seed  # Only include if your class supports it
+                    seed=42  # Only include if your class supports it
                 )
                 rq.jockey_anchor = anchor
                 rq.run(duration, interval)
@@ -4258,8 +4288,8 @@ def main():
         return results, all_histories
         
         # Run for both policy modes
-    results_nopolicy, histories_nopolicy = run_simulations_with_results(    utility_basic,    discount_coef,    intervals,    duration,    jockey_anchors,    False,    requestObj)
-    results_policy, histories_policy = run_simulations_with_results(    utility_basic,    discount_coef,    intervals,    duration,    jockey_anchors,    True,    requestObj)
+    results_no_policy, histories_nopolicy = run_simulations_with_results(    utility_basic,    discount_coef,    intervals,    duration,    jockey_anchors,    False,    RequestQueue)
+    results_policy, histories_policy = run_simulations_with_results(    utility_basic,    discount_coef,    intervals,    duration,    jockey_anchors,    True,    RequestQueue)
 
     #histories_nopolicy = run_simulations(    utility_basic,    discount_coef,    intervals,    duration,    jockey_anchors,    policy_enabled=False,    RequestQueueClass=RequestQueue)
 
