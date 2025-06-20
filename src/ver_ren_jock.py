@@ -605,7 +605,7 @@ class A2CAgent:
 
         if not self.rewards:
             print("Warning: rewards is empty. Skipping update.")
-            return
+            return 0.0, 0.0, 0.0
             
         R = 0
         returns = []
@@ -633,6 +633,9 @@ class A2CAgent:
         self.log_probs = []
         self.values = []
         self.rewards = []
+        
+        # Return scalar losses for logging
+        return actor_loss.item(), critic_loss.item(), loss.item()
 
 
 class RequestQueue:
@@ -964,9 +967,13 @@ class RequestQueue:
             episode_start_time = time.time()
             i = 0
             episode_policy_entropy = 0  # Track total policy entropy for the episode
-            losses = {"actor_loss": 0, "critic_loss": 0, "total_loss": 0}
+            #losses = {"actor_loss": 0, "critic_loss": 0, "total_loss": 0}
             jockeying_rates = []
             reneging_rates = []
+            
+            actor_losses = []
+            critic_losses = []
+            total_losses = []
         
             for i in step_loop: 
                 self.arr_rate = self.objQueues.get_arrivals_rates()
@@ -1026,16 +1033,7 @@ class RequestQueue:
                 # print("\n NEXT STATE: ", next_state)
                 
                 # Update queue state in the environment
-                self.env.update_queue_state(next_state)
-                
-                    #queue_id=queue_id,
-                    #curr_queue=curr_queue,
-                    #dest_queue=dest_queue,
-                    #queue_sizes=queue_sizes,
-                    #service_rates=service_rates,
-                    #total_reward=total_reward,
-                    #action=action,
-                #)
+                self.env.update_queue_state(next_state)                               
 
                 # Step 3: Store the reward for training
                 self.agent.store_reward(reward)
@@ -1069,7 +1067,12 @@ class RequestQueue:
                 self.set_batch_id(i)
                 
             # Update the RL agent at the end of each episode
-            self.agent.update()
+            #self.agent.update()
+            # Update the RL agent at the end of each episode
+            actor_loss, critic_loss, total_loss = self.agent.update()
+            actor_losses.append(actor_loss)
+            critic_losses.append(critic_loss)
+            total_losses.append(total_loss)
             
             # Calculate episode duration
             episode_duration = time.time() - episode_start_time
@@ -1082,23 +1085,32 @@ class RequestQueue:
                 "steps": i,
                 "duration": episode_duration,
                 #"policy_entropy": episode_policy_entropy / i if i > 0 else 0,
-                "actor_loss": losses["actor_loss"],
-                "critic_loss": losses["critic_loss"],
-                "total_loss": losses["total_loss"],
+                "actor_loss": sum(actor_losses) / len(actor_losses) if actor_losses else 0,
+                "critic_loss": sum(critic_losses) / len(critic_losses) if critic_losses else 0,
+                "total_loss": sum(total_losses) / len(total_losses) if total_losses else 0,
                 "average_jockeying_rate": sum(jockeying_rates) / len(jockeying_rates) if jockeying_rates else 0,
                 "average_reneging_rate": sum(reneging_rates) / len(reneging_rates) if reneging_rates else 0
             }
             metrics.append(episode_metrics)
 
             # Print episode summary
-            print(f"Episode {episode + 1} Summary: Total Reward={total_reward}, "
-                  f"Avg Reward={episode_metrics['average_reward']:.2f}, Steps={i}, "
-                  # f"Policy Entropy={episode_metrics['policy_entropy']:.2f}, "
-                  f"Actor Loss={losses['actor_loss']:.4f}, Critic Loss={losses['critic_loss']:.4f}, "
-                  f"Total Loss={losses['total_loss']:.4f}, Steps={i}, " # steps
-                  f"Duration={episode_duration:.2f}s")
+            #print(f"Episode {episode + 1} Summary: Total Reward={total_reward}, "
+            #      f"Avg Reward={episode_metrics['average_reward']:.2f}, Steps={i}, "
+            #      # f"Policy Entropy={episode_metrics['policy_entropy']:.2f}, "
+            #      f"Actor Loss={losses['actor_loss']:.4f}, Critic Loss={losses['critic_loss']:.4f}, "
+            #      f"Total Loss={losses['total_loss']:.4f}, Steps={i}, " # steps
+            #      f"Duration={episode_duration:.2f}s")
               
-            print(f"Episode {episode + 1} finished with a total reward of {total_reward}")
+            #print(f"Episode {episode + 1} finished with a total reward of {total_reward}")
+            
+            # Print episode summary
+            print(f"Episode {episode + 1} Summary: Total Reward={episode_metrics['total_reward']}, "
+                f"Avg Reward={episode_metrics['average_reward']:.2f}, Steps={episode_metrics['steps']}, "      
+                f"Actor Loss={episode_metrics['actor_loss']:.4f}, Critic Loss={episode_metrics['critic_loss']:.4f}, "
+                f"Total Loss={episode_metrics['total_loss']:.4f}, "
+                f"Duration={episode_metrics['duration']:.2f}s")
+
+            print(f"Episode {episode + 1} finished with a total reward of {episode_metrics['total_reward']}")
             
             # Optional: Introduce a small delay between episodes for better monitoring
             time.sleep(0.1)
@@ -1734,44 +1746,7 @@ class RequestQueue:
                      "intensity_based_info": self.uses_intensity_based,				 
                 })	               
                           
-                return self.srv2_history  # self.history[0]  
-                  
-    
-    def old_get_queue_state(self, queueid):
-        """
-        Returns the most recent state of the specified queue (server 1 or server 2)
-        from the srv1_history or srv2_history variables. Ensures consistent dimensions.
-        """
-        # Choose the appropriate history based on the queue ID
-        if queueid == "1":
-            history = self.srv1_history
-        elif queueid == "2":
-            history = self.srv2_history
-        else:
-            raise ValueError(f"Invalid queue ID: {queueid}")
-
-        # Check if the history is empty
-        if not history:
-            print(f"Warning: History for queue {queueid} is empty. Returning default state.")
-            return [0] * 10  # Default state with 10 zeros
-
-        # Fetch the most recent state
-        latest_state = history[-1]
-
-        # Ensure the state has the correct dimensions
-        if isinstance(latest_state, dict):
-            # Convert the dictionary to a list of its values (ensure consistent order)
-            state_values = list(latest_state.values())
-        elif isinstance(latest_state, list):
-            state_values = latest_state
-        else:
-            raise TypeError(f"Unexpected state type in history for queue {queueid}: {type(latest_state)}")
-
-        # Pad or truncate the state to make it 1x10
-        state_values = (state_values[:10] + [0] * 10)[:10]
-
-        return state_values
-    
+                return self.srv2_history  # self.history[0]                      
     
 
     def serveOneRequest(self, queueID,  jockeying_rate, reneging_rate, arrived_now): # dispatch_all_queues
@@ -2091,7 +2066,16 @@ class RequestQueue:
             return
             
         else:
-            self.queue = np.delete(self.queue, curr_pose) # index)        
+            #self.queue = np.delete(self.queue, curr_pose) # index)        
+            #self.queueID = queueid
+            
+            # Get the queue as a list
+            queue = list(self.dict_queues_obj[queueid])
+            # Remove the request at curr_pose if it exists
+            if 0 <= curr_pose < len(queue):
+                queue.pop(curr_pose)
+            # Update the main queue object
+            self.dict_queues_obj[queueid] = queue
             self.queueID = queueid  
         
             req.customerid = req.customerid+"_reneged"
@@ -2152,16 +2136,27 @@ class RequestQueue:
             return                   
             
         else:	
-            np.delete(curr_queue, curr_pose) # np.where(id_queue==req_id)[0][0])
-            reward = 1.0
-            req.time_entrance = self.time # timer()
-            dest_queue = np.append( dest_queue, req)
+            #np.delete(curr_queue, curr_pose) # np.where(id_queue==req_id)[0][0])
+            #reward = 1.0
+            #req.time_entrance = self.time # timer()
+            #dest_queue = np.append( dest_queue, req)
         
-            self.queueID = curr_queue_id        
-        
+            #self.queueID = curr_queue_id        
+            
+            # Remove from current queue
+            queue = list(self.dict_queues_obj[curr_queue_id])
+            if 0 <= curr_pose < len(queue):
+                queue.pop(curr_pose)
+            self.dict_queues_obj[curr_queue_id] = queue
+
+            # Add to destination queue
+            dest_queue_list = list(self.dict_queues_obj[dest_queue_id])
+            dest_queue_list.append(req)
+            self.dict_queues_obj[dest_queue_id] = dest_queue_list
+            
             req.customerid = req.customerid+"_jockeyed"
         
-            if curr_queue_id == "1": # Server1
+            if  "1" in curr_queue_id: # Server1
                 queue_intensity = self.arr_rate/self.dict_servers_info["1"] # Server1
             
             else:
@@ -2248,47 +2243,51 @@ class RequestQueue:
         return jockeys / len(self.get_current_jockey_observations())
     
         
-    def compare_behavior_rates_by_information_how_often_old(self):
-        """
-        Compare reneging and jockeying rates for intensity-based and departure-based requests.
-        """
-        jockeyed_intensity_based_requests = [d.get("intensity_based_info") for d in self.objObserv.get_jockey_obs() if "intensity_based_info" in d]
-        jockeyed_departure_based_requests = [d.get("intensity_based_info") for d in self.objObserv.get_jockey_obs() if not "intensity_based_info" in d]  
-        
-        reneged_intensity_based_requests = [d.get("intensity_based_info") for d in self.objObserv.get_renege_obs() if "intensity_based_info" in d]  
-        reneged_departure_based_requests = [d.get("intensity_based_info") for d in self.objObserv.get_renege_obs() if not "intensity_based_info" in d]
-        
-        print("\n Lastly intensity jockeys: ", jockeyed_intensity_based_requests) 
-        print("\n Lastly departure jockeys: ", jockeyed_departure_based_requests)
-        
-        # Calculate rates for intensity-based requests
-        reneging_rate_intensity = self.compute_reneging_rate_by_info_source(reneged_intensity_based_requests)
-        jockeying_rate_intensity = self.compute_jockeying_rate_by_info_source(jockeyed_intensity_based_requests)
+    def plot_waiting_time_vs_queue_length_with_fit(self):
+        # Gather data for raw Markov requests
+        raw_queue_lengths = []
+        raw_waiting_times = []
+        for req in self.state_subscribers:
+            if req.time_exit is not None and req.time_entrance is not None:
+                raw_queue_lengths.append(req.pos_in_queue)
+                raw_waiting_times.append(req.time_exit - req.time_entrance)
 
-        # Calculate rates for departure-based requests
-        reneging_rate_departure = self.compute_reneging_rate_by_info_source(reneged_departure_based_requests)
-        jockeying_rate_departure = self.compute_jockeying_rate_by_info_source(jockeyed_departure_based_requests)
-        
-        # Plot comparison
-        categories = ['Reneging Rate', 'Jockeying Rate']
-        intensity_rates = [reneging_rate_intensity, jockeying_rate_intensity]
-        departure_rates = [reneging_rate_departure, jockeying_rate_departure]
+        # Gather data for NN-based (actor-critic) requests
+        nn_queue_lengths = []
+        nn_waiting_times = []
+        for req in self.nn_subscribers:
+            if req.time_exit is not None and req.time_entrance is not None:
+                nn_queue_lengths.append(req.pos_in_queue)
+                nn_waiting_times.append(req.time_exit - req.time_entrance)
 
-        # Plot comparison
         plt.figure(figsize=(10, 6))
-        plt.plot(categories, intensity_rates, marker='o', label='Intensity-Based', color='blue', linestyle='-')
-        plt.plot(categories, departure_rates, marker='o', label='Departure-Based', color='orange', linestyle='--')
 
-        # Add labels and title
-        plt.xlabel("Categories")
-        plt.ylabel("Rate")
-        #plt.title("Comparison of Reneging and Jockeying Rates")
+        # Scatter plot
+        plt.scatter(raw_queue_lengths, raw_waiting_times, label='Raw Markov', alpha=0.7, marker='o', color='tab:blue')
+        plt.scatter(nn_queue_lengths, nn_waiting_times, label='Actor-Critic (NN-based)', alpha=0.7, marker='x', color='tab:orange')
+
+        # Line fit for raw Markov
+        if len(raw_queue_lengths) > 1:
+            coeffs_raw = np.polyfit(raw_queue_lengths, raw_waiting_times, 1)
+            poly_raw = np.poly1d(coeffs_raw)
+            x_raw = np.linspace(min(raw_queue_lengths), max(raw_queue_lengths), 100)
+            plt.plot(x_raw, poly_raw(x_raw), color='blue', linestyle='--', label='Raw Markov Fit')
+
+        # Line fit for NN-based
+        if len(nn_queue_lengths) > 1:
+            coeffs_nn = np.polyfit(nn_queue_lengths, nn_waiting_times, 1)
+            poly_nn = np.poly1d(coeffs_nn)
+            x_nn = np.linspace(min(nn_queue_lengths), max(nn_queue_lengths), 100)
+            plt.plot(x_nn, poly_nn(x_nn), color='orange', linestyle='--', label='Actor-Critic Fit')
+
+        plt.xlabel('Queue Length on Arrival')
+        plt.ylabel('Waiting Time')
+        plt.title('Waiting Time vs. Queue Length\n(Raw Markov vs. Actor-Critic Information)')
         plt.legend()
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        plt.grid(True)
         plt.tight_layout()
-
-        # Show the plot
         plt.show()
+
 
     
     def compare_behavior_rates_by_information_how_often(self):
@@ -2936,7 +2935,7 @@ def main():
 
     print("Environment and RequestQueue initialized successfully!")
     
-    duration = 20
+    duration = 200 # 00
     
     # Start the scheduler
     scheduler_thread = threading.Thread(target=request_queue.run(duration, env, adjust_service_rate=False, save_to_file="non_adjusted_metrics.csv")) # requestObj.run_scheduler) # 
@@ -2947,6 +2946,8 @@ def main():
     request_queue.plot_rates()
     request_queue.compare_behavior_rates_by_information_how_often()
     request_queue.compare_rates_by_information_source_with_graph()
+    
+    request_queue.plot_waiting_time_vs_queue_length_with_fit()
     
     # visualize_comparison("adjusted_metrics.csv", "non-adjusted_metrics.csv")
     
