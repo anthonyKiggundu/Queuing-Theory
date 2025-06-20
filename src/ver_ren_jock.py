@@ -523,15 +523,35 @@ class A2CAgent:
             ])
             
         # If state is not a tensor, create one; otherwise, use it as is.
-        if not isinstance(state, torch.Tensor):
-            state = torch.FloatTensor(state)
+        #if not isinstance(state, torch.Tensor):
+        #    state = torch.FloatTensor(state)
     
         # Ensure the state tensor does not contain NaN values
-        if torch.isnan(state).any():
-            print("NaN values detected in state tensor:", state)
-            state = torch.where(torch.isnan(state), torch.zeros_like(state), state)
+        #if torch.isnan(state).any():
+        #    print("NaN values detected in state tensor:", state)
+        #    state = torch.where(torch.isnan(state), torch.zeros_like(state), state)
                        
-        state = state.unsqueeze(0).to(device)
+        #state = state.unsqueeze(0).to(device)
+        #action_probs, state_value = self.model(state)
+        
+        # Ensure state is a numpy array
+        # Ensure state is a numpy array
+        if isinstance(state, torch.Tensor):
+            state = state.detach().cpu().numpy()
+        state = np.asarray(state, dtype=np.float32)
+
+        # Pad or trim state to length 11
+        expected_dim = 11
+        
+        if state.shape[0] < expected_dim:
+            state = np.pad(state, (0, expected_dim - state.shape[0]), 'constant')
+        elif state.shape[0] > expected_dim:
+            state = state[:expected_dim]
+
+        # Convert to torch tensor
+        state = torch.FloatTensor(state).unsqueeze(0).to(device)
+
+        # Forward pass
         action_probs, state_value = self.model(state)
     
         # Check for NaN values in action_probs and handle them
@@ -995,8 +1015,8 @@ class RequestQueue:
                 srv_2 = self.dict_queues_obj.get("2") 
                 
                 print("\n Arrival rate: ", self.arr_rate, "Rates 1: ----", self.srvrates_1,  "Rates 2: ----", self.srvrates_2)  
-                if done:  # Break the loop if the episode ends
-                    break         
+                #if done:  # Break the loop if the episode ends
+                #    break         
 			
                 if progress_log:
                     print("Step", i + 1, "/", steps_per_episode) # print("Step",i,"/",steps)
@@ -1421,13 +1441,13 @@ class RequestQueue:
                         self.agent.update()
                     
                     if action['action'] == 0: #action == 0:
-                        print(f"ActorCriticInfo [RENEGE]: Server {alt_queue_id} in state:  {curr_queue_state}. Dispatching {next_state} to all {len(self.nn_subscribers)} requests  in server {curr_queue_id}")
+                        #print(f"ActorCriticInfo [RENEGE]: Server {alt_queue_id} in state:  {curr_queue_state}. Dispatching {next_state} to all {len(self.nn_subscribers)} requests  in server {curr_queue_id}")
                         self.makeRenegingDecision(req, curr_queue_id, uses_intensity_based)                    
                     elif action['action'] ==  1: #action == 1:
-                        print(f"ActorCriticInfo [JOCKEY]: Server {alt_queue_id} in state:  {curr_queue_state}. Dispatching {next_state} to all {len(self.nn_subscribers)} requests  in server {curr_queue_id}")
+                        #print(f"ActorCriticInfo [JOCKEY]: Server {alt_queue_id} in state:  {curr_queue_state}. Dispatching {next_state} to all {len(self.nn_subscribers)} requests  in server {curr_queue_id}")
                         self.makeJockeyingDecision(req, curr_queue_id, alt_queue_id, req.customerid, serv_rate, uses_intensity_based) # STATE
                 else: 
-                    print(f"Raw Markovian:  Server {alt_queue_id} in state {curr_queue_state}. Dispatching state to all {len(self.state_subscribers)} requests  in server {curr_queue_id}")
+                    # print(f"Raw Markovian:  Server {alt_queue_id} in state {curr_queue_state}. Dispatching state to all {len(self.state_subscribers)} requests  in server {curr_queue_id}")
                     self.makeRenegingDecision(req, curr_queue_id, uses_intensity_based)                                   
                     self.makeJockeyingDecision(req, curr_queue_id, alt_queue_id, req.customerid, serv_rate, uses_intensity_based)
                         
@@ -2221,7 +2241,7 @@ class RequestQueue:
         curr_queue = self.dict_queues_obj.get(curr_queue_id)
         dest_queue = self.dict_queues_obj.get(alt_queue_id)
 
-        self.avg_delay = self.generateExpectedJockeyCloudDelay ( req, curr_queue_id) 
+        self.avg_delay = self.generateExpectedJockeyCloudDelay ( req, alt_queue_id) 
         #self.objRequest.estimateMarkovWaitingTime(len(dest_queue)+1, features) #len(dest_queue)+1) #, queue_intensity, req.time_entrance)
         
         curr_pose = self.get_request_position(curr_queue_id, customerid)
@@ -2967,7 +2987,7 @@ def main():
 
     print("Environment and RequestQueue initialized successfully!")
     
-    duration = 200 # 00
+    duration = 5 #20 # 0 # 00
     
     # Start the scheduler
     #scheduler_thread = threading.Thread(target=request_queue.run(duration, env, adjust_service_rate=False, save_to_file="non_adjusted_metrics.csv")) # requestObj.run_scheduler) #
@@ -2976,7 +2996,7 @@ def main():
         args=(duration, env),
         kwargs={
             'adjust_service_rate': False,
-            'num_episodes': 120,  # <-- set to 120 episodes, or any number > 100
+            'num_episodes': 20, #120,  # <-- set to 120 episodes, or any number > 100
             'save_to_file': "non_adjusted_metrics.csv"
         }
     ) 
