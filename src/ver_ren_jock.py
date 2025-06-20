@@ -976,8 +976,25 @@ class RequestQueue:
             total_losses = []
         
             for i in step_loop: 
-                self.arr_rate = self.objQueues.get_arrivals_rates()
-                print("\n Arrival rate: ", self.arr_rate)  
+                self.arr_rate = self.objQueues.randomize_arrival_rate()  # Randomize arrival rate
+                # self.objQueues.get_dict_servers
+                deltaLambda=random.randint(1, 2)
+                ##deltaLambda=random.uniform(0.1, 0.9)
+                
+                #next_state, reward, done, info = self.env.step(action)
+        
+                serv_rate_one = self.arr_rate + deltaLambda 
+                serv_rate_two = self.arr_rate - deltaLambda
+
+                self.srvrates_1 = serv_rate_one / 2
+                #self.srvrates_1 = self.objQueues.get_dict_servers()["1"]
+                self.srvrates_2 = serv_rate_two / 2
+                #self.srvrates_2 = self.objQueues.get_dict_servers()["2"]
+             
+                srv_1 = self.dict_queues_obj.get("1") # Server1
+                srv_2 = self.dict_queues_obj.get("2") 
+                
+                print("\n Arrival rate: ", self.arr_rate, "Rates 1: ----", self.srvrates_1,  "Rates 2: ----", self.srvrates_2)  
                 if done:  # Break the loop if the episode ends
                     break         
 			
@@ -989,16 +1006,18 @@ class RequestQueue:
 
                 if len(srv_1) < len(srv_2):
                     self.queue = srv_2
-                    self.srv_rate = self.dict_servers_info.get("2") # Server2
+                    self.srv_rate = self.srvrates_1
+                    # self.srv_rate = self.dict_servers_info.get("2") # Server2
 
                 else:            
                     self.queue = srv_1
-                    self.srv_rate = self.dict_servers_info.get("1") # Server1
+                    self.srv_rate = self.srvrates_2
+                    #self.srv_rate = self.dict_servers_info.get("1") # Server1
             
                   
                 service_intervals=np.random.exponential(1/self.srv_rate,max(int(self.srv_rate*self.time_res*5),2)) # to ensure they exceed one sampling interval
                 service_intervals=service_intervals[np.where(np.add.accumulate(service_intervals)<=self.time_res)[0]]
-                service_intervals=service_intervals[0:np.min([len(service_intervals),self.queue.size])]
+                service_intervals=service_intervals[0:np.min([len(service_intervals),len(self.queue)])]
                 arrival_intervals=np.random.exponential(1/self.arr_rate, max(int(self.arr_rate*self.time_res*5),2))
 
                 arrival_intervals=arrival_intervals[np.where(np.add.accumulate(arrival_intervals)<=self.time_res)[0]]
@@ -2435,6 +2454,9 @@ class ImpatientTenantEnv:
         self.waitingtime = 0.0
         self.ren_state_after_action = {}
         self.jock_state_after_action = {}
+        
+        self.current_step = 0
+        self.max_steps = 1000  # Or set from outside, or pass as parameter
                 
         self.action_space = 2  # Number of discrete actions
         self.observation_space = {
@@ -2522,6 +2544,7 @@ class ImpatientTenantEnv:
     def reset(self, seed=None, options=None):
         random.seed(seed)
         np.random.seed(seed)
+        self.current_step = 0
         observation = [0.0] * self.state_dim 
         info = self._get_info()     
                                     
@@ -2769,6 +2792,9 @@ class ImpatientTenantEnv:
         # Initialize variables
         terminated = False
         reward = 0
+        
+        # Increase step count
+        self.current_step += 1
 
         # Check if the action exists in the new_state mapping
         if action in new_state:
@@ -2776,13 +2802,19 @@ class ImpatientTenantEnv:
 
             # Ensure value is not None before accessing its keys
             if value is not None and isinstance(value, dict):
-                terminated = value.get("at_pose", 0) <= 0  # Fallback to 0 if "at_pose" is missing
+                #terminated = value.get("at_pose", 0) <= 0  # Fallback to 0 if "at_pose" is missing
+                queue_empty = value.get("at_pose", 0) <= 0
                 reward = value.get("reward", 0)  # Fallback to 0 if "reward" is missing
                 self.queue_state = value
             else:
-                print(f"Warning: Action {action} does not map to a valid state. Skipping.")
+                queue_empty = False
+                #print(f"Warning: Action {action} does not map to a valid state. Skipping.")
         else:
-            print(f"Warning: Action {action} is not recognized. Skipping.")
+            queue_empty = False
+            #print(f"Warning: Action {action} is not recognized. Skipping.")
+            
+        # Terminate if queue is empty or max_steps reached
+        terminated = queue_empty or (self.current_step >= self.max_steps)
 
         # Get observation and info
         observation = self.queue_state
@@ -2938,8 +2970,18 @@ def main():
     duration = 200 # 00
     
     # Start the scheduler
-    scheduler_thread = threading.Thread(target=request_queue.run(duration, env, adjust_service_rate=False, save_to_file="non_adjusted_metrics.csv")) # requestObj.run_scheduler) # 
+    #scheduler_thread = threading.Thread(target=request_queue.run(duration, env, adjust_service_rate=False, save_to_file="non_adjusted_metrics.csv")) # requestObj.run_scheduler) #
+    scheduler_thread = threading.Thread(
+        target=request_queue.run,
+        args=(duration, env),
+        kwargs={
+            'adjust_service_rate': False,
+            'num_episodes': 120,  # <-- set to 120 episodes, or any number > 100
+            'save_to_file': "non_adjusted_metrics.csv"
+        }
+    ) 
     scheduler_thread.start()
+    scheduler_thread.join()  # <-- Wait until simulation is done then plot below functions
     
     # Let us visualize some results
     visualize_results(metrics_file="simu_results.csv")    
