@@ -36,12 +36,12 @@ import pandas as pd
 #from RenegeJockey import RequestQueue, Queues, Observations
 
 # Configure logging
-logging.basicConfig(
-    filename="request_decisions.log",
-    filemode="a",
-    format="%(asctime)s - Request ID: %(request_id)s - Queue ID: %(queue_id)s - Action: %(action)s",
-    level=logging.INFO
-)
+#logging.basicConfig(
+#    filename="request_decisions.log",
+#    filemode="a",
+#    format="%(asctime)s - Request ID: %(request_id)s - Queue ID: %(queue_id)s - Action: %(action)s",
+#    level=logging.INFO
+#)
 
 ################################## Globals ####################################
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -249,7 +249,7 @@ class Request:
     # pyg.time.get_ticks()
 
     def __init__(self,uses_nn, uses_intensity_based, time_entrance,pos_in_queue=0,utility_basic=0.0,service_time=0.0,discount_coef=0.0, outage_risk=0.1, # =timer()
-                 customerid="", learning_mode='online',min_amount_observations=1,time_res=1.0,markov_model=msm.StateMachine(orig=None),
+                 customerid="", learning_mode='online',min_amount_observations=1,time_res=1.0,markov_model=msm.StateMachine(orig=None), time_exit=0.0,
                  exp_time_service_end=0.0, serv_rate=1.0, dist_local_delay=stats.expon,para_local_delay=[1.0,2.0,10.0], batchid=0):  #markov_model=a2c.A2C, 
         
         # self.id=id #uuid.uuid1()
@@ -263,7 +263,7 @@ class Request:
         self.discount_coef=float(discount_coef)
         self.certainty=1.0-float(outage_risk)
         self.exp_time_service_end = exp_time_service_end
-        self.time_exit = None  # To be set when the request leaves the queue
+        self.time_exit = time_exit  # To be set when the request leaves the queue
         self.service_time = service_time
         self.uses_nn = uses_nn
         self.reneged = False
@@ -609,7 +609,7 @@ class A2CAgent:
         # print(f"Stored reward: {reward}, Total rewards: {self.rewards}")
         
 
-    def update(self):
+    def update_old(self):
         
         if not self.log_probs:
             log_probs = torch.zeros(1, device=device)  # Fallback to a zero tensor
@@ -656,6 +656,58 @@ class A2CAgent:
         
         # Return scalar losses for logging
         return actor_loss.item(), critic_loss.item(), loss.item()
+        
+    def update(self):
+        """
+        Performs the A2C update using the accumulated log_probs, values, and rewards.
+        Returns:
+            actor_loss (float), critic_loss (float), total_loss (float)
+        """
+        if not self.log_probs or not self.values or not self.rewards:
+            return 0.0, 0.0, 0.0
+
+        # Convert lists to tensors
+        log_probs = torch.stack(self.log_probs)
+        values = torch.stack(self.values).squeeze(-1)
+        rewards = torch.tensor(self.rewards, dtype=torch.float32, device=values.device)
+
+        # Compute returns (discounted rewards)
+        returns = []
+        R = 0
+        for r in reversed(rewards):
+            R = r + self.gamma * R
+            returns.insert(0, R)
+            
+        returns = torch.tensor(returns, dtype=torch.float32, device=values.device)
+
+        # Normalize returns for stability
+        if len(returns) > 1:
+            returns = (returns - returns.mean()) / (returns.std() + 1e-8)
+
+        # Calculate advantages
+        advantages = returns - values
+
+        # Actor loss (policy gradient)
+        actor_loss = - (log_probs * advantages.detach()).mean()
+
+        # Critic loss (value regression)
+        critic_loss = advantages.pow(2).mean()
+
+        # Total loss
+        total_loss = actor_loss + 0.5 * critic_loss
+
+        # Backprop and optimize
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        self.optimizer.step()
+
+        # Clear buffers for next episode
+        self.log_probs = []
+        self.values = []
+        self.rewards = []
+
+        # Return scalars (detached)
+        return actor_loss.item(), critic_loss.item(), total_loss.item()
 
 
 class RequestQueue:
@@ -664,7 +716,7 @@ class RequestQueue:
 
     def __init__(self, state_dim, action_dim, utility_basic, discount_coef, actor_critic, agent, markov_model=msm.StateMachine(orig=None),
                  time=0.0, outage_risk=0.1, customerid="",learning_mode='online', decision_rule='risk_control',
-                 alt_option='fixed_revenue', min_amount_observations=1, dist_local_delay=stats.expon, exp_time_service_end=0.0,
+                 alt_option='fixed_revenue', min_amount_observations=1, dist_local_delay=stats.expon,  time_exit=0.0, exp_time_service_end=0.0,
                  para_local_delay=[1.0,2.0,10.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, batchid=np.int16, uses_nn=False, uses_intensity_based = False): # Dispatched
                  
         
@@ -705,7 +757,8 @@ class RequestQueue:
         self.outage_risk=float(outage_risk)
         self.time=float(time)
         self.service_time  = 0
-        self.init_time=self.time        
+        self.init_time=self.time    
+        self.time_exit = time_exit  # To be set when the request leaves the queue    
         self.learning_mode=str(learning_mode)
         self.alt_option=str(alt_option)
         self.min_amount_observations=int(min_amount_observations)
@@ -784,6 +837,7 @@ class RequestQueue:
         self.state_subscribers = []  # Requests that use raw queue state        
         self.departure_dispatch_count = 0
         self.intensity_dispatch_count = 0 
+        self.all_requests = []  # Stores all requests throughout the simulation
         
         BROADCAST_INTERVAL = 5
         
@@ -991,9 +1045,9 @@ class RequestQueue:
             jockeying_rates = []
             reneging_rates = []
             
-            actor_losses = []
-            critic_losses = []
-            total_losses = []
+            #actor_losses = []
+            #critic_losses = []
+            #total_losses = []
         
             for i in step_loop: 
                 self.arr_rate = self.objQueues.randomize_arrival_rate()  # Randomize arrival rate
@@ -1109,6 +1163,10 @@ class RequestQueue:
             #self.agent.update()
             # Update the RL agent at the end of each episode
             actor_loss, critic_loss, total_loss = self.agent.update()
+            
+            actor_losses = []
+            critic_losses = []
+            total_losses = []
             actor_losses.append(actor_loss)
             critic_losses.append(critic_loss)
             total_losses.append(total_loss)
@@ -1255,7 +1313,7 @@ class RequestQueue:
 
     def getRenegeRewardPenalty (self, req, time_local_service, time_to_service_end):              
         
-        if ((self.time+req.time_entrance) - time_to_service_end) > time_local_service:
+        if ((self.time+req.time_entrance) - time_to_service_end) < time_local_service:
             self.reward = 1
         else:
             self.reward = 0
@@ -1349,15 +1407,12 @@ class RequestQueue:
                     min_amount_observations=self.min_amount_observations,time_res=self.time_res, #exp_time_service_end=expected_time_to_service_end, 
                     dist_local_delay=self.dist_local_delay,para_local_delay=self.para_local_delay, batchid=batchid)
                     
-            self.state_subscribers.append(req)  
-
-        #print("\n LENGTHS => ", len(self.state_subscribers), " ==== ", len(self.nn_subscribers))   
+            self.state_subscribers.append(req)          
   
-        self.dict_queues_obj[server_id] = np.append(self.dict_queues_obj[server_id], req)
-        
-        self.queueID = server_id
-        
-        self.curr_req = req
+        self.dict_queues_obj[server_id] = np.append(self.dict_queues_obj[server_id], req)        
+        self.queueID = server_id        
+        self.curr_req = req        
+        self.all_requests.append(req)
         
         return #self.curr_req
 
@@ -1442,13 +1497,13 @@ class RequestQueue:
                     
                     if action['action'] == 0: #action == 0:
                         #print(f"ActorCriticInfo [RENEGE]: Server {alt_queue_id} in state:  {curr_queue_state}. Dispatching {next_state} to all {len(self.nn_subscribers)} requests  in server {curr_queue_id}")
-                        self.makeRenegingDecision(req, curr_queue_id, uses_intensity_based)                    
+                        self.makeRenegingDecision(req, curr_queue_id, uses_intensity_based, req.customerid)                    
                     elif action['action'] ==  1: #action == 1:
                         #print(f"ActorCriticInfo [JOCKEY]: Server {alt_queue_id} in state:  {curr_queue_state}. Dispatching {next_state} to all {len(self.nn_subscribers)} requests  in server {curr_queue_id}")
                         self.makeJockeyingDecision(req, curr_queue_id, alt_queue_id, req.customerid, serv_rate, uses_intensity_based) # STATE
                 else: 
                     # print(f"Raw Markovian:  Server {alt_queue_id} in state {curr_queue_state}. Dispatching state to all {len(self.state_subscribers)} requests  in server {curr_queue_id}")
-                    self.makeRenegingDecision(req, curr_queue_id, uses_intensity_based)                                   
+                    self.makeRenegingDecision(req, curr_queue_id, uses_intensity_based, req.customerid)                                   
                     self.makeJockeyingDecision(req, curr_queue_id, alt_queue_id, req.customerid, serv_rate, uses_intensity_based)
                         
         else:
@@ -1974,8 +2029,8 @@ class RequestQueue:
             queue = self.dict_queues_obj["2"]  # Queue2
 
         queue_length = len(queue)
-        
-        if position < 0 or position >= queue_length:
+        print("\n *** ", position, queue_length)
+        if position < 0 or position > queue_length: #=
             raise ValueError("Invalid position: Position must be within the bounds of the queue length.")
         
         # Calculate the remaining time based on the position and service rate
@@ -1984,7 +2039,7 @@ class RequestQueue:
         return remaining_time
         
         
-    def calculate_max_cloud_delay(self, position, queue_intensity, req):
+    def calculate_max_cloud_delay_old(self, position, queue_intensity, req):
         """
         Calculate the max cloud delay based on the position in the queue and the current queue intensity.
         
@@ -2005,14 +2060,48 @@ class RequestQueue:
         return max_cloud_delay
         
         
+    def calculate_max_cloud_delay(self, position, mu):
+        import scipy.linalg as la
+        from scipy.integrate import quad
+        
+        def build_q_matrix(k: int, mu: float) -> np.ndarray:
+            """
+            Build the (k+2)x(k+2) generator Q for states i=0,...,k+1,
+            where state i->i-1 at rate 2*mu for i>=2, and at rate mu for i==1.
+            State 0 is absorbing.
+            """
+            size = k+2
+            Q = np.zeros((size, size))
+            for i in range(1, size):
+                rate = 2*mu if i >= 2 else mu
+                Q[i, i-1] = rate
+                Q[i, i]   = -rate
+            
+            return Q
+
+        """
+        Solve for E[T] starting from state k+1 by using fundamental matrix.
+          E = -Q^{-1} * 1  restricted to non-absorbing states.
+        """
+        Q = build_q_matrix(position, mu)
+        # Extract transient states 1..k+1
+        Q_tt = Q[1:, 1:]
+        # Fundamental matrix N = -inv(Q_tt)
+        N = -la.inv(Q_tt)
+        # Expected absorption time vector: t = N @ 1
+        t_vec = N.dot(np.ones(position+1))
+        # We start in state k+1 => index k  in t_vec
+        return t_vec[position]
+    
+		        
     def log_action(self, action, req, queueid):
         """Logs the request action to the file."""
         
         logging.info("", extra={"request_id": req.customerid, "queue_id": queueid, "action": action})
         
         
-    def makeRenegingDecision(self, req, queueid, uses_intensity_based):
-        # print("   User making reneging decision...")
+    def makeRenegingDecision(self, req, queueid, uses_intensity_based, customer_id):
+        
         decision=False  
         
         if queueid == "1":
@@ -2034,59 +2123,69 @@ class RequestQueue:
                 self.serv_rate=1/mean_interval
             k_erlang=req.pos_in_queue*num_observations #self.pos_in_queue*num_observations
             scale_erlang=mean_interval*k_erlang
-            # print("\n CHECKER -> ", np.arange(self.max_local_delay,self.APPROX_INF+self.time_res,step=self.time_res), " - - ", k_erlang, " ===== ",scale_erlang, " ===== ",num_observations)
-            #mean_wait_time=mean_interval*self.pos_in_queue
+            
             if np.isnan(mean_interval):
                 self.max_cloud_delay=np.Inf
             else:
                 self.max_local_delay = self.generateLocalCompUtility(req)
                 queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate
-                self. max_cloud_delay = self.calculate_max_cloud_delay(req.pos_in_queue, queue_intensity, req)
-                ## self.max_cloud_delay=stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=1/serv_rate)
-                #self.max_cloud_delay=stats.erlang.ppf(self.certainty,loc=0,scale=mean_interval,a=req.pos_in_queue)                                            
+                self. max_cloud_delay = self.calculate_max_cloud_delay(req.pos_in_queue, serv_rate)                                                           
             
             if "Server1" in queueid:
                 self.queue = self.dict_queues_obj["1"]            
             else:
                 self.queue = self.dict_queues_obj["2"] 
-        
+            
+                
+            # Get the relevant queue
+            queue = self.dict_queues_obj[queueid]
+           
+            # Find the request's position in the queue (0-based)
+            curr_pose = req.pos_in_queue
+            found = False            
+            for pos, req_in_queue in enumerate(queue):
+                #print("\n **** SS 0 **** ", req_in_queue.customerid, " **** ",customer_id )
+                if customer_id in req_in_queue.customerid:
+                # Get the current service rate for the queue
+                    if "1" in queueid:
+                        serv_rate = self.srvrates_1
+                    else:
+                        serv_rate = self.srvrates_2
+                    # Compute remaining waiting time (number of requests ahead * average service time)
+                    # For M/M/1, expected remaining time = position * 1/service_rate
+                    # remaining_wait_time = pos * (1.0 / serv_rate) if serv_rate > 0 else 1e4  # avoid zero division
+                    remaining_wait_time = self.get_remaining_time(queueid, pos) # curr_pose)
+
+                    # If remaining wait exceeds T_local, renege
+                    renege = (remaining_wait_time > self.max_local_delay) #T_local)
+                    #print("\n I took the remaining time -> ", renege)
+                    if renege:
+                        decision = True
+                        reward = self.reqRenege(req, queueid, pos, serv_rate, queue_intensity, self.max_local_delay, req.customerid, req.service_time, decision, self.queue, uses_intensity_based)
+                        #self.reqRenege(req_in_queue, queueid, pos, serv_rate, T_local, req_in_queue.customerid, req_in_queue.service_time, decision, queue, anchor)
+                        found = True
+                        break
+
+            if not found:
+                print(f"Request ID {customer_id} not found in queue {queueid}. Continuing with processing...")
+                return False    
+            
+            '''
             if self.max_local_delay <= self.max_cloud_delay: # will choose to renege
                 decision=True
-                curr_pose = self.get_request_position(queueid, req.customerid)
+                curr_pose = req.pos_in_queue # self.get_request_position(queueid, req.customerid)
         
                 if curr_pose >= len(self.queue): #if curr_pose is None:
                     print(f"Request ID {req.customerid} not found in queue {queueid}. Continuing with processing...")
                     return 
                 else:               
                     reward = self.reqRenege( req, queueid, curr_pose, serv_rate, self.queue_intensity, self.max_local_delay, req.customerid, req.service_time, decision, self.queue, uses_intensity_based)
-                                
-                #temp=stats.erlang.cdf(np.arange(self.max_local_delay,step=self.time_res),k_erlang,scale=scale_erlang)
-                '''
-                    we still have a divide by zero error being thrown at this point - so blocking it out for now
-                '''
-                #error_loss=np.exp(-self.dist_local_delay.mean(loc=self.loc_local_delay,scale=self.scale_local_delay))-np.sum(np.append([temp[0]],np.diff(temp))*np.exp(-req.pos_in_queue/np.arange(self.max_local_delay,step=self.time_res)))
-                
+                                                                 
             else:   #will choose to wait and learn -> Can we use the actor-critic here??
                 decision=False
-                #print('choose to wait')
-                # temp=stats.erlang.cdf(np.arange(self.max_local_delay,self.APPROX_INF+self.time_res,step=self.time_res),k_erlang,scale=scale_erlang)
-                #error_loss=np.sum(np.diff(temp)*np.exp(-req.pos_in_queue/np.arange(self.max_local_delay+self.time_res,self.APPROX_INF+self.time_res,step=self.time_res)))-np.exp(-self.dist_local_delay.mean(loc=self.loc_local_delay,scale=self.scale_local_delay))
+            '''
                 
-            ##dec_error_loss = self.error_loss - error_loss
-            ##self.error_loss = error_loss
-            
-            ##if dec_error_loss > 1-np.exp(-mean_interval):
-            ##    decision = False
-            #else:
-                #self.optimal_learning_achieved=True
-                
-            #if (not self.optimal_learning_achieved):
-            ##    self.min_amount_observations=self.objObserv.get_renege_obs(queueid, queue) # self.observations.size+1
-                
-                
-        self.curr_req = req
-        
-        #return decision        
+        self.curr_req = req                
 
 
     def reqRenege(self, req, queueid, curr_pose, serv_rate, queue_intensity, time_local_service, customerid, time_to_service_end, decision, curr_queue, uses_intensity_based):
@@ -2105,9 +2204,6 @@ class RequestQueue:
             return
             
         else:
-            #self.queue = np.delete(self.queue, curr_pose) # index)        
-            #self.queueID = queueid
-            
             # Get the queue as a list
             queue = list(self.dict_queues_obj[queueid])
             # Remove the request at curr_pose if it exists
@@ -2118,6 +2214,8 @@ class RequestQueue:
             self.queueID = queueid  
         
             req.customerid = req.customerid+"_reneged"
+            req.reneged = True
+            req.time_exit = self.time  
             
             self.log_action("Reneged", req, queueid)
 
@@ -2132,7 +2230,7 @@ class RequestQueue:
             self.long_avg_serv_time = self.get_long_run_avg_service_time(queueid)         
             
             self.objObserv.set_renege_obs(queueid, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, time_local_service, time_to_service_end, reward, decision, self.long_avg_serv_time, uses_intensity_based)                
-            #print("\n ==== CURRENT Reneg OBS ", queueid, " = ",curr_pose, " = ",queue_intensity, " = ",self.jockeying_rate, " = ",self.reneging_rate, " = ",time_local_service, " = ",req.exp_time_service_end, " = ",reward, decision, " = ",self.long_avg_serv_time, " = ",uses_intensity_based)
+            
             self.curr_req = req
             
             return reward
@@ -2174,14 +2272,7 @@ class RequestQueue:
         if curr_pose >= len(curr_queue):
             return                   
             
-        else:	
-            #np.delete(curr_queue, curr_pose) # np.where(id_queue==req_id)[0][0])
-            #reward = 1.0
-            #req.time_entrance = self.time # timer()
-            #dest_queue = np.append( dest_queue, req)
-        
-            #self.queueID = curr_queue_id        
-            
+        else:	               
             # Remove from current queue
             queue = list(self.dict_queues_obj[curr_queue_id])
             if 0 <= curr_pose < len(queue):
@@ -2194,6 +2285,8 @@ class RequestQueue:
             self.dict_queues_obj[dest_queue_id] = dest_queue_list
             
             req.customerid = req.customerid+"_jockeyed"
+            req.reneged = True
+            req.time_exit = self.time  
         
             if  "1" in curr_queue_id: # Server1
                 queue_intensity = self.arr_rate/self.dict_servers_info["1"] # Server1
@@ -2202,8 +2295,7 @@ class RequestQueue:
                 queue_intensity = self.arr_rate/self.dict_servers_info["2"] # Server2
         
             reward = self.get_jockey_reward(req)
-                  
-            # print("\n Moving ", customerid," from Server ",curr_queue_id, " to Server ", dest_queue_id ) 
+                              
             print(colored("%s", 'green') % (req.customerid) + " in Server %s" %(curr_queue_id) + " jockeying now, to Server %s" % (colored(dest_queue_id,'green'))+ " with reward %f"%(reward))                      
             
             self.log_action(f"Jockeyed", req, dest_queue_id)
@@ -2213,7 +2305,7 @@ class RequestQueue:
             self.long_avg_serv_time = self.get_long_run_avg_service_time(curr_queue_id)                 
             
             self.objObserv.set_jockey_obs(curr_queue_id, curr_pose, self.queue_intensity, self.jockeying_rate, self.reneging_rate, exp_delay, req.exp_time_service_end, reward, decision, self.long_avg_serv_time, uses_intensity_based) # time_alt_queue                                
-            #print("\n **** CURRENT Jock OBS ", curr_queue_id, " - ",curr_pose, " - ",self.queue_intensity, " - ",self.jockeying_rate, " - ",self.reneging_rate, " - ",exp_delay, " - ",req.exp_time_service_end, " - ",reward, decision, " - ",self.long_avg_serv_time, " - ",uses_intensity_based)                                   
+                                               
             self.curr_req = req                    
         
         return
@@ -2237,14 +2329,13 @@ class RequestQueue:
             self.queue = self.dict_queues_obj["2"]
                 
         decision=False                
-        #queue_intensity = self.arr_rate/self.dict_servers_info[alt_queue_id]
+        
         curr_queue = self.dict_queues_obj.get(curr_queue_id)
         dest_queue = self.dict_queues_obj.get(alt_queue_id)
 
-        self.avg_delay = self.generateExpectedJockeyCloudDelay ( req, alt_queue_id) 
-        #self.objRequest.estimateMarkovWaitingTime(len(dest_queue)+1, features) #len(dest_queue)+1) #, queue_intensity, req.time_entrance)
+        self.avg_delay = self.calculate_max_cloud_delay(req.pos_in_queue, serv_rate) # self.generateExpectedJockeyCloudDelay ( req, alt_queue_id)         
         
-        curr_pose = self.get_request_position(curr_queue_id, customerid)
+        curr_pose = req.pos_in_queue # self.get_request_position(curr_queue_id, customerid)
         
         if curr_pose is None:
             print(f"Request ID {customerid} not found in queue {curr_queue_id}. Continuing with processing...")
@@ -2262,12 +2353,6 @@ class RequestQueue:
                 decision = True
                 self.reqJockey(curr_queue_id, alt_queue_id, req, req.customerid, serv_rate, dest_queue, self.avg_delay, decision, curr_pose, self.queue, uses_intensity_based)
 
-        # ToDo:: There is also the case of the customer willing to take the risk
-        #        and jockey regardless of the the predicted loss -> Customer does not
-        #        care anymore whether they incur a loss because they have already joined anyway
-        #        such that reneging returns more loss than the jockeying decision
-
-        #return decision
         
     
     def compute_reneging_rate_by_info_source(self, info_src_requests):
@@ -2282,51 +2367,71 @@ class RequestQueue:
         return jockeys / len(self.get_current_jockey_observations())
     
         
-    def plot_waiting_time_vs_queue_length_with_fit(self):
-        # Gather data for raw Markov requests
-        raw_queue_lengths = []
-        raw_waiting_times = []
-        for req in self.state_subscribers:
-            if req.time_exit is not None and req.time_entrance is not None:
-                raw_queue_lengths.append(req.pos_in_queue)
-                raw_waiting_times.append(req.time_exit - req.time_entrance)
-
-        # Gather data for NN-based (actor-critic) requests
-        nn_queue_lengths = []
-        nn_waiting_times = []
-        for req in self.nn_subscribers:
-            if req.time_exit is not None and req.time_entrance is not None:
-                nn_queue_lengths.append(req.pos_in_queue)
-                nn_waiting_times.append(req.time_exit - req.time_entrance)
+    def plot_reneging_time_vs_queue_length(self):
+        # print("\n **** ", self.all_requests, len(self.all_requests))
+        nn_x, nn_y = [], []
+        state_x, state_y = [], []
+        for req in self.all_requests:
+            if req.time_exit is not None and req.time_entrance is not None and req.reneged:
+                if req.uses_nn:
+                    nn_x.append(req.pos_in_queue)
+                    nn_y.append(req.time_exit - req.time_entrance)
+                else:
+                    state_x.append(req.pos_in_queue)
+                    state_y.append(req.time_exit - req.time_entrance)
+        # Sort for line plot
+        if nn_x and nn_y:
+            nn_sorted = sorted(zip(nn_x, nn_y))
+            nn_x, nn_y = zip(*nn_sorted)
+        if state_x and state_y:
+            state_sorted = sorted(zip(state_x, state_y))
+            state_x, state_y = zip(*state_sorted)
 
         plt.figure(figsize=(10, 6))
-
-        # Scatter plot
-        plt.scatter(raw_queue_lengths, raw_waiting_times, label='Raw Markov', alpha=0.7, marker='o', color='tab:blue')
-        plt.scatter(nn_queue_lengths, nn_waiting_times, label='Actor-Critic (NN-based)', alpha=0.7, marker='x', color='tab:orange')
-
-        # Line fit for raw Markov
-        if len(raw_queue_lengths) > 1:
-            coeffs_raw = np.polyfit(raw_queue_lengths, raw_waiting_times, 1)
-            poly_raw = np.poly1d(coeffs_raw)
-            x_raw = np.linspace(min(raw_queue_lengths), max(raw_queue_lengths), 100)
-            plt.plot(x_raw, poly_raw(x_raw), color='blue', linestyle='--', label='Raw Markov Fit')
-
-        # Line fit for NN-based
-        if len(nn_queue_lengths) > 1:
-            coeffs_nn = np.polyfit(nn_queue_lengths, nn_waiting_times, 1)
-            poly_nn = np.poly1d(coeffs_nn)
-            x_nn = np.linspace(min(nn_queue_lengths), max(nn_queue_lengths), 100)
-            plt.plot(x_nn, poly_nn(x_nn), color='orange', linestyle='--', label='Actor-Critic Fit')
-
-        plt.xlabel('Queue Length on Arrival')
-        plt.ylabel('Waiting Time')
-        plt.title('Waiting Time vs. Queue Length\n(Raw Markov vs. Actor-Critic Information)')
+        if nn_x:
+            plt.plot(nn_x, nn_y, '-o', color='orange', label='NN-based Reneged')
+        if state_x:
+            plt.plot(state_x, state_y, '-o', color='blue', label='State-based Reneged')
+        plt.xlabel("Queue Length on Arrival")
+        plt.ylabel("Waiting Time")
+        plt.title("Reneging Requests: Waiting Time vs Queue Length")
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
         plt.show()
+        
+        
+    def plot_jockeying_time_vs_queue_length(self):
+        nn_x, nn_y = [], []
+        state_x, state_y = [], []
+        for req in self.all_requests:
+            if req.time_exit is not None and req.time_entrance is not None and req.jockeyed:
+                if req.uses_nn:
+                    nn_x.append(req.pos_in_queue)
+                    nn_y.append(req.time_exit - req.time_entrance)
+                else:
+                    state_x.append(req.pos_in_queue)
+                    state_y.append(req.time_exit - req.time_entrance)
+        # Sort for line plot
+        if nn_x and nn_y:
+            nn_sorted = sorted(zip(nn_x, nn_y))
+            nn_x, nn_y = zip(*nn_sorted)
+        if state_x and state_y:
+            state_sorted = sorted(zip(state_x, state_y))
+            state_x, state_y = zip(*state_sorted)
 
+        plt.figure(figsize=(10, 6))
+        if nn_x:
+            plt.plot(nn_x, nn_y, '-o', color='orange', label='NN-based Jockeyed')
+        if state_x:
+            plt.plot(state_x, state_y, '-o', color='blue', label='State-based Jockeyed')
+        plt.xlabel("Queue Length on Arrival")
+        plt.ylabel("Waiting Time")
+        plt.title("Jockeying Requests: Waiting Time vs Queue Length")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
 
     
     def compare_behavior_rates_by_information_how_often(self):
@@ -2987,7 +3092,7 @@ def main():
 
     print("Environment and RequestQueue initialized successfully!")
     
-    duration = 5 #20 # 0 # 00
+    duration = 10 #20 # 0 # 00
     
     # Start the scheduler
     #scheduler_thread = threading.Thread(target=request_queue.run(duration, env, adjust_service_rate=False, save_to_file="non_adjusted_metrics.csv")) # requestObj.run_scheduler) #
@@ -2996,7 +3101,7 @@ def main():
         args=(duration, env),
         kwargs={
             'adjust_service_rate': False,
-            'num_episodes': 20, #120,  # <-- set to 120 episodes, or any number > 100
+            'num_episodes': 1000, #120,  # <-- set to 120 episodes, or any number > 100
             'save_to_file': "non_adjusted_metrics.csv"
         }
     ) 
@@ -3004,17 +3109,24 @@ def main():
     scheduler_thread.join()  # <-- Wait until simulation is done then plot below functions
     
     # Let us visualize some results
-    visualize_results(metrics_file="simu_results.csv")    
+    # visualize_results(metrics_file="simu_results.csv")    
     request_queue.plot_rates()
-    request_queue.compare_behavior_rates_by_information_how_often()
+    #request_queue.compare_behavior_rates_by_information_how_often()
     request_queue.compare_rates_by_information_source_with_graph()
     
-    request_queue.plot_waiting_time_vs_queue_length_with_fit()
+    request_queue.plot_reneging_time_vs_queue_length()
+    request_queue.plot_jockeying_time_vs_queue_length()
+    # request_queue.plot_waiting_time_vs_queue_length_with_fit()
     
     # visualize_comparison("adjusted_metrics.csv", "non-adjusted_metrics.csv")
     
     #actor_critic = requestObj.getActCritNet() # Inside    
-    #agent = requestObj.getAgent()        
+    #agent = requestObj.getAgent()   
+    
+    ################# Temporary ###############
+    # https://github.com/chenbq/CAVDN/tree/main   = https://ieeexplore.ieee.org/document/10254586
+    # https://github.com/fangvv/UAV-DDPG = https://link.springer.com/article/10.1007/s11276-021-02632-z
+      
     
 
 if __name__ == "__main__":
