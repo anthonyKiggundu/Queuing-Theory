@@ -250,7 +250,7 @@ class Request:
 
     def __init__(self,uses_nn, uses_intensity_based, time_entrance,pos_in_queue=0,utility_basic=0.0,service_time=0.0,discount_coef=0.0, outage_risk=0.1, # =timer()
                  customerid="", learning_mode='online',min_amount_observations=1,time_res=1.0,markov_model=msm.StateMachine(orig=None), time_exit=0.0,
-                 exp_time_service_end=0.0, serv_rate=1.0, dist_local_delay=stats.expon,para_local_delay=[1.0,2.0,10.0], batchid=0):  #markov_model=a2c.A2C, 
+                 exp_time_service_end=0.0, serv_rate=1.0, dist_local_delay=stats.expon,para_local_delay=[1.0,2.0,10.0], batchid=0, server_id=None):  #markov_model=a2c.A2C, 
         
         # self.id=id #uuid.uuid1()
         self.customerid = "Batch"+str(batchid)+"_Customer_"+str(pos_in_queue+1)
@@ -265,6 +265,7 @@ class Request:
         self.exp_time_service_end = exp_time_service_end
         self.time_exit = time_exit  # To be set when the request leaves the queue
         self.service_time = service_time
+        self.server_id = server_id  # Server ID where this request is queued
         self.uses_nn = uses_nn
         self.reneged = False
         self.jockeyed = False
@@ -374,7 +375,7 @@ class Request:
             scale_erlang=mean_interval*k_erlang
             #mean_wait_time=mean_interval*self.pos_in_queue
             if np.isnan(mean_interval):
-                self.max_cloud_delay=np.Inf
+                self.max_cloud_delay=np.inf
             else:
                 self.max_cloud_delay=stats.erlang.ppf(self.certainty,loc=0,scale=mean_interval,a=self.pos_in_queue)
         #if self.learning_mode=='truncation':
@@ -717,7 +718,7 @@ class RequestQueue:
     def __init__(self, state_dim, action_dim, utility_basic, discount_coef, actor_critic, agent, markov_model=msm.StateMachine(orig=None),
                  time=0.0, outage_risk=0.1, customerid="",learning_mode='online', decision_rule='risk_control',
                  alt_option='fixed_revenue', min_amount_observations=1, dist_local_delay=stats.expon,  time_exit=0.0, exp_time_service_end=0.0,
-                 para_local_delay=[1.0,2.0,10.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, batchid=np.int16, uses_nn=False, uses_intensity_based = False): # Dispatched
+                 para_local_delay=[1.0,2.0,10.0], truncation_length=np.inf, preempt_timeout=np.inf, time_res=1.0, batchid=np.int16, uses_nn=False, uses_intensity_based = False): # Dispatched
                  
         
         self.dispatch_data = {
@@ -889,6 +890,57 @@ class RequestQueue:
         """Compute the jockeying rate for a given queue."""
         jockeys = sum(1 for req in queue if '_jockeyed' in req.customerid)
         return jockeys / len(queue) if len(queue) > 0 else 0
+    
+    
+    def compute_reneging_rate_per_server(self, subscribers, server_id):
+        """Compute the reneging rate for requests added to a specific server and using the correct subscriber list."""
+        # Filter requests by server_id from the subscriber list
+        server_requests = [req for req in subscribers if hasattr(req, 'server_id') and req.server_id == server_id]
+        if len(server_requests) == 0:
+            return 0
+        renegs = sum(1 for req in server_requests if '_reneged' in req.customerid)
+        return renegs / len(server_requests)
+    
+    
+    def compute_jockeying_rate_per_server(self, subscribers, server_id):
+        """Compute the jockeying rate for requests added to a specific server and using the correct subscriber list."""
+        # Filter requests by server_id from the subscriber list
+        server_requests = [req for req in subscribers if hasattr(req, 'server_id') and req.server_id == server_id]
+        if len(server_requests) == 0:
+            return 0
+        jockeys = sum(1 for req in server_requests if '_jockeyed' in req.customerid)
+        return jockeys / len(server_requests)
+    
+    
+    def get_rates_summary_per_server_and_source(self):
+        """Get a comprehensive summary of reneging and jockeying rates per server and information source."""
+        summary = {
+            "server_1": {
+                "state_subscribers": {
+                    "reneging_rate": self.compute_reneging_rate_per_server(self.state_subscribers, "1"),
+                    "jockeying_rate": self.compute_jockeying_rate_per_server(self.state_subscribers, "1"),
+                    "count": len([req for req in self.state_subscribers if hasattr(req, 'server_id') and req.server_id == "1"])
+                },
+                "nn_subscribers": {
+                    "reneging_rate": self.compute_reneging_rate_per_server(self.nn_subscribers, "1"),
+                    "jockeying_rate": self.compute_jockeying_rate_per_server(self.nn_subscribers, "1"),
+                    "count": len([req for req in self.nn_subscribers if hasattr(req, 'server_id') and req.server_id == "1"])
+                }
+            },
+            "server_2": {
+                "state_subscribers": {
+                    "reneging_rate": self.compute_reneging_rate_per_server(self.state_subscribers, "2"),
+                    "jockeying_rate": self.compute_jockeying_rate_per_server(self.state_subscribers, "2"),
+                    "count": len([req for req in self.state_subscribers if hasattr(req, 'server_id') and req.server_id == "2"])
+                },
+                "nn_subscribers": {
+                    "reneging_rate": self.compute_reneging_rate_per_server(self.nn_subscribers, "2"),
+                    "jockeying_rate": self.compute_jockeying_rate_per_server(self.nn_subscribers, "2"),
+                    "count": len([req for req in self.nn_subscribers if hasattr(req, 'server_id') and req.server_id == "2"])
+                }
+            }
+        }
+        return summary
     
     
     def get_curr_request(self):
@@ -1407,7 +1459,7 @@ class RequestQueue:
             req=Request(uses_nn, self.uses_intensity_based,time_entrance=time_entered, pos_in_queue=pose, utility_basic=self.utility_basic, service_time=expected_time_to_service_end,
                     discount_coef=self.discount_coef,outage_risk=self.outage_risk,customerid=self.customerid, learning_mode=self.learning_mode,
                     min_amount_observations=self.min_amount_observations,time_res=self.time_res, #exp_time_service_end=expected_time_to_service_end, 
-                    dist_local_delay=self.dist_local_delay,para_local_delay=self.para_local_delay, batchid=batchid)
+                    dist_local_delay=self.dist_local_delay,para_local_delay=self.para_local_delay, batchid=batchid, server_id=server_id)
                     
             self.nn_subscribers.append(req)
             
@@ -1415,7 +1467,7 @@ class RequestQueue:
             req=Request(uses_nn, self.uses_intensity_based, time_entrance=time_entered, pos_in_queue=pose, utility_basic=self.utility_basic, service_time=expected_time_to_service_end,
                     discount_coef=self.discount_coef,outage_risk=self.outage_risk,customerid=self.customerid, learning_mode=self.learning_mode,
                     min_amount_observations=self.min_amount_observations,time_res=self.time_res, #exp_time_service_end=expected_time_to_service_end, 
-                    dist_local_delay=self.dist_local_delay,para_local_delay=self.para_local_delay, batchid=batchid)
+                    dist_local_delay=self.dist_local_delay,para_local_delay=self.para_local_delay, batchid=batchid, server_id=server_id)
                     
             self.state_subscribers.append(req)          
   
@@ -2185,7 +2237,7 @@ class RequestQueue:
             # scale_erlang=mean_interval*k_erlang
             
             if np.isnan(mean_interval):
-                self.max_cloud_delay=np.Inf
+                self.max_cloud_delay=np.inf
             else:
                 self.max_local_delay = self.generateLocalCompUtility(req)
                 queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate
