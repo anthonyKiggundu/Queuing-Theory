@@ -1195,14 +1195,27 @@ class RequestQueue:
                 if adjust_service_rate:
                     self.adjust_service_rates()
 
-                # Step 5: Compute jockeying and reneging rates
-                queue1_jockeying_rate = self.compute_jockeying_rate(self.dict_queues_obj["1"])
-                queue1_reneging_rate = self.compute_reneging_rate(self.dict_queues_obj["1"])
+                # Step 5: Compute jockeying and reneging rates using new per-server methods
+                # This provides more granular analysis by information source
+                queue1_state_jockeying = self.compute_jockeying_rate_per_server(self.state_subscribers, "1")
+                queue1_state_reneging = self.compute_reneging_rate_per_server(self.state_subscribers, "1")
+                queue1_nn_jockeying = self.compute_jockeying_rate_per_server(self.nn_subscribers, "1")
+                queue1_nn_reneging = self.compute_reneging_rate_per_server(self.nn_subscribers, "1")
+                
+                # Use combined rates for backward compatibility
+                queue1_jockeying_rate = (queue1_state_jockeying + queue1_nn_jockeying) / 2
+                queue1_reneging_rate = (queue1_state_reneging + queue1_nn_reneging) / 2
                 srv1_jockeying_rates.append(queue1_jockeying_rate)
                 srv1_reneging_rates.append(queue1_reneging_rate)
                 
-                queue2_jockeying_rate = self.compute_jockeying_rate(self.dict_queues_obj["2"])
-                queue2_reneging_rate = self.compute_reneging_rate(self.dict_queues_obj["2"])
+                queue2_state_jockeying = self.compute_jockeying_rate_per_server(self.state_subscribers, "2")
+                queue2_state_reneging = self.compute_reneging_rate_per_server(self.state_subscribers, "2")
+                queue2_nn_jockeying = self.compute_jockeying_rate_per_server(self.nn_subscribers, "2")
+                queue2_nn_reneging = self.compute_reneging_rate_per_server(self.nn_subscribers, "2")
+                
+                # Use combined rates for backward compatibility
+                queue2_jockeying_rate = (queue2_state_jockeying + queue2_nn_jockeying) / 2
+                queue2_reneging_rate = (queue2_state_reneging + queue2_nn_reneging) / 2
                 srv2_jockeying_rates.append(queue2_jockeying_rate)
                 srv2_reneging_rates.append(queue2_reneging_rate)
                 

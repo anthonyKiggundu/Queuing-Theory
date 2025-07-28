@@ -1062,6 +1062,71 @@ class RequestQueue:
         plt.show()
         
     
+    def plot_rates_per_server_and_source(self):
+        """
+        Enhanced plotting function showing rates per server and per information source.
+        """
+        summary = self.get_rates_summary_per_server_and_source()
+        
+        servers = ["server_1", "server_2"]
+        info_sources = ["state_subscribers", "nn_subscribers"]
+        
+        fig, axs = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle('Reneging and Jockeying Rates by Server and Information Source', fontsize=16)
+        
+        for i, server in enumerate(servers):
+            # Reneging rates
+            axs[i, 0].bar(info_sources, 
+                         [summary[server][src]["reneging_rate"] for src in info_sources],
+                         color=['skyblue', 'lightcoral'])
+            axs[i, 0].set_title(f'{server.replace("_", " ").title()} - Reneging Rates')
+            axs[i, 0].set_ylabel('Reneging Rate')
+            axs[i, 0].set_ylim(0, 1)
+            
+            # Add count labels on bars
+            for j, src in enumerate(info_sources):
+                count = summary[server][src]["count"]
+                rate = summary[server][src]["reneging_rate"]
+                axs[i, 0].text(j, rate + 0.02, f'n={count}', ha='center', va='bottom')
+            
+            # Jockeying rates  
+            axs[i, 1].bar(info_sources,
+                         [summary[server][src]["jockeying_rate"] for src in info_sources],
+                         color=['lightgreen', 'orange'])
+            axs[i, 1].set_title(f'{server.replace("_", " ").title()} - Jockeying Rates')
+            axs[i, 1].set_ylabel('Jockeying Rate')
+            axs[i, 1].set_ylim(0, 1)
+            
+            # Add count labels on bars
+            for j, src in enumerate(info_sources):
+                count = summary[server][src]["count"]
+                rate = summary[server][src]["jockeying_rate"]
+                axs[i, 1].text(j, rate + 0.02, f'n={count}', ha='center', va='bottom')
+        
+        # Improve x-axis labels
+        for ax in axs.flat:
+            ax.set_xticklabels(['State\nSubscribers', 'NN\nSubscribers'])
+            ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Print summary table
+        print("\n" + "="*80)
+        print("RATES SUMMARY BY SERVER AND INFORMATION SOURCE")
+        print("="*80)
+        for server in servers:
+            print(f"\n{server.replace('_', ' ').title()}:")
+            print("-" * 40)
+            for src in info_sources:
+                data = summary[server][src]
+                print(f"  {src.replace('_', ' ').title()}:")
+                print(f"    Requests: {data['count']}")
+                print(f"    Reneging Rate: {data['reneging_rate']:.3f}")
+                print(f"    Jockeying Rate: {data['jockeying_rate']:.3f}")
+        print("="*80)
+        
+    
     def setup_dispatch_intervals(self):
         """
         Set up the intervals for dispatching the queue status information.
@@ -1729,14 +1794,41 @@ def main():
     requestObj = RequestQueue(utility_basic, discount_coef)
     duration = 10
     
+    print("Starting Queuing Theory simulation with per-server rate analysis...")
+    print(f"Configuration: utility_basic={utility_basic}, discount_coef={discount_coef}")
+    
     # Start the scheduler
     scheduler_thread = threading.Thread(target=requestObj.run_scheduler)
     scheduler_thread.start()
     
     requestObj.run(duration)   
     
-    # Plot the rates after the simulation
-    requestObj.plot_rates()             
+    # Demonstrate the new per-server rate computation
+    print("\n" + "="*60)
+    print("PER-SERVER RATE ANALYSIS")
+    print("="*60)
+    
+    # Get summary of rates per server and information source
+    summary = requestObj.get_rates_summary_per_server_and_source()
+    
+    for server_name, server_data in summary.items():
+        print(f"\n{server_name.replace('_', ' ').title()}:")
+        print("-" * 30)
+        for info_source, rates in server_data.items():
+            print(f"  {info_source.replace('_', ' ').title()}:")
+            print(f"    Requests: {rates['count']}")
+            print(f"    Reneging Rate: {rates['reneging_rate']:.3f}")
+            print(f"    Jockeying Rate: {rates['jockeying_rate']:.3f}")
+    
+    # Plot the traditional rates
+    print("\nGenerating traditional rate plots...")
+    requestObj.plot_rates()
+    
+    # Plot the enhanced per-server and per-source rates
+    print("Generating enhanced per-server rate plots...")
+    requestObj.plot_rates_per_server_and_source()
+    
+    print("\nSimulation completed. Check the generated plots for detailed analysis.")
 	 
 if __name__ == "__main__":
     main()
