@@ -29,10 +29,10 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 # Global variables
-
+GLOBAL_HISTORIES = []
 GLOBAL_SIMULATION_HISTORIES_NOPOLICY = []
 GLOBAL_SIMULATION_HISTORIES_POLICY = []
-GLOBAL_SIMULATION_HISTORIES_EGREEDY = []
+GLOBAL_SIMULATION_HISTORIES_POLICY_QUEUE_LEN = []
 
 ###############################################################################
 
@@ -253,9 +253,6 @@ class ServerPolicy:
 
     def update_policy(self, queue_state_features, queue_size=None): # max_rate=None): #
         # Call adjust_weights before each update
-        
-        #if max_rate is not None:
-        #    self.max_rate = max_rate
             
         self.adjust_weights()
         proba = self.model.predict_proba(queue_state_features)
@@ -277,11 +274,10 @@ class ServerPolicy:
             if util < 0:
                 new_rate = self.current_service_rate * 1.15
                 self.current_service_rate = min(new_rate, self.max_rate)
-                print(f"[ServerPolicy: utility < 0] Updated Rate: {self.current_service_rate}, {prev_rate}, {new_rate}")
+                
             elif util > 0.2:
                 new_rate = self.current_service_rate * 0.95
-                self.current_service_rate = max(new_rate, self.min_rate)
-                #print(f"[ServerPolicy-UTIL >0] Updated Rate: {self.current_service_rate}, {prev_rate},{new_rate}")
+                self.current_service_rate = max(new_rate, self.min_rate)                
                 
         self.history.append({
             "features": queue_state_features,
@@ -297,6 +293,312 @@ class ServerPolicy:
         
     def get_policy_history(self):
         return self.history
+
+
+########################################################################
+#        Optimal policy for controlling two-server queueing            #
+#           systems with jockeying - prototype                         #
+########################################################################
+
+'''	
+mu1=2.0, mu2=2.0,   # service rates
+r1=7.0, r2=7.0,     # admission rewards for routing to server1/2
+h1=1.0, h2=1.0,     # holding costs per job per unit time
+c1=2.0, c2=2.0,     # service costs (when serving own job)
+c12=3.0, c21=3.0,   # jockeying service costs (server1 serves jockey from 2 = c21, etc.)
+C_R=5.0,            # reneging cost (penalty) when a job abandons
+alpha=0.1):         # discount / uniformization parameter (not directly used)
+'''
+
+"""
+Two separate MDP solvers:
+  1) compute_optimal_jockeying_policy(...)   -- jockeying/routing/service decisions (NO reneging)
+  2) compute_optimal_reneging_policy(...)   -- reneging decisions only (routing fixed or provided)
+
+Both use value iteration on truncated grid {0..N_x} x {0..N_y}.
+"""
+
+from math import inf
+
+
+class Params:
+    def __init__(self, lam=2.0, mu1=2.0, mu2=2.0,
+                 r1=7.0, r2=7.0,
+                 h1=1.0, h2=1.0,
+                 c1=2.0, c2=2.0,
+                 c12=3.0, c21=3.0,
+                 C_R=5.0):
+        self.lam = lam
+        self.mu1 = mu1
+        self.mu2 = mu2
+        self.r1 = r1
+        self.r2 = r2
+        self.h1 = h1
+        self.h2 = h2
+        self.c1 = c1
+        self.c2 = c2
+        self.c12 = c12
+        self.c21 = c21
+        self.C_R = C_R
+        
+        
+    def update_from_queue(self, queue):
+        """Update rates from a RequestQueue instance."""
+        self.lam = queue.arr_rate
+        self.mu1 = queue.srvrates_1
+        self.mu2 = queue.srvrates_2
+        
+
+class CombinedPolicySolver:
+    """
+    This class combines the logic of JockeyingPolicySolver and RenegingPolicySolver.
+    It precomputes both policies and exposes a unified decision API for use in RequestQueue.
+    """
+    def __init__(self, params, N_x=30, N_y=30, max_iters=2000, tol=1e-6, verbose=False):
+        self.params = params
+        self.N_x = N_x
+        self.N_y = N_y
+        self.max_iters = max_iters
+        self.tol = tol
+        self.verbose = verbose
+        self._compute_policies()
+
+    def _compute_policies(self):
+        # Jockeying policy
+        self.jockeying_policy = self._solve_jockeying_policy()
+        # Reneging policy
+        self.reneging_policy = self._solve_reneging_policy()
+
+    def _solve_jockeying_policy(self):
+        # Same as JockeyingPolicySolver.solve
+        lam = self.params.lam
+        mu1 = self.params.mu1
+        mu2 = self.params.mu2
+        r1 = self.params.r1
+        r2 = self.params.r2
+        h1 = self.params.h1
+        h2 = self.params.h2
+        c1 = self.params.c1
+        c2 = self.params.c2
+        c12 = self.params.c12
+        c21 = self.params.c21
+
+        Nx = self.N_x
+        Ny = self.N_y
+        V = np.zeros((Nx+1, Ny+1))
+        Vnew = np.zeros_like(V)
+        X1 = np.arange(Nx+1)[:,None]
+        X2 = np.arange(Ny+1)[None,:]
+        hmat = h1*X1 + h2*X2
+
+        def getV(i,j):
+            i = min(max(i,0),Nx)
+            j = min(max(j,0),Ny)
+            return V[i,j]
+
+        def T0_val(x1,x2):
+            return max(getV(x1,x2), r1 + getV(x1+1,x2), r2 + getV(x1,x2+1))
+
+        def T1_val(x1,x2):
+            if x1==0 and x2==0: return getV(x1,x2)
+            cand = [getV(x1,x2)]
+            if x1>0: cand.append(getV(x1-1,x2) - c1)
+            if x2>0: cand.append(getV(x1,x2-1) - c21)
+            return max(cand)
+
+        def T2_val(x1,x2):
+            if x1==0 and x2==0: return getV(x1,x2)
+            cand = [getV(x1,x2)]
+            if x2>0: cand.append(getV(x1,x2-1) - c2)
+            if x1>0: cand.append(getV(x1-1,x2) - c12)
+            return max(cand)
+
+        if self.verbose: print("Starting jockeying-only VI on grid",Nx,"x",Ny)
+        
+        it=0
+        
+        while it < self.max_iters:
+            for i in range(Nx+1):
+                for j in range(Ny+1):
+                    t0 = T0_val(i,j)
+                    t1 = T1_val(i,j)
+                    t2 = T2_val(i,j)
+                    
+                    if np.any(np.isnan(Vnew)) or np.any(np.isinf(Vnew)):
+                        print("NaN or Inf detected in Vnew at iteration", it)
+                        Vnew = np.nan_to_num(Vnew, nan=0.0, posinf=0.0, neginf=0.0)
+                        
+                    Vnew[i,j] = -hmat[i,j] + lam*t0 + mu1*t1 + mu2*t2
+            diff = np.max(np.abs(Vnew-V))
+            V[:,:] = Vnew[:,:]
+            it +=1
+            if self.verbose and (it<5 or it%100==0): print(f"iter {it} diff {diff:.3e}")
+            if diff < self.tol: break
+        if self.verbose: print("Jockeying VI done at iter",it,"diff",diff)
+
+        # extract argmax policy tables
+        a0 = np.zeros_like(V, dtype=int); a1 = np.zeros_like(V, dtype=int); a2 = np.zeros_like(V, dtype=int)
+        for i in range(Nx+1):
+            for j in range(Ny+1):
+                # a0
+                vals0 = [getV(i,j), r1+getV(i+1,j), r2+getV(i,j+1)]
+                a0[i,j] = int(np.argmax(vals0))
+                # a1
+                vals1 = [getV(i,j)]
+                acts1 = [0]
+                
+                if i>0: 
+                    vals1.append(getV(i-1,j)-c1)
+                    acts1.append(1)
+                    
+                if j>0: 
+                    vals1.append(getV(i,j-1)-c21)
+                    acts1.append(2)
+                    
+                a1[i,j] = acts1[int(np.argmax(vals1))]
+                # a2
+                vals2 = [getV(i,j)]; acts2=[0]
+                if j>0: 
+                    vals2.append(getV(i,j-1)-c2)
+                    acts2.append(1)
+                if i>0: 
+                    vals2.append(getV(i-1,j)-c12)
+                    acts2.append(2)
+                    
+                a2[i,j] = acts2[int(np.argmax(vals2))]
+                
+        return dict(a0=a0, a1=a1, a2=a2)
+
+
+    def _solve_reneging_policy(self):
+        lam = self.params.lam
+        mu1 = self.params.mu1
+        mu2 = self.params.mu2
+        h1 = self.params.h1
+        h2 = self.params.h2
+        C_R = self.params.C_R
+
+        Nx = self.N_x
+        Ny = self.N_y
+        V = np.zeros((Nx+1,Ny+1))
+        Vnew = np.zeros_like(V)
+        X1 = np.arange(Nx+1)[:,None]
+        X2 = np.arange(Ny+1)[None,:]
+        hmat = h1*X1 + h2*X2
+
+        def getV(i,j):
+            i=min(max(i,0),Nx)
+            j=min(max(j,0),Ny)
+            return V[i,j]
+
+        def T0_val(x1,x2):
+            # default: route to shorter queue, ties -> S1
+            rout = 1 if x1<=x2 else 2
+            if rout==1:
+                return max(getV(x1,x2), self.params.r1 + getV(x1+1,x2))
+            else:
+                return max(getV(x1,x2), self.params.r2 + getV(x1,x2+1))
+
+        def T1_val(x1,x2):
+            cand = [getV(x1,x2)]
+            if x1>0: cand.append(getV(x1-1,x2))  # serve own (no extra cost here)
+            if x1>0: cand.append(-C_R + getV(x1-1,x2))  # renege q1
+            if x2>0: cand.append(-C_R + getV(x1,x2-1))  # renege q2
+            return max(cand)
+
+        def T2_val(x1,x2):
+            cand = [getV(x1,x2)]
+            if x2>0: cand.append(getV(x1,x2-1))
+            if x1>0: cand.append(-C_R + getV(x1-1,x2))
+            if x2>0: cand.append(-C_R + getV(x1,x2-1))
+            return max(cand)
+
+        if self.verbose: print("Starting reneging-only VI on grid",Nx,"x",Ny)
+        it=0
+        while it < self.max_iters:
+            for i in range(Nx+1):
+                for j in range(Ny+1):
+                    t0 = T0_val(i,j)
+                    t1 = T1_val(i,j)
+                    t2 = T2_val(i,j)
+                    
+                    if np.any(np.isnan(Vnew)) or np.any(np.isinf(Vnew)):
+                        print("NaN or Inf detected in Vnew at iteration", it)
+                        Vnew = np.nan_to_num(Vnew, nan=0.0, posinf=0.0, neginf=0.0)
+                        
+                    Vnew[i,j] = -hmat[i,j] + lam*t0 + mu1*t1 + mu2*t2
+            diff = np.max(np.abs(Vnew-V))
+            V[:,:] = Vnew[:,:]; it+=1
+            if self.verbose and (it<5 or it%100==0): print(f"iter {it} diff {diff:.3e}")
+            if diff<self.tol: break
+        if self.verbose: print("Reneging VI done at iter",it,"diff",diff)
+
+        # extract renege policy tables: at each state, does best action include a renege?
+        renege_srv1 = np.zeros_like(V, dtype=bool)
+        renege_srv2 = np.zeros_like(V, dtype=bool)
+        for i in range(Nx+1):
+            for j in range(Ny+1):
+                vals = []
+                acts = []
+                vals.append(getV(i,j)); acts.append("idle")
+                if i>0: 
+                    vals.append(getV(i-1,j))
+                    acts.append("serve")
+                if i>0: 
+                    vals.append(-C_R + getV(i-1,j))
+                    acts.append("renege_q1")
+                if j>0: 
+                    vals.append(-C_R + getV(i,j-1))
+                    acts.append("renege_q2")
+                    
+                best = acts[int(np.argmax(vals))]
+                renege_srv1[i,j] = (best.startswith("renege"))
+                vals=[]; acts=[]
+                vals.append(getV(i,j)); acts.append("idle")
+                if j>0: 
+                    vals.append(getV(i,j-1))
+                    acts.append("serve")
+                if i>0:
+                    vals.append(-C_R + getV(i-1,j))
+                    acts.append("renege_q1")
+                if j>0:
+                    vals.append(-C_R + getV(i,j-1))
+                    acts.append("renege_q2")
+                    
+                best2 = acts[int(np.argmax(vals))]
+                renege_srv2[i,j] = (best2.startswith("renege"))
+                
+        return dict(at_srv1=renege_srv1, at_srv2=renege_srv2)
+        
+
+    # Unified API for RequestQueue to use:
+    def get_jockey_decision(self, queue_idx, x1, x2):
+        """
+        Returns jockeying action for a server at queue_idx (1 or 2) and state (x1,x2).
+        """
+        if queue_idx == 1:
+            return self.jockeying_policy['a1'][x1, x2]
+        elif queue_idx == 2:
+            return self.jockeying_policy['a2'][x1, x2]
+        else:
+            raise ValueError("queue_idx must be 1 or 2")
+
+    def get_renege_decision(self, queue_idx, x1, x2):
+        """
+        Returns True if reneging is optimal at this state for the given queue_idx.
+        """
+        if queue_idx == 1:
+            return self.reneging_policy['at_srv1'][x1, x2]
+        elif queue_idx == 2:
+            return self.reneging_policy['at_srv2'][x1, x2]
+        else:
+            raise ValueError("queue_idx must be 1 or 2")
+
+    def get_routing_decision(self, x1, x2):
+        """
+        Returns 0=reject, 1=route to S1, 2=route to S2 for new arrivals at state (x1, x2)
+        """
+        return self.jockeying_policy['a0'][x1, x2]
 
 
 
@@ -397,7 +699,7 @@ class Request:
 
     def __init__(self,time_entrance,pos_in_queue=0,utility_basic=0.0,service_time=0.0,discount_coef=0.0, outage_risk=0.1, # =timer()
                  customerid="", learning_mode='online',min_amount_observations=1,time_res=1.0,markov_model=msm.StateMachine(orig=None), time_exit=0.0,
-                 exp_time_service_end=0.0, serv_rate=1.0, dist_local_delay=stats.expon,para_local_delay=[0.0,0.05,1.0], batchid=0 ):  #markov_model=a2c.A2C, 
+                 exp_time_service_end=0.0, serv_rate=1.0, dist_local_delay=stats.expon,para_local_delay=[0.0,0.05,1.0], batchid=0, policy_type=None ):  #markov_model=a2c.A2C, 
         
         # self.id=id #uuid.uuid1()
         self.customerid = "Batch"+str(batchid)+"_Customer_"+str(pos_in_queue+1)
@@ -413,6 +715,7 @@ class Request:
         self.time_exit = time_exit
         self.service_time = service_time # self.objQueues.get_dict_servers()
         #self.certainty=float(outage_risk)
+        self.policy_type = policy_type
 
 
         if (self.certainty<=0) or (self.certainty>=1):
@@ -489,7 +792,7 @@ class Request:
         #OrderedDict
 
     def makeRenegingDecision(self):
-        # print("   User making reneging decision...")
+		        
         decision=False
         if self.learning_mode=='transparent':
             self.max_cloud_delay=stats.erlang.ppf(self.certainty,a=self.pos_in_queue,loc=0,scale=1/self.serv_rate)
@@ -660,123 +963,7 @@ class Observations:
     
     def get_jockey_obs(self, queueid, intensity, pose):
 		
-        return self.curr_obs_jockey
-        
-        
-
-class EpsilonGreedyRouter:
-    """
-    Implements an annealed epsilon-greedy exploration policy for learning optimal weighted random routing.
-    For each arriving job, with probability epsilon_t, explore (uniform random).
-    Otherwise, exploit by routing according to the current estimated optimal routing vector.
-    Service rates are learned online from observed job departures.
-    """
-    def __init__(self, n_queues, lam, compute_routing_vector, K=1.0):
-        """
-        Args:
-            n_queues (int): Number of queues/servers.
-            lam (float): Arrival rate (can also be a function or updated externally).
-            compute_routing_vector (callable): f(lam, mu_hat) -> vector of routing probabilities.
-            K (float): Exploration constant; higher K means more exploration.
-        """
-        self.n_queues = n_queues
-        self.lam = lam
-        self.K = K
-        self.t = 1  # time-step counter; incremented on each job arrival
-        self.counts = np.zeros(n_queues)    # Number of observed completions per queue
-        self.mu_hat = np.ones(n_queues)     # Empirical mean service rates (avoid div0)
-        self.compute_routing_vector = compute_routing_vector
-
-    def select_queue(self):
-        """
-        Select a queue using annealed epsilon-greedy. To be called on each job arrival.
-        Returns:
-            queue_idx (int): Index of selected queue.
-            mode (str): 'explore' or 'exploit' (for diagnostics).
-        """
-        self.t += 1
-        epsilon_t = min(1.0, self.K * np.log(self.t) / self.t)
-        if np.random.rand() < epsilon_t:
-            # Explore
-            queue = np.random.choice(self.n_queues)
-            return queue, 'explore'
-        else:
-            # Exploit: use current routing vector based on mu_hat
-            p_hat = self.compute_routing_vector(self.lam, self.mu_hat)
-            queue = np.random.choice(self.n_queues, p=p_hat)
-            return queue, 'exploit'
-
-    def observe_departure(self, queue_idx, service_time):
-        """
-        Updates empirical mean service rate estimate for queue_idx.
-        Should be called whenever a job departs from queue_idx.
-        Args:
-            queue_idx (int): Queue/server index.
-            service_time (float): Observed service time for the departing job.
-        """
-        reward = 1.0 / service_time
-        self.counts[queue_idx] += 1
-        n = self.counts[queue_idx]
-        # Online update of running mean (Eqn 2)
-        self.mu_hat[queue_idx] += (reward - self.mu_hat[queue_idx]) / n
-
-    def get_estimated_fractions(self):
-        """
-        Returns the current estimated optimal routing fractions.
-        Returns:
-            np.ndarray: Routing probability vector (length n_queues, sums to 1).
-        """
-        return self.compute_routing_vector(self.lam, self.mu_hat)
-
-
-
-def compute_routing_vector(lam, mu_hat, tol=1e-8):
-    """
-    Compute the optimal routing vector according to the iterative algorithm described:
-    - S(λ, μ) is initialized to all servers.
-    - p_i* is computed to minimize expected steady-state queue length for M/M/1s:
-        p_i* = max(0, 1 - (μ_i * sum_j∈S 1/μ_j) / λ )
-    - If any p_i* < 0 or p_i* == 0 for i in S, remove the slowest server and repeat.
-    
-    Args:
-        lam (float): Arrival rate λ.
-        mu_hat (np.ndarray): Empirical service rate vector (μ_i > 0).
-        tol (float): Numerical tolerance for zero.
-
-    Returns:
-        np.ndarray: routing probability vector p (length K, sum to 1).
-    """
-    K = len(mu_hat)
-    S = set(range(K))
-    mu = mu_hat.copy()
-    p = np.zeros(K)
-    while S:
-        S_list = sorted(S)
-        mu_S = mu[S_list]
-        sum_inv_mu = np.sum(1.0 / mu_S)
-        # Compute the optimal load to assign to each server in S
-        lam_S = lam
-        # Compute x_i* for each i in S
-        x_star = np.array([max(0.0, 1.0 - (mu[i] * sum_inv_mu) / lam_S) for i in S_list])
-        # Convert to probabilities (routing fractions)
-        p_S = x_star / np.sum(x_star) if np.sum(x_star) > 0 else np.ones(len(S_list)) / len(S_list)
-        # Assign computed probabilities to the full vector
-        p_tmp = np.zeros(K)
-        for idx, i in enumerate(S_list):
-            p_tmp[i] = p_S[idx]
-        # Check if all entries for servers in S are strictly positive (within tolerance)
-        if np.all(p_tmp[S_list] > tol):
-            p = p_tmp
-            break
-        else:
-            # Remove the slowest server (smallest mu) from S and repeat
-            slowest = S_list[np.argmin(mu_S)]
-            S.remove(slowest)
-    # If no valid set found, do uniform routing as fallback
-    if np.sum(p) == 0:
-        p = np.ones(K) / K
-    return p
-    
+        return self.curr_obs_jockey                  
            
     
 class RequestQueue:
@@ -787,10 +974,11 @@ class RequestQueue:
                  time=0.0, outage_risk=0.1, customerid="",learning_mode='online', decision_rule='risk_control',
                  alt_option='fixed_revenue', min_amount_observations=1, dist_local_delay=stats.expon, time_exit=0.0, exp_time_service_end=0.0,
                  para_local_delay=[0.01,0.1,1.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, 
-                 batchid=np.int16, policy_enabled=True):
+                 batchid=np.int16, policy_enabled=True, use_e_greedy=False, params=None):
                  
         
         self.dispatch_data = {}
+        self.params = params
         #self.dispatch_data = {
         #    "server_1": {"num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": []},
         #    "server_2": {"num_requests": [], "jockeying_rate": [], "reneging_rate": [], "service_rate": [], "intervals": []}
@@ -884,11 +1072,35 @@ class RequestQueue:
         
         #if not hasattr(self, 'simulation_start_time'):
         self.simulation_start_time = self.time # time.time()
-          
+        self.use_e_greedy = use_e_greedy
+        # self.policy_type = policy_type          
                 
-        return
+        return      
     
-        
+    
+    #def decide_policy(self, *args, **kwargs):
+    #    if self.policy_type == "egreedy":
+    #        # Use e-greedy policy logic
+    #        # For example:
+    #        queue_idx, mode = self.egreedy_router.select_queue()
+    #        # (Do something with queue_idx or mode)
+    #        return queue_idx, mode
+    #    elif self.policy_type == "rule":
+    #        # Use rule-based policy logic
+    #        # For example:
+    #        next_queue = self.rule_based_policy.choose_queue(*args, **kwargs)
+    #        return next_queue
+    #    else:
+    #        raise ValueError(f"Unknown policy_type: {self.policy_type}")
+            
+    
+    #def assign_policy_type(self):
+    #    """
+    #    Randomly assign a policy type per request (A/B test).
+    #    """
+    #    return random.choice(self.policy_types)
+            
+       
     def compute_reneging_rate(self, queue):
         """Compute the reneging rate for a given queue."""
         renegs = sum(1 for req in queue if '_reneged' in req.customerid)
@@ -933,8 +1145,7 @@ class RequestQueue:
 		
     def get_customer_id(self):
 		
-        return self.customerid
-		
+        return self.customerid		
         
 
     def estimateMarkovWaitingTimeVer2(self, pos_in_queue, queue_intensity, time_entered):
@@ -1055,6 +1266,7 @@ class RequestQueue:
 
 
     def run(self,duration, interval, progress_bar=True,progress_log=False):
+		
         steps=int(duration/self.time_res)
         
         self.srvrates1_history = []
@@ -1076,17 +1288,14 @@ class RequestQueue:
             
                 # Randomize arrival rate and service rates at each iteration
                 self.arr_rate = self.objQueues.randomize_arrival_rate()  # Randomize arrival rate
-                # self.objQueues.get_dict_servers
-                deltaLambda=random.randint(1, 2)
-                ##deltaLambda=random.uniform(0.1, 0.9)
+                
+                deltaLambda=random.randint(1, 2)                
         
                 serv_rate_one = self.arr_rate + deltaLambda 
                 serv_rate_two = self.arr_rate - deltaLambda
 
-                self.srvrates_1 = serv_rate_one / 2
-                #self.srvrates_1 = self.objQueues.get_dict_servers()["1"]
-                self.srvrates_2 = serv_rate_two / 2
-                #self.srvrates_2 = self.objQueues.get_dict_servers()["2"]
+                self.srvrates_1 = serv_rate_one / 2                
+                self.srvrates_2 = serv_rate_two / 2                
              
                 srv_1 = self.dict_queues_obj.get("1") # Server1
                 srv_2 = self.dict_queues_obj.get("2") 
@@ -1094,7 +1303,12 @@ class RequestQueue:
                 
                 self.raw_srvrates_1 = serv_rate_one / 2
                 self.raw_srvrates_2 = serv_rate_two / 2
-                              
+                
+                if self.params is not None:
+                    self.params.update_from_queue(self)
+                    
+                print("\n PARAMOS UPDATOS: ", self.params.update_from_queue(self))
+                                 
                 # --- Predictive modeling: adjust service rates using learned policy ---
                 
                 features_srv1 = self.extract_features("1")
@@ -1170,8 +1384,7 @@ class RequestQueue:
             print("Simulation completed.")    
         
         #GLOBAL_SIMULATION_HISTORIES.append(list(self.history))  # Save full history for this run
-        
-            
+                    
         return
     
 
@@ -1347,11 +1560,12 @@ class RequestQueue:
             #expected_time_to_service_end = self.estimateMarkovWaitingTime(float(pose)) #, queue_intensity, time_entered)
             #time_local_service = self.generateLocalCompUtility(req)
             
-            
+        policy_type = self.assign_policy_type() 
+          
         req=Request(time_entrance=time_entered, pos_in_queue=pose, utility_basic=self.utility_basic, service_time=expected_time_to_service_end,
                     discount_coef=self.discount_coef,outage_risk=self.outage_risk,customerid=self.customerid, learning_mode=self.learning_mode,
                     min_amount_observations=self.min_amount_observations,time_res=self.time_res, #exp_time_service_end=expected_time_to_service_end, 
-                    dist_local_delay=self.dist_local_delay,para_local_delay=self.para_local_delay, batchid=batchid) # =self.batchid
+                    dist_local_delay=self.dist_local_delay,para_local_delay=self.para_local_delay, batchid=batchid, policy_type=policy_type) # =self.batchid
          
         self.all_requests.append(req)           
         # #markov_model=self.markov_model,  
@@ -2220,7 +2434,7 @@ class RequestQueue:
           
     
     
-    def makeRenegingDecision(self, req, queueid, customer_id, anchor, t_max=10.0, num_points=1000):	 #  T_local,	
+    def makeRenegingDecision(self, req, queueid, customer_id, anchor, t_max=10.0, num_points=1000):	 #  T_local,                     	
 
         def exp_cdf(mu, t):
             """
@@ -2740,6 +2954,13 @@ class RequestQueue:
         # Then we get information about the state of the alternative queue
         # Evaluate input from the actor-critic once we get in the alternative queue
         
+        if getattr(req, "policy_type", "rule") == "egreedy":
+            # --- e-greedy renege logic here (call your e-greedy policy logic) ---
+            pass
+        elif getattr(req, "policy_type", "rule") == "rule":
+            # --- rule-based renege logic here ---
+            pass
+            
 
         def erlang_C(c, rho):
             """
@@ -3631,8 +3852,6 @@ def plot_six_panels_with_service_rates(results, intervals, jockey_anchors):
  
 
 def plot_six_panels(results, intervals, jockey_anchors):
-    import numpy as np
-    import matplotlib.pyplot as plt
 
     fig, axs = plt.subplots(2, len(intervals), figsize=(6*len(intervals), 8), sharex=False)
     colors = {
@@ -3710,9 +3929,118 @@ def plot_six_panels(results, intervals, jockey_anchors):
     plt.show()
 
 
+def plot_six_panels_combo(results, intervals, jockey_anchors, histories_egreedy=None):
+
+    fig, axs = plt.subplots(2, len(intervals), figsize=(6*len(intervals), 8), sharex=False)
+    colors = {
+        "markov_model_service_rate": "blue",
+        "markov_model_inter_change_time": "green",
+        "egreedy_reneging": "darkorange",  # New color for e-greedy reneging
+        "egreedy_jockeying": "purple",     # New color for e-greedy jockeying
+    }
+    linestyles = {
+        "markov_model_service_rate": "-",
+        "markov_model_inter_change_time": "--",
+        "egreedy": "-."
+    }
+
+    all_handles = []
+    all_labels = []
+
+    for col, interval in enumerate(intervals):
+        ax_ren = axs[0, col]
+        for anchor in jockey_anchors:
+            for server in ["server_1", "server_2"]:
+                y = np.array(results[interval]["reneging_rates"][anchor][server])
+                x = np.arange(len(y))
+                line, = ax_ren.plot(
+                    x, y,
+                    label=f"{anchor} | {server.replace('_',' ').title()}",
+                    color=colors[anchor],
+                    linestyle=linestyles[anchor] if server == "server_1" else ':'
+                )
+                label = f"{anchor} | {server.replace('_',' ').title()}"
+                if label not in all_labels:
+                    all_handles.append(line)
+                    all_labels.append(label)
+        # E-greedy (reneging) - dark orange
+        if histories_egreedy is not None:
+            for h in histories_egreedy:
+                if h['interval'] == interval:
+                    anchor = h['anchor']
+                    y = [obs.get('Waited', 0) for obs in h['history'] if '_reneged' in obs.get('customerid', '')]
+                    x = np.arange(len(y))
+                    if len(y) > 0:
+                        line, = ax_ren.plot(
+                            x, y,
+                            label=f"E-greedy Reneging | {anchor}",
+                            color=colors["egreedy_reneging"],
+                            linestyle=linestyles["egreedy"]
+                        )
+                        label = f"E-greedy Reneging | {anchor}"
+                        if label not in all_labels:
+                            all_handles.append(line)
+                            all_labels.append(label)
+
+        ax_ren.set_title(f"Reneging Rates | Interval {interval}s")
+        ax_ren.set_xlabel("Steps")
+        ax_ren.set_ylabel("Reneging Rate")
+
+        ax_jky = axs[1, col]
+        for anchor in jockey_anchors:
+            for server in ["server_1", "server_2"]:
+                y = np.array(results[interval]["jockeying_rates"][anchor][server])
+                x = np.arange(len(y))
+                line, = ax_jky.plot(
+                    x, y,
+                    label=f"{anchor} | {server.replace('_',' ').title()}",
+                    color=colors[anchor],
+                    linestyle=linestyles[anchor] if server == "server_1" else ':'
+                )
+                label = f"{anchor} | {server.replace('_',' ').title()}"
+                if label not in all_labels:
+                    all_handles.append(line)
+                    all_labels.append(label)
+        # E-greedy (jockeying) - purple
+        if histories_egreedy is not None:
+            for h in histories_egreedy:
+                if h['interval'] == interval:
+                    anchor = h['anchor']
+                    y = [obs.get('Waited', 0) for obs in h['history'] if '_jockeyed' in obs.get('customerid', '')]
+                    x = np.arange(len(y))
+                    if len(y) > 0:
+                        line, = ax_jky.plot(
+                            x, y,
+                            label=f"E-greedy Jockeying | {anchor}",
+                            color=colors["egreedy_jockeying"],
+                            linestyle=linestyles["egreedy"]
+                        )
+                        label = f"E-greedy Jockeying | {anchor}"
+                        if label not in all_labels:
+                            all_handles.append(line)
+                            all_labels.append(label)
+
+        ax_jky.set_title(f"Jockeying Rates | Interval {interval}s")
+        ax_jky.set_xlabel("Steps")
+        ax_jky.set_ylabel("Jockeying Rate")
+
+    plt.tight_layout(rect=[0, 0.07, 1, 0.97])
+    fig.legend(
+        all_handles, 
+        all_labels,
+        loc='lower center',
+        ncol=min(4, len(all_labels)), 
+        bbox_to_anchor=(0.5, 0.035),
+        fontsize=10,
+        frameon=True,
+        borderaxespad=1,
+        bbox_transform=fig.transFigure
+    )
+    plt.subplots_adjust(top=0.91, bottom=0.15)
+    plt.show()
+
+
 def plot_rates_vs_service_rates(results, intervals, jockey_anchors):
-    import numpy as np
-    import matplotlib.pyplot as plt
 
     fig, axs = plt.subplots(2, len(intervals), figsize=(6*len(intervals), 8), sharex=False)
     colors = {
@@ -4423,69 +4751,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
-'''
-# Example parameter values (replace with your own)
-tau = 1.0
-phi = 1.0
-psi = 1.0
-
-# Define the ranges for mu_i and mu_j
-mu_i_min, mu_i_max = 1.1, 5.0
-mu_j_min, mu_j_max = 1.2, 6.0
-n_points = 100
-
-mu_i_vals = np.linspace(mu_i_min, mu_i_max, n_points)
-mu_j_vals = np.linspace(mu_j_min, mu_j_max, n_points)
-MI, MJ = np.meshgrid(mu_i_vals, mu_j_vals)
-
-# Placeholder definitions for the components of the objective
-def W(mu, lam=1.0, rho=1.0):
-    # W(mu) = rho / (mu - lambda)
-    return rho / (mu - lam)
-
-def R_reneg(mu, a=1.0, b=1.0):
-    # Example reneging rate: a * exp(-b * (mu - lam))
-    return a * np.exp(-b * (mu - 1.0))
-
-def R_jockey(mu_from, mu_to, c=0.5):
-    # Example jockeying rate: c * (mu_from / mu_to)
-    return c * (mu_from / mu_to)
-
-# Compute the objective function on the grid
-F = (tau * (W(MI) + W(MJ)) +
-     phi * (R_reneg(MI) + R_reneg(MJ)) +
-     psi * (R_jockey(MI, MJ) + R_jockey(MJ, MI)))
-
-# Find the minimum  
-min_idx = np.unravel_index(np.argmin(F), F.shape)
-mu_i_opt = MI[min_idx]
-mu_j_opt = MJ[min_idx]
-f_opt = F[min_idx]
-
-# Plotting the 3D surface
-fig = plt.figure(figsize=(10, 7))
-ax = fig.add_subplot(111, projection='3d')
-surf = ax.plot_surface(MI, MJ, F, cmap='viridis', linewidth=0, antialiased=True, alpha=0.8)
-
-# Highlight the optimal point
-ax.scatter(mu_i_opt, mu_j_opt, f_opt, color='r', s=50, label=f'Optimum ({mu_i_opt:.2f}, {mu_j_opt:.2f})')
-
-# Labels and title
-ax.set_xlabel(r'$\mu_i$')
-ax.set_ylabel(r'$\mu_j$')
-ax.set_zlabel('Objective Value')
-ax.set_title('Objective Surface over $(\mu_i, \mu_j)$')
-ax.legend()
-
-# Add a color bar
-fig.colorbar(surf, shrink=0.5, aspect=10)
-
-plt.show()
-'''
-
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
-
-
 def surface_plot_multi_interval(request_objs, intervals):
     n = len(intervals)
     ncols = min(n, 2)
@@ -4785,7 +5050,7 @@ def bird_surface_plot_comparison(
     plt.show()
     
 
-def build_surface_datas_for_comparison(policy_objs, static_objs, intervals, objective_func):
+def build_surface_datas_for_comparison_original(policy_objs, static_objs, request_objs_egreedy, intervals, objective_func):
     """
     Returns a list of dicts (surface_datas) for use in surface_plot_comparison,
     one per interval, each containing all required keys for plotting.
@@ -4795,7 +5060,6 @@ def build_surface_datas_for_comparison(policy_objs, static_objs, intervals, obje
     - intervals: list of intervals matching the above
     - objective_func: function of (mu1, mu2) returning Z
     """
-    import numpy as np
 
     surface_datas = []
     for rq_pol, rq_stat, interval in zip(policy_objs, static_objs, intervals):
@@ -4838,6 +5102,75 @@ def build_surface_datas_for_comparison(policy_objs, static_objs, intervals, obje
             # Optionally, add 'static_final' if you have a third type
         })
     return surface_datas
+    
+ 
+def build_surface_datas_for_comparison(policy_objs, static_objs, request_objs_egreedy, intervals, objective_func):
+    """
+    Returns a list of dicts (surface_datas) for use in surface_plot_comparison,
+    one per interval, each containing all required keys for plotting.
+    Each dict has keys: X, Y, Z, opt_path, opt_final, nonopt_path, nonopt_final,
+    eg_path, eg_final (optionally static_final)
+    - policy_objs: list of RequestQueue objects for each interval (policy-enabled)
+    - static_objs: list of RequestQueue objects for each interval (no-policy)
+    - request_objs_egreedy: list of RequestQueue objects for each interval (e-greedy)
+    - intervals: list of intervals matching the above
+    - objective_func: function of (mu1, mu2) returning Z
+    """
+
+    surface_datas = []
+    for idx, (rq_pol, rq_stat, interval) in enumerate(zip(policy_objs, static_objs, intervals)):
+        # Get histories of service rates for all three paths
+        mu1_pol = np.asarray(getattr(rq_pol, 'srvrates1_history', []))
+        mu2_pol = np.asarray(getattr(rq_pol, 'srvrates2_history', []))
+        mu1_stat = np.asarray(getattr(rq_stat, 'srvrates1_history', []))
+        mu2_stat = np.asarray(getattr(rq_stat, 'srvrates2_history', []))
+
+        # E-greedy path for this interval, if present
+        if request_objs_egreedy is not None and idx < len(request_objs_egreedy):
+            rq_eg = request_objs_egreedy[idx]
+            mu1_eg = np.asarray(getattr(rq_eg, 'srvrates1_history', []))
+            mu2_eg = np.asarray(getattr(rq_eg, 'srvrates2_history', []))
+        else:
+            mu1_eg = np.array([])
+            mu2_eg = np.array([])
+
+        # Concatenate all for surface limits
+        all_mu1 = np.concatenate([mu1_pol, mu1_stat, mu1_eg]) if (mu1_pol.size or mu1_stat.size or mu1_eg.size) else np.array([1,2])
+        all_mu2 = np.concatenate([mu2_pol, mu2_stat, mu2_eg]) if (mu2_pol.size or mu2_stat.size or mu2_eg.size) else np.array([1,2])
+
+        mu1_min, mu1_max = np.min(all_mu1)*0.9, np.max(all_mu1)*1.1
+        mu2_min, mu2_max = np.min(all_mu2)*0.9, np.max(all_mu2)*1.1
+
+        if np.allclose(mu1_min, mu1_max): mu1_min, mu1_max = all_mu1[-1]*0.9, all_mu1[-1]*1.1
+        if np.allclose(mu2_min, mu2_max): mu2_min, mu2_max = all_mu2[-1]*0.9, all_mu2[-1]*1.1
+
+        n_points = 50
+        mu1_vals = np.linspace(mu1_min, mu1_max, n_points)
+        mu2_vals = np.linspace(mu2_min, mu2_max, n_points)
+        X, Y = np.meshgrid(mu1_vals, mu2_vals)
+        Z = objective_func(X, Y)
+
+        # Prepare paths (N,3)
+        opt_path = np.column_stack([mu1_pol, mu2_pol, objective_func(mu1_pol, mu2_pol)]) if mu1_pol.size and mu2_pol.size else np.empty((0,3))
+        nonopt_path = np.column_stack([mu1_stat, mu2_stat, objective_func(mu1_stat, mu2_stat)]) if mu1_stat.size and mu2_stat.size else np.empty((0,3))
+        eg_path = np.column_stack([mu1_eg, mu2_eg, objective_func(mu1_eg, mu2_eg)]) if mu1_eg.size and mu2_eg.size else np.empty((0,3))
+
+        # Final points
+        opt_final = opt_path[-1] if len(opt_path) else np.array([0,0,0])
+        nonopt_final = nonopt_path[-1] if len(nonopt_path) else np.array([0,0,0])
+        eg_final = eg_path[-1] if len(eg_path) else np.array([0,0,0])
+
+        surface_datas.append({
+            'X': X, 'Y': Y, 'Z': Z,
+            'interval': interval,
+            'opt_path': opt_path,
+            'opt_final': opt_final,
+            'nonopt_path': nonopt_path,
+            'nonopt_final': nonopt_final,
+            'eg_path': eg_path,
+            'eg_final': eg_final
+        })
+    return surface_datas
 
 # Example objective function (adjust as needed for your model)
 def objective_func(mu_i, mu_j):
@@ -4856,8 +5189,25 @@ def main():
 	
     utility_basic = 1.0
     discount_coef = 0.1
-    requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True)
-    duration = 50 #0 #00  
+    
+    #params = Params(
+    #        lam=utility_basic["lam"], mu1=utility_basic["mu1"], mu2=utility_basic["mu2"],
+    #        r1=utility_basic["r1"], r2=utility_basic["r2"],
+    #        h1=utility_basic["h1"], h2=utility_basic["h2"],
+    #        c1=utility_basic["c1"], c2=utility_basic["c2"],
+    #        c12=utility_basic["c12"], c21=utility_basic["c21"],
+    #        C_R=utility_basic.get("C_R", 5.0)
+    #)
+    
+    params = Params(lam=2.0, mu1=2.0, mu2=2.0,
+        r1=7.0, r2=7.0,
+        h1=1.0, h2=1.0,
+        c1=2.0, c2=2.0,
+        c12=3.0, c21=3.0,
+        C_R=4.0
+    )
+    # requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True, params=params)
+    duration = 20 #0 #00  
     
     # Add a configuration flag for the new e-greedy policy
     use_e_greedy_policy = True  # Set to True to enable comparison 
@@ -4870,19 +5220,19 @@ def main():
     
     request_objs_opt = []
     request_objs_nonopt = []
-    request_objs_egreedy = []
-    jockey_anchors = ["markov_model_service_rate", "markov_model_inter_change_time"]
+    request_objs_queue_length = []
+    #jockey_anchors = ["markov_model_service_rate", "markov_model_inter_change_time"]
+    jockey_anchors = ["markov_model_service_rate", "markov_model_inter_change_time", "policy_queue_length_thresholds"]
 
     all_results = {anchor: [] for anchor in jockey_anchors}
-    
-    
-    
+            
     # Iterate through each interval in the intervals array
     all_reneging_rates = []
     all_jockeying_rates = []             
     
+    
     def run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled, jockey_anchors):
-        # print("\n ===>> ", policy_enabled)
+        
         results = {
             interval: {
                 "reneging_rates": {anchor: {} for anchor in jockey_anchors},
@@ -4891,19 +5241,15 @@ def main():
             }
             for interval in intervals
         }
-        
-        # Example integration:
-        # router = EpsilonGreedyRouter(n_queues=3, lam=10, compute_routing_vector=compute_routing_vector, K=2.0)
-        # for each job arrival:
-        #   queue_idx, mode = router.select_queue()
-        #   ... dispatch job to queue_idx ...
-        # on each job departure from queue i:
-        #   router.observe_departure(i, service_time)
-        # To get the current estimated optimal routing fractions:
-        #   fractions = router.get_estimated_fractions()
-        
+     
         # Optionally, collect histories for the last interval/anchor run
         all_histories = []  # To store (interval, anchor, history) for each run
+        
+        # Instantiate your policy solvers ONCE (outside the loop)
+        
+        
+        combined_policy_solver = CombinedPolicySolver(params)
+        
         
         '''
         for interval in intervals:
@@ -4924,6 +5270,28 @@ def main():
                     request_objs_opt.append(requestObj)
                     # Store history with anchor and interval
                     GLOBAL_SIMULATION_HISTORIES_POLICY.append({
+                        "anchor": anchor,
+                        "interval": interval,
+                        "history": list(requestObj.history)   # Copy to avoid mutation
+                    }) 
+                    
+                elif policy_enabled and "policy_queue_length_thresholds" in anchor:
+                    # This is your custom queue-length-threshold policy
+                    requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True, combined_policy_solver=combined_policy_solver, anchor=anchor )
+                    requestObj.jockey_anchor = anchor  # Make sure this attribute is respected in RequestQueue
+                    requestObj.run(duration, interval)
+                    results[interval]["reneging_rates"][anchor] = {
+                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
+                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
+                    }
+                    results[interval]["jockeying_rates"][anchor] = {
+                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
+                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
+                    } 
+                    
+                    request_objs_queue_length.append(requestObj)
+                    # Store history with anchor and interval
+                    GLOBAL_SIMULATION_HISTORIES_POLICY_QUEUE_LEN.append({
                         "anchor": anchor,
                         "interval": interval,
                         "history": list(requestObj.history)   # Copy to avoid mutation
@@ -4963,14 +5331,38 @@ def main():
                     
             request_objs.append(requestObj)
         
-        return results, GLOBAL_SIMULATION_HISTORIES_POLICY if policy_enabled else GLOBAL_SIMULATION_HISTORIES_NOPOLICY        
-        '''
+        return results, GLOBAL_SIMULATION_HISTORIES_POLICY if policy_enabled else GLOBAL_SIMULATION_HISTORIES_NOPOLICY  
         
+        ''' 
+             
         for interval in intervals:
             for anchor in jockey_anchors:
-            # --- Existing Rule-based Policy ---
-                if policy_enabled:
-                    requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True)
+                if policy_enabled and not ("policy_queue_length_thresholds" in anchor):
+					
+                    # Default (Markov or baseline) policy
+                    requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=policy_enabled)
+                    requestObj.jockey_anchor = anchor
+                    requestObj.run(duration, interval)
+                    results[interval]["reneging_rates"][anchor] = {
+                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
+                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
+                    }
+                    
+                    results[interval]["jockeying_rates"][anchor] = {
+                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
+                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
+                    }
+                    
+                    request_objs_opt.append(requestObj)
+                    GLOBAL_SIMULATION_HISTORIES_POLICY.append({
+                        "anchor": anchor,
+                        "interval": interval,
+                        "history": list(requestObj.history)
+                    })
+                    
+                elif policy_enabled and "policy_queue_length_thresholds" in anchor:
+                    # Your custom queue-length-thresholds policy
+                    requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True, combined_policy_solver=combined_policy_solver, anchor=anchor, params=params)
                     requestObj.jockey_anchor = anchor
                     requestObj.run(duration, interval)
                     results[interval]["reneging_rates"][anchor] = {
@@ -4981,13 +5373,14 @@ def main():
                         "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
                         "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
                     }
-                    request_objs_opt.append(requestObj)
-                    GLOBAL_SIMULATION_HISTORIES_POLICY.append({
+                    request_objs_queue_length.append(requestObj)
+                    GLOBAL_SIMULATION_HISTORIES_POLICY_QUEUE_LEN.append({
                         "anchor": anchor,
                         "interval": interval,
                         "history": list(requestObj.history)
-                    })
+                    })                    
                 else:
+                    # No policy case
                     requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=False)
                     requestObj.jockey_anchor = anchor
                     requestObj.run(duration, interval)
@@ -5006,30 +5399,6 @@ def main():
                         "history": list(requestObj.history)
                     })
 
-                # --- Epsilon-Greedy Bandit Policy ---
-                if use_e_greedy_policy:
-                    requestObj_egreedy = RequestQueue(utility_basic, discount_coef, policy_enabled=False, use_e_greedy=True)
-                    requestObj_egreedy.jockey_anchor = anchor
-                    requestObj_egreedy.run(duration, interval)
-                    # Optionally collect e-greedy-specific results in their own dict
-                    eg_key = f"egreedy_{anchor}"
-                    if eg_key not in results[interval]["reneging_rates"]:
-                        results[interval]["reneging_rates"][eg_key] = {
-                            "server_1": list(requestObj_egreedy.dispatch_data[interval]["server_1"]["reneging_rate"]),
-                            "server_2": list(requestObj_egreedy.dispatch_data[interval]["server_2"]["reneging_rate"]),
-                        }
-                        results[interval]["jockeying_rates"][eg_key] = {
-                            "server_1": list(requestObj_egreedy.dispatch_data[interval]["server_1"]["jockeying_rate"]),
-                            "server_2": list(requestObj_egreedy.dispatch_data[interval]["server_2"]["jockeying_rate"]),
-                        }
-                    request_objs_egreedy.append(requestObj_egreedy)
-                    GLOBAL_SIMULATION_HISTORIES_EGREEDY.append({
-                        "anchor": anchor,
-                        "interval": interval,
-                        "history": list(requestObj_egreedy.history)
-                    })
-
-                # --- History for all ---
                 all_histories.append({
                     "interval": interval,
                     "anchor": anchor,
@@ -5041,30 +5410,23 @@ def main():
                 elif "request_log" in globals():
                     request_log.clear()
 
-                if use_e_greedy_policy:
-                    if hasattr(requestObj_egreedy, "request_log"):
-                        requestObj_egreedy.request_log.clear()
-                    elif "request_log" in globals():
-                        request_log.clear()
+            request_objs.append(requestObj)
 
-            request_objs = request_objs_opt + request_objs_nonopt + request_objs_egreedy
-
-        return results, (
-            GLOBAL_SIMULATION_HISTORIES_POLICY,
-            GLOBAL_SIMULATION_HISTORIES_NOPOLICY,
-            GLOBAL_SIMULATION_HISTORIES_EGREEDY if use_e_greedy_policy else None
-        )
+        # FINAL RETURN: choose which histories to return based on which branch matches
+        if policy_enabled and any("policy_queue_length_thresholds" in anchor for anchor in jockey_anchors):
+            return results, GLOBAL_SIMULATION_HISTORIES_POLICY_QUEUE_LEN
+        elif policy_enabled:
+            return results, GLOBAL_SIMULATION_HISTORIES_POLICY
+        else:
+            return results, GLOBAL_SIMULATION_HISTORIES_NOPOLICY
         
     # With policy-driven service rates
-    # results_policy , histories_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=True,  jockey_anchors=jockey_anchors)  
-    results_policy, histories_policy, histories_egreedy = run_simulation_for_policy_mode( utility_basic, discount_coef, intervals, duration,
-                                                             policy_enabled=True, jockey_anchors=jockey_anchors, use_e_greedy_policy=True) 
-    #print("\n=== Predictive Model Fitting History ===")
-    #if hasattr(requestObj, 'predictive_model') and hasattr(requestObj.predictive_model, 'fit_history'):
-    #    for fit in requestObj.predictive_model.fit_history:
-    #        print(fit)
+    results_policy , histories_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=True,  jockey_anchors=jockey_anchors)  
+    # results_policy, histories_policy, histories_egreedy = run_simulation_for_policy_mode( utility_basic, discount_coef, intervals, duration, policy_enabled=True, jockey_anchors=jockey_anchors, use_e_greedy_policy=True)
+    # results_policy, (histories_policy, histories_nopolicy, histories_egreedy) = run_simulation_for_policy_mode( utility_basic, discount_coef, intervals, duration, policy_enabled=True, jockey_anchors=jockey_anchors, use_e_greedy_policy=True) 
+
     # With static/non-policy-driven service rates
-    results_no_policy, histories_nopolicy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=False,  jockey_anchors=jockey_anchors)              
+    results_no_policy, histories_nopolicy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=False, jockey_anchors=jockey_anchors) # , use_e_greedy_policy=False)              
     
     waiting_times, outcomes, time_stamps = extract_waiting_times_and_outcomes(requestObj)
            
@@ -5079,9 +5441,10 @@ def main():
     # requestObj.plot_rates_by_intervals()
     
     plot_six_panels(results_no_policy, intervals, jockey_anchors)    
-    plot_six_panels(results_policy, intervals, jockey_anchors)         
+    plot_six_panels(results_policy, intervals, jockey_anchors)
+    # plot_six_panels_combo(results_policy, intervals, jockey_anchors, histories_egreedy=histories_egreedy)         
         
-    surface_datas = build_surface_datas_for_comparison(request_objs_opt, request_objs_nonopt, intervals, objective_func)
+    surface_datas = build_surface_datas_for_comparison(request_objs_opt, request_objs_nonopt,  intervals, objective_func) # request_objs_egreedy,
     bird_surface_plot_comparison(surface_datas, intervals)
     
     ###### surface_plot_multi_interval(request_objs, intervals)
@@ -5103,3 +5466,22 @@ def main():
 	 
 if __name__ == "__main__":
     main()
+
+    #params = Params(lam=2.0, mu1=2.0, mu2=2.0,
+    #                r1=7.0, r2=7.0,
+    #                h1=1.0, h2=1.0,
+    #                c1=2.0, c2=2.0,
+    #                c12=3.0, c21=3.0,
+    #                C_R=4.0)
+    
+    # jockeying-only policy
+    #jockey_res = compute_optimal_jockeying_policy(params, N_x=20, N_y=20, verbose=True)
+    #print("Jockeying policy a0 sample (small grid):")
+    #print(jockey_res['policy']['a0'][:6,:6])
+
+    # reneging-only policy (routing uses shortest-queue by default)
+    #renege_res = compute_optimal_reneging_policy(params, N_x=20, N_y=20, verbose=True)
+    #print("Reneging thresholds (q1,q2):", renege_res['thresholds'])
+
+
+   
