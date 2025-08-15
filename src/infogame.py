@@ -471,6 +471,12 @@ class CombinedPolicySolver:
 
 
     def _solve_reneging_policy(self):
+        """
+        Improved logic:
+        Reneging is optimal for a server at state (i, j) if:
+         - The alternative queue is longer than the current queue (j > i for server 1, i > j for server 2)
+         - AND the expected remaining wait time in the current queue is greater than a local threshold T_local
+        """
         lam = self.params.lam
         mu1 = self.params.mu1
         mu2 = self.params.mu2
@@ -523,7 +529,6 @@ class CombinedPolicySolver:
                     t2 = T2_val(i,j)
                     
                     if np.any(np.isnan(Vnew)) or np.any(np.isinf(Vnew)):
-                        #print("NaN or Inf detected in Vnew at iteration", it)
                         Vnew = np.nan_to_num(Vnew, nan=0.0, posinf=0.0, neginf=0.0)
                         
                     Vnew[i,j] = -hmat[i,j] + lam*t0 + mu1*t1 + mu2*t2
@@ -533,41 +538,22 @@ class CombinedPolicySolver:
             if diff<self.tol: break
         if self.verbose: print("Reneging VI done at iter",it,"diff",diff)
 
-        # extract renege policy tables: at each state, does best action include a renege?
+        # --- New Reneging Policy Extraction ---
+        # Set T_local as a parameter (can be tuned or made state-dependent)
+        T_local = 1.0  # You can make this dynamic, e.g., a function of i/j or pass as an argument
+
         renege_srv1 = np.zeros_like(V, dtype=bool)
         renege_srv2 = np.zeros_like(V, dtype=bool)
         for i in range(Nx+1):
             for j in range(Ny+1):
-                vals = []
-                acts = []
-                vals.append(getV(i,j)); acts.append("idle")
-                if i>0: 
-                    vals.append(getV(i-1,j))
-                    acts.append("serve")
-                if i>0: 
-                    vals.append(-C_R + getV(i-1,j))
-                    acts.append("renege_q1")
-                if j>0: 
-                    vals.append(-C_R + getV(i,j-1))
-                    acts.append("renege_q2")
-                    
-                best = acts[int(np.argmax(vals))]
-                renege_srv1[i,j] = (best.startswith("renege"))
-                vals=[]; acts=[]
-                vals.append(getV(i,j)); acts.append("idle")
-                if j>0: 
-                    vals.append(getV(i,j-1))
-                    acts.append("serve")
-                if i>0:
-                    vals.append(-C_R + getV(i-1,j))
-                    acts.append("renege_q1")
-                if j>0:
-                    vals.append(-C_R + getV(i,j-1))
-                    acts.append("renege_q2")
-                    
-                best2 = acts[int(np.argmax(vals))]
-                renege_srv2[i,j] = (best2.startswith("renege"))
-                
+                # For server 1 (current queue length i, alt queue length j)
+                remaining_time_srv1 = i / mu1 if mu1 > 0 else np.inf
+                # Reneging: alt queue is longer & remaining time exceeds T_local
+                renege_srv1[i, j] = (j > i) and (remaining_time_srv1 > T_local)
+                # For server 2 (current queue length j, alt queue length i)
+                remaining_time_srv2 = j / mu2 if mu2 > 0 else np.inf
+                renege_srv2[i, j] = (i > j) and (remaining_time_srv2 > T_local)
+
         return dict(at_srv1=renege_srv1, at_srv2=renege_srv2)
         
 
@@ -588,19 +574,21 @@ class CombinedPolicySolver:
         else:
             raise ValueError("queue_idx must be 1 or 2")
 
-    def get_renege_decision(self, queue_idx, x1, x2):
+    def get_renege_decision(self, queue_idx, x1, x2, T_local):
         """
-        Returns True if reneging is optimal at this state for the given queue_idx.
-        Now robust to out-of-bounds indices.
+        Returns True if reneging is optimal at this state for the given queue_idx and T_local.
         """
-        Nx, Ny = self.reneging_policy["at_srv1"].shape[0] - 1, self.reneging_policy["at_srv1"].shape[1] - 1
-        # Clamp x1, x2 within valid bounds
+        Nx, Ny = self.N_x, self.N_y
         x1 = max(0, min(x1, Nx))
         x2 = max(0, min(x2, Ny))
-        if "1" in  queue_idx:
-            return self.reneging_policy['at_srv1'][x1, x2]
-        elif "2" in queue_idx :
-            return self.reneging_policy['at_srv2'][x1, x2]
+        if "1" in queue_idx:
+            mu1 = self.params.mu1
+            remaining_time = x1 / mu1 if mu1 > 0 else float("inf")
+            return (x2 > x1) and (remaining_time > T_local)
+        elif "2" in queue_idx:
+            mu2 = self.params.mu2
+            remaining_time = x2 / mu2 if mu2 > 0 else float("inf")
+            return (x1 > x2) and (remaining_time > T_local)
         else:
             raise ValueError("queue_idx must be 1 or 2")
 
@@ -987,7 +975,11 @@ class RequestQueue:
                  batchid=np.int16, policy_enabled=True, use_e_greedy=False, params=None, combined_policy_solver=None, anchor=None    
                  ):
                  
-        
+        # Always set self.params
+        if params is not None:
+            self.params = params
+        else:
+            self.params = Params()
         self.dispatch_data = {}               
         self.markov_model=msm.StateMachine(orig=markov_model)
         # self.arr_rate=float(arr_rate) arr_rate, queue=np.array([])
@@ -1330,10 +1322,9 @@ class RequestQueue:
                 print("\n Arrival rate: ", self.arr_rate, "Rates 1: ----", self.srvrates_1,  "Rates 2: ----", self.srvrates_2)
                 
                 self.raw_srvrates_1 = serv_rate_one / 2
-                self.raw_srvrates_2 = serv_rate_two / 2
-                
-                if self.params is not None:
-                    self.params.update_from_queue(self.arr_rate, self.srvrates_1, self.srvrates_2)
+                self.raw_srvrates_2 = serv_rate_two / 2                              
+                    
+                self.params.update_from_queue(self.arr_rate, self.srvrates_1, self.srvrates_2)
                     
                 # print("\n PARAMOS UPDATOS: ", self.params.lam, self.params.mu1, self.params.mu2)
                                  
@@ -1660,7 +1651,7 @@ class RequestQueue:
         num_requests = curr_queue_state['total_customers'] # len(curr_queue) 
          
         anchor = random.choice(["markov_model_inter_change_time", "markov_model_service_rate", "policy_queue_length_thresholds"])        
-        print("Selected anchor:", anchor)
+        # print("Selected anchor:", anchor)
             
         for client in range(len(curr_queue)):            
             req = curr_queue[client] 
@@ -2788,8 +2779,15 @@ class RequestQueue:
                 x1 = queue_state.get('total_customers', 0)
                 x2 = alt_queue_state.get('total_customers', 0)
                 
-                print("\n GOT HERE TO RENEGE: ", combined_solver.get_renege_decision(server_idx, x1, x2), server_idx)
-                return combined_solver.get_renege_decision(server_idx, x1, x2)            
+                should_renege = combined_solver.get_renege_decision(server_idx, x1, x2, T_local)
+                print("\n RENEGE??? ", should_renege)
+                if should_renege:
+                    # pos = self.get_request_position(queueid, customer_id)
+                    if curr_pose is not None:
+                        self.reqRenege(req, queueid, curr_pose, self.get_service_rates(queueid), self.generateLocalCompUtility(req), 
+                                         req.customerid, req.service_time, True, self.dict_queues_obj[queueid], anchor)
+                                         
+                return should_renege          
           
         else:
             raise ValueError(f"Unknown anchor: {anchor}")
@@ -3131,11 +3129,16 @@ class RequestQueue:
                    
                     x1 = queue_state.get('total_customers', 0)
                     x2 = alt_queue_state.get('total_customers', 0)
-                    # CombinedPolicySolver expects idx 1 or 2
+                    action = combined_solver.get_jockey_decision(server_idx, x1, x2)
                     
-                    print("\n GOT HERE TO JOCKEY: ", combined_solver.get_jockey_decision(server_idx, x1, x2), server_idx)
-                    
-                    return combined_solver.get_jockey_decision(server_idx, x1, x2)
+                    # print("\n ACTION :: ", action)                   
+                    if action != 0:
+                        #pos = self.get_request_position(curr_queue_id, customerid)
+                        if curr_pose is not None:
+                            self.reqJockey(curr_queue_id, alt_queue_id, req, req.customerid, self.get_service_rates(curr_queue_id), 
+                                           self.dict_queues_obj[alt_queue_id], self.avg_delay, True, curr_pose, self.dict_queues_obj[curr_queue_id], anchor)
+                                           
+                    return action
             
 
             else:
