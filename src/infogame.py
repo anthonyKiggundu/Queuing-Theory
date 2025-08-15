@@ -575,10 +575,15 @@ class CombinedPolicySolver:
     def get_jockey_decision(self, queue_idx, x1, x2):
         """
         Returns jockeying action for a server at queue_idx (1 or 2) and state (x1,x2).
+        Now robust to out-of-bounds indices.
         """
-        if queue_idx == 1:
+        Nx, Ny = self.jockeying_policy["a1"].shape[0] - 1, self.jockeying_policy["a1"].shape[1] - 1
+        # Clamp x1, x2 within valid bounds
+        x1 = max(0, min(x1, Nx))
+        x2 = max(0, min(x2, Ny))
+        if "1" in  queue_idx:
             return self.jockeying_policy['a1'][x1, x2]
-        elif queue_idx == 2:
+        elif "2" in queue_idx :
             return self.jockeying_policy['a2'][x1, x2]
         else:
             raise ValueError("queue_idx must be 1 or 2")
@@ -586,10 +591,15 @@ class CombinedPolicySolver:
     def get_renege_decision(self, queue_idx, x1, x2):
         """
         Returns True if reneging is optimal at this state for the given queue_idx.
+        Now robust to out-of-bounds indices.
         """
-        if queue_idx == 1:
+        Nx, Ny = self.reneging_policy["at_srv1"].shape[0] - 1, self.reneging_policy["at_srv1"].shape[1] - 1
+        # Clamp x1, x2 within valid bounds
+        x1 = max(0, min(x1, Nx))
+        x2 = max(0, min(x2, Ny))
+        if "1" in  queue_idx:
             return self.reneging_policy['at_srv1'][x1, x2]
-        elif queue_idx == 2:
+        elif "2" in queue_idx :
             return self.reneging_policy['at_srv2'][x1, x2]
         else:
             raise ValueError("queue_idx must be 1 or 2")
@@ -1061,16 +1071,23 @@ class RequestQueue:
         self.anchor_counter = 0  # For round-robin anchor selection                   
         self.policy_enabled = policy_enabled        
         self.anchor = anchor
-        self.combined_policy_solver = combined_policy_solver
+        
+        # Ensure combined_policy_solver is initialized, even if not provided
+        if combined_policy_solver is not None:
+            self.combined_policy_solver = combined_policy_solver
+        else:
+            # If params is not provided, initialize default Params
+            if params is None:
+                self.params = Params()
+            else:
+                self.params = params
+            # Only initialize CombinedPolicySolver if not already provided
+            self.combined_policy_solver = CombinedPolicySolver(self.params)
+        
         self.predictive_model = PredictiveModel()
         self.policy = ServerPolicy(self.predictive_model, min_rate=1.0, max_rate=12.0)               
         self.simulation_start_time = self.time # time.time()
-        
-        if params is None:
-            self.params = Params()
-        else:
-            self.params = params 
-                
+                               
         return      
     
     
@@ -2142,6 +2159,7 @@ class RequestQueue:
         queue_length_difference = abs(len_q1 - len_q2) 
         		      
         curr_queue_state = {
+			"queue_idx": queueid,
             "total_customers": len(customers_in_queue),            
             "capacity": self.capacity,              
             "long_avg_serv_time": self.get_long_run_avg_service_time(queueid),
@@ -2766,30 +2784,12 @@ class RequestQueue:
         elif "policy_queue_length_thresholds" in anchor:
             # Decision based on queue length thresholds using CombinedPolicySolver
             if combined_solver is not None:
-                server_idx = queue_state.get('server_idx', None)
+                server_idx = queue_state.get('queue_idx', None)
                 x1 = queue_state.get('total_customers', 0)
                 x2 = alt_queue_state.get('total_customers', 0)
                 
-                print("\n GOT HERE TO RENEGE: ", combined_solver.get_renege_decision(server_idx, x1, x2))
-                return combined_solver.get_renege_decision(server_idx, x1, x2)
-            #else:
-			#	# renege if the other queue is longer than the current one
-		    # and the time until processing is greater than T_local
-			#	for pos, req_in_queue in enumerate(queue):                                
-            #        if customer_id in req_in_queue.customerid:           
-                    
-            #            if "1" in queueid:
-            #                serv_rate = mu1 # self.get_service_rates(queueid) # self.srvrates_1  # self.dict_servers_info["1"] get_service_rate
-            #                remaining_wait_time = pos * t_change_1 
-            #        
-            #            elif "2" in queueid:
-            #                serv_rate = mu2 # self.get_service_rates(queueid) # self.srvrates_2  # self.dict_servers_info["2"]
-            #                remaining_wait_time = pos * t_change_2 
-
-            #    # If remaining wait exceeds T_local, renege
-            #    renege = ((len(queue) < len(other_queue)) and (remaining_wait_time > T_local)
-                
-            #    return renege # diff >= threshold
+                print("\n GOT HERE TO RENEGE: ", combined_solver.get_renege_decision(server_idx, x1, x2), server_idx)
+                return combined_solver.get_renege_decision(server_idx, x1, x2)            
           
         else:
             raise ValueError(f"Unknown anchor: {anchor}")
@@ -2949,15 +2949,7 @@ class RequestQueue:
         # We make this decision if we have already joined the queue
         # First we analyse our current state -> which server, server intensity and expected remaining latency
         # Then we get information about the state of the alternative queue
-        # Evaluate input from the actor-critic once we get in the alternative queue
-        
-        if getattr(req, "policy_type", "rule") == "egreedy":
-            # --- e-greedy renege logic here (call your e-greedy policy logic) ---
-            pass
-        elif getattr(req, "policy_type", "rule") == "rule":
-            # --- rule-based renege logic here ---
-            pass
-            
+        # Evaluate input from the actor-critic once we get in the alternative queue                        
 
         def erlang_C(c, rho):
             """
@@ -3096,7 +3088,7 @@ class RequestQueue:
             print(f"Request ID {customerid} not found in queue {curr_queue_id}. Continuing with processing...")
             
         else:                                
-            time_to_get_served = self.get_remaining_time(curr_queue_id, curr_pose)                   
+            time_to_get_served = self.get_remaining_time(curr_queue_id, curr_pose)                              
             
             '''
                Observe the state of the current queue and compare that with the state of the
@@ -3135,18 +3127,16 @@ class RequestQueue:
                 if combined_solver is not None:
                     # Assume queue_state gives server idx and queue lengths
                     # queue_state should have keys: 'server_idx', 'server_1_length', 'server_2_length'
-                    server_idx = curr_queue_id  # queue_state.get('server_idx', None)
+                    server_idx = queue_state.get('queue_idx', None)
+                   
                     x1 = queue_state.get('total_customers', 0)
                     x2 = alt_queue_state.get('total_customers', 0)
                     # CombinedPolicySolver expects idx 1 or 2
                     
-                    print("\n GOT HERE TO JOCKEY: ", combined_solver.get_renege_decision(server_idx, x1, x2))
+                    print("\n GOT HERE TO JOCKEY: ", combined_solver.get_jockey_decision(server_idx, x1, x2), server_idx)
                     
                     return combined_solver.get_jockey_decision(server_idx, x1, x2)
-                #else:
-                #    diff = queue_state.get("queue_length_difference", 0)
-                #    threshold = policy_thresholds.get('jockey_threshold', 2)
-                #    return diff >= threshold
+            
 
             else:
                 raise ValueError(f"Unknown anchor: {anchor}")
