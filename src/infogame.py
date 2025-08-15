@@ -1259,9 +1259,24 @@ class RequestQueue:
         queue_size = len(self.dict_queues_obj.get(queue_id, []))
         # Optionally: immediately update policy based on new prediction
         self.policy.update_policy(features, queue_size)
+        
+        
+    def update_service_rates_queue_length_threshold(self, queue_size_1, queue_size_2):
+        """
+        Adjust service rates based on queue length difference.
+        """
+        # Example logic: Increase rate for longer queue, decrease for shorter queue
+        base_rate = 2.0
+        #  difference-based adjustment
+        diff = queue_size_1 - queue_size_2
+        adj = 0.4 * diff
+        srvrate1 = max(1.0, base_rate + adj)
+        srvrate2 = max(1.0, base_rate - adj)
+        
+        return srvrate1, srvrate2
 
 
-    def run(self,duration, interval, progress_bar=True,progress_log=False):
+    def run(self,duration, interval, progress_bar=True,progress_log=False, policy_type="rule"):
 		
         steps=int(duration/self.time_res)
         
@@ -1305,19 +1320,23 @@ class RequestQueue:
                     
                 # print("\n PARAMOS UPDATOS: ", self.params.lam, self.params.mu1, self.params.mu2)
                                  
-                # --- Predictive modeling: adjust service rates using learned policy ---
-                
+                # --- Predictive modeling: adjust service rates using learned policy --- Rule based                
                 features_srv1 = self.extract_features("1")
-                features_srv2 = self.extract_features("2")
+                features_srv2 = self.extract_features("2")                                            
                 
                 queue_size_1 = len(self.dict_queues_obj.get("1", []))
                 queue_size_2 = len(self.dict_queues_obj.get("2", []))
                 
                 if self.policy_enabled:
-                    self.srvrates_1 = self.policy.update_policy(features_srv1, queue_size=queue_size_1)
-                    self.srvrates_2 = self.policy.update_policy(features_srv2, queue_size=queue_size_2)
-                    #self.srvrates_1 = self.policy.update_policy(features_srv1, max_rate=self.arr_rate)
-                    #self.srvrates_2 = self.policy.update_policy(features_srv2, max_rate=self.arr_rate)
+                    if policy_type == "queue_length_threshold":
+                        # Here, update service rates based on queue length threshold logic
+                        self.srvrates_1, self.srvrates_2 = self.update_service_rates_queue_length_threshold(queue_size_1, queue_size_2)
+                    elif policy_type == "rule":
+                        self.srvrates_1 = self.policy.update_policy(features_srv1, queue_size=queue_size_1)
+                        self.srvrates_2 = self.policy.update_policy(features_srv2, queue_size=queue_size_2)
+                    else:
+                        self.srvrates_1 = self.raw_srvrates_1
+                        self.srvrates_2 = self.raw_srvrates_2              
                 else:
                     self.srvrates_1 = self.raw_srvrates_1
                     self.srvrates_2 = self.raw_srvrates_2                                  
@@ -1623,25 +1642,13 @@ class RequestQueue:
         jockeying_rate = self.compute_jockeying_rate(curr_queue)
         num_requests = curr_queue_state['total_customers'] # len(curr_queue) 
          
-        anchor = random.choice(["markov_model_inter_change_time", "markov_model_service_rate"])
-        #print("\n Entering loop now ....")      
-        for client in range(len(curr_queue)):
-            #print("\n ANCHOR Now :=> ", anchor )
+        anchor = random.choice(["markov_model_inter_change_time", "markov_model_service_rate", "policy_queue_length_thresholds"])        
+        print("Selected anchor:", anchor)
+            
+        for client in range(len(curr_queue)):            
             req = curr_queue[client] 
-            self.makeJockeyingDecision(req, queue_id, alt_queue_id, req.customerid, serv_rate, anchor)
-            self.makeRenegingDecision(req, alt_queue_id, req.customerid, anchor)
-            
-            # print(f"Dispatching state of server {alt_queue_id} to client {req.customerid} : {curr_queue_state}.")
-            
-            #if "1" in alt_queue_id: # == "1":
-            #    self.makeJockeyingDecision(req, alt_queue_id, queue_id, req.customerid, serv_rate)
-            #    self.makeRenegingDecision(req, alt_queue_id, req.customerid)
-            #    alt_queue_id = str(alt_queue_id) # "Server_"+
-            #else:
-            #elif "" in alt_queue_id:
-            #    self.makeJockeyingDecision(req, alt_queue_id, queue_id, req.customerid, serv_rate)
-            #    self.makeRenegingDecision(req, alt_queue_id, req.customerid)
-            #    alt_queue_id = str(alt_queue_id) # "Server_"+
+            self.makeJockeyingDecision(req, queue_id, alt_queue_id, req.customerid, serv_rate, anchor, curr_queue_state, self.combined_policy_solver) #, policy_thresholds)
+            self.makeRenegingDecision(req, alt_queue_id, req.customerid, anchor, curr_queue_state, self.combined_policy_solver) #, policy_thresholds)
         
         # Append rates to interval-specific dispatch data
         self.dispatch_data[interval][f"server_{alt_queue_id}"]["intervals"].append(interval)
@@ -1651,7 +1658,7 @@ class RequestQueue:
         self.dispatch_data[interval][f"server_{alt_queue_id}"]["service_rate"].append(serv_rate)  
         
     
-    def dispatch_all_queues(self, interval): #  , interval=None
+    def dispatch_all_queues(self, interval): 
         """
         Dispatch the status of all queues and collect jockeying and reneging rates.
         """
@@ -2095,9 +2102,7 @@ class RequestQueue:
         ])
         
         for i in range(trans_matrix.shape[0]):
-            trans_matrix[i,i] = -np.sum(trans_matrix[i, :]) + trans_matrix[i,i]
-            
-        #print("\n Server",queueid ," ******> ", self.get_service_rates(queueid),self.srvrates_1 ,self.srvrates_2 )
+            trans_matrix[i,i] = -np.sum(trans_matrix[i, :]) + trans_matrix[i,i]                    
         
         if "1" in queueid:		
             #queue_intensity = self.objQueues.get_arrivals_rates()/ rate_srv1    
@@ -2114,7 +2119,7 @@ class RequestQueue:
             # sample_interchange_time = markov_model.compute_expected_time_between_changes(self.arr_rate, self.srvrates_1, N=100)
             sample_interchange_time = markov_model.compute_expected_time_between_changes(self.arr_rate, self.raw_srvrates_1,  N=100)
             arr_rate1, arr_rate2 = servmarkov_model.arrival_rates_divisor(self.arr_rate, self.raw_srvrates_1, self.raw_srvrates_2) 
-            steady_state_distribution = servmarkov_model.best_queue_delay(arr_rate1, self.raw_srvrates_1, arr_rate2, self.raw_srvrates_2)                               
+            steady_state_distribution = servmarkov_model.best_queue_delay(arr_rate1, self.raw_srvrates_1, arr_rate2, self.raw_srvrates_2)                                                    
       
         elif "2" in queueid:
        
@@ -2130,8 +2135,12 @@ class RequestQueue:
             sample_interchange_time = markov_model.compute_expected_time_between_changes(self.arr_rate, self.raw_srvrates_2, N=100)
             
             arr_rate1, arr_rate2 = servmarkov_model.arrival_rates_divisor(self.arr_rate, self.raw_srvrates_1, self.raw_srvrates_2) #_steady_state_distribution()
-            steady_state_distribution = servmarkov_model.best_queue_delay(arr_rate1, self.raw_srvrates_1, arr_rate2, self.raw_srvrates_2)            
-		       
+            steady_state_distribution = servmarkov_model.best_queue_delay(arr_rate1, self.raw_srvrates_1, arr_rate2, self.raw_srvrates_2)           
+		
+        len_q1 = len(self.dict_queues_obj.get("1", []))
+        len_q2 = len(self.dict_queues_obj.get("2", []))
+        queue_length_difference = abs(len_q1 - len_q2) 
+        		      
         curr_queue_state = {
             "total_customers": len(customers_in_queue),            
             "capacity": self.capacity,              
@@ -2139,8 +2148,9 @@ class RequestQueue:
             "markov_model_inter_change_time": sample_interchange_time,            
             "markov_model_service_rate": steady_state_distribution, #{              
             "reneging_rate": reneging_rate,
-            "jockeying_rate" : jockeying_rate             
-        }
+            "jockeying_rate" : jockeying_rate ,
+            "queue_length_difference": queue_length_difference            
+        }            
         
         return curr_queue_state
   
@@ -2430,7 +2440,7 @@ class RequestQueue:
           
     
     
-    def makeRenegingDecision(self, req, queueid, customer_id, anchor, t_max=10.0, num_points=1000):	 #  T_local,                     	
+    def makeRenegingDecision(self, req, queueid, customer_id, anchor, queue_state, combined_solver, t_max=10.0, num_points=1000):	 #  T_local,   policy_thresholds,                  	
 
         def exp_cdf(mu, t):
             """
@@ -2594,7 +2604,8 @@ class RequestQueue:
         
         if "1" in queueid :
             serv_rate = self.get_service_rates(queueid) # self.srvrates_1 # self.dict_servers_info["1"] get_service_rate
-            queue =  self.dict_queues_obj["1"]   
+            queue =  self.dict_queues_obj["1"]  
+            other_queue = self.dict_queues_obj["2"]
             alt_queue_id = "2"   
             curr_arriv_rate = self.objQueues.get_arrivals_rates()
             #queue_intensity = curr_arriv_rate/ serv_rate 
@@ -2613,6 +2624,7 @@ class RequestQueue:
         elif "2" in queueid:
             serv_rate = self.get_service_rates(queueid) # self.srvrates_2 # self.dict_servers_info["2"] 
             queue =  self.dict_queues_obj["2"]
+            other_queue = self.dict_queues_obj["1"]
             alt_queue_id = "1"
             curr_arriv_rate = self.objQueues.get_arrivals_rates()
             #queue_intensity = curr_arriv_rate/ serv_rate    
@@ -2638,9 +2650,6 @@ class RequestQueue:
 
         self.anchor_counts[anchor] += 1
         '''
-        
-        #anchor = random.choice(["steady_state_distribution", "inter_change_time"])
-        #print("\n ** ANCHOR IN RENEGE: ** ", anchor )
         
         mu1 = self.get_service_rates("1") # self.srvrates_1 # self.dict_servers_info["1"]
         mu2 = self.get_service_rates("2") # self.srvrates_2 # self.dict_servers_info["2"]
@@ -2724,29 +2733,15 @@ class RequestQueue:
                 if not found:
                     #print(f"Request ID {customer_id} not found in queue {queueid}. Continuing with processing...")
                     return False
-           
-            
-            # For high throughput as objective, a low interchange_time shows a better state, if stability is the objective, a high value is better                       
-        #elif anchor == "inter_change_time":
+
         elif "markov_model_inter_change_time" in anchor:
 
-            # Compute values
-            #rate = compute_rate_of_change(lambda_, mu)
-            #time_between_changes = compute_expected_time_between_changes(lambda_, mu)
-            lambda1, lambda2 = arrival_rates_divisor(curr_arriv_rate, mu1, mu2)
-            
+            lambda1, lambda2 = arrival_rates_divisor(curr_arriv_rate, mu1, mu2)            
             t_change_1 , t_change_2 = should_renege_using_tchange(lambda1, mu1, lambda2, mu2, T_local, len(queue)) # renege, 
-
-            #print(f"Rate of queue length change: {rate:.4f} events/sec")
-            #print(f"Expected time between changes in Queue 1: {t_change_1:.4f} sec and Expected time between changes in Queue 2: {t_change_2:.4f} sec")
             found = False                       
 					
-            for pos, req_in_queue in enumerate(queue):
-                                
-                if customer_id in req_in_queue.customerid:
-                    #renege, t_change_1 , t_change_2 = should_renege_using_tchange(lambda1, mu1, lambda2, mu2, T_local, len(queue))
-                    # Get the current service rate for the queue
-                    # This was working before 
+            for pos, req_in_queue in enumerate(queue):                                
+                if customer_id in req_in_queue.customerid:           
                     
                     if "1" in queueid:
                         serv_rate = mu1 # self.get_service_rates(queueid) # self.srvrates_1  # self.dict_servers_info["1"] get_service_rate
@@ -2755,21 +2750,49 @@ class RequestQueue:
                     elif "2" in queueid:
                         serv_rate = mu2 # self.get_service_rates(queueid) # self.srvrates_2  # self.dict_servers_info["2"]
                         remaining_wait_time = pos * t_change_2 
-                    # Compute remaining waiting time (number of requests ahead * average service time)
-                    # For M/M/1, expected remaining time = position * 1/service_rate
-                    # remaining_wait_time = pos * (1.0 / serv_rate) if serv_rate > 0 else 1e4  # avoid zero division
 
                     # If remaining wait exceeds T_local, renege
                     renege = (remaining_wait_time > T_local)
                     
             
-                    if renege: #alt_queue_state["sample_interchange_time"] > curr_queue_state["sample_interchange_time"]:
+                    if renege:
                         decision = True 
                         self.reqRenege( req, queueid, pos, serv_rate, T_local, req.customerid, req.service_time, decision, queue, anchor)
-                
+                                  
             if not found:
                 #print(f"Request ID {customer_id} not found in queue {queueid}. Continuing with processing...")
                 return False
+                
+        elif "policy_queue_length_thresholds" in anchor:
+            # Decision based on queue length thresholds using CombinedPolicySolver
+            if combined_solver is not None:
+                server_idx = queue_state.get('server_idx', None)
+                x1 = queue_state.get('total_customers', 0)
+                x2 = alt_queue_state.get('total_customers', 0)
+                
+                print("\n GOT HERE TO RENEGE: ", combined_solver.get_renege_decision(server_idx, x1, x2))
+                return combined_solver.get_renege_decision(server_idx, x1, x2)
+            #else:
+			#	# renege if the other queue is longer than the current one
+		    # and the time until processing is greater than T_local
+			#	for pos, req_in_queue in enumerate(queue):                                
+            #        if customer_id in req_in_queue.customerid:           
+                    
+            #            if "1" in queueid:
+            #                serv_rate = mu1 # self.get_service_rates(queueid) # self.srvrates_1  # self.dict_servers_info["1"] get_service_rate
+            #                remaining_wait_time = pos * t_change_1 
+            #        
+            #            elif "2" in queueid:
+            #                serv_rate = mu2 # self.get_service_rates(queueid) # self.srvrates_2  # self.dict_servers_info["2"]
+            #                remaining_wait_time = pos * t_change_2 
+
+            #    # If remaining wait exceeds T_local, renege
+            #    renege = ((len(queue) < len(other_queue)) and (remaining_wait_time > T_local)
+                
+            #    return renege # diff >= threshold
+          
+        else:
+            raise ValueError(f"Unknown anchor: {anchor}")
 
 
     def reqRenege(self, req, queueid, curr_pose, serv_rate, time_local_service, customerid, time_to_service_end, decision, curr_queue, anchor):
@@ -2788,32 +2811,23 @@ class RequestQueue:
             return
             
         else:
-            # print("\n Error: ** ", len(self.queue), curr_pose)
             if len(self.queue) > curr_pose:
                 self.queue = np.delete(self.queue, curr_pose) # index)  
-                self.log_request(req.time_entrance, "reneged", req.time_res) # , self.queue) # req.queue)    arrival_time=    outcome= exit_time= queue=
-                #print("\n ********* ", request_log[0])
+                self.log_request(req.time_entrance, "reneged", req.time_res) # , self.queue) # req.queue)    arrival_time=    outcome= exit_time= queue=                
                 self.queueID = queueid  
-        
-                #req.customerid = req.customerid+"_reneged"
+                        
                 if not req.customerid.endswith("_reneged"):
                     req.customerid = req.customerid+"_reneged"
                 req.reneged = True
-                req.time_exit = self.time  # or the relevant exit time
-        
-                # In the case of reneging, you only get a reward if the time.entrance plus
-                # the current time minus the time _to_service_end is greater than the time_local_service
-        
+                req.time_exit = self.time  # or the relevant exit time        
                 reward = self.getRenegeRewardPenalty(req, time_local_service, time_to_service_end) 
                 print(colored("%s", 'red') %(anchor) + ":" + colored("%s", 'green') % (req.customerid) + " in Server %s" %(queueid) + " reneging now to Local")                                   
                 
                 self.objObserv.set_obs (queueid,  serv_rate, queue_intensity, time_to_service_end, "reneged", reward, curr_pose, req, len(self.queue))
-                self.history.append(self.objObserv.get_obs())
-                # print("History event in Reneging:", self.history[-1])
+                self.history.append(self.objObserv.get_obs())                
                 self.objObserv.set_renege_obs(curr_pose, decision,time_local_service, time_to_service_end, reward, queueid, "reneged", len(self.queue))
         
-                self.curr_obs_renege.append(self.objObserv.get_renege_obs(queueid, self.queue)) #queueid, queue_intensity, curr_pose))        
-                # self.history.append(self.objObserv.get_renege_obs(queueid, self.queue))
+                self.curr_obs_renege.append(self.objObserv.get_renege_obs(queueid, self.queue)) #queueid, queue_intensity, curr_pose))                        
                 self.curr_req = req
         
                 self.objQueues.update_queue_status(queueid)
@@ -2829,21 +2843,15 @@ class RequestQueue:
         """
         if "1" in queue_id:
             queue = self.dict_queues_obj["1"]  # Queue1
-            #for t in queue:
-            #print("\n -> ", request_id ,t.customerid)
         else:
             queue = self.dict_queues_obj["2"]  
-            #for j in queue:
-            #print("\n => ", request_id,j.customerid)
-				
+           
         for position, req in enumerate(queue):            
             if request_id in req.customerid:
                 return position
             else:
                 continue	
 
-        #return None
-    
         
     def compare_steady_state_distributions(self, dist_alt_queue, dist_curr_queue): # log_request
 		        
@@ -2881,14 +2889,13 @@ class RequestQueue:
         else:	
             np.delete(curr_queue, curr_pose) # np.where(id_queue==req_id)[0][0])
             self.log_request(req.time_entrance, "jockeyed", req.time_res ) #, curr_queue) # req.queue) arrival_time= outcome= exit_time= queue=
-            #print("\n ********* ", request_log[0])
+            
             reward = 1.0
             req.time_entrance = self.time # timer()
             dest_queue = np.append( dest_queue, req)
         
             self.queueID = curr_queue_id        
-        
-            # req.customerid = req.customerid+"_jockeyed"
+
             if not req.customerid.endswith("_jockeyed"):
                 req.customerid = req.customerid+"_jockeyed"
             req.jockeyed = True
@@ -2902,18 +2909,12 @@ class RequestQueue:
                 queue_intensity = self.arr_rate/self.get_service_rates(curr_queue_id) # self.dict_servers_info["2"] # Server2
                 self.queue = self.dict_queues_obj["2"]
         
-            reward = self.get_jockey_reward(req)
-                  
-            # print("\n Moving ", customerid," from Server ",curr_queue_id, " to Server ", dest_queue_id ) 
-            print(colored("%s", 'red') %(anchor) + ":" + colored("%s", 'green') % (req.customerid) + " in Server %s" %(curr_queue_id) + " jockeying now, to Server %s" % (colored(dest_queue_id,'green')))  
-                                
-            self.objObserv.set_obs (curr_queue_id,  serv_rate, queue_intensity, exp_delay, "jockeyed", reward, curr_pose, req, len(self.queue))
-            
-            self.history.append(self.objObserv.get_obs()) # curr_queue_id, queue_intensity, curr_pose))
-            # print("History event in Jockeying:", self.history[-1])
+            reward = self.get_jockey_reward(req)                 
+            print(colored("%s", 'red') %(anchor) + ":" + colored("%s", 'green') % (req.customerid) + " in Server %s" %(curr_queue_id) + " jockeying now, to Server %s" % (colored(dest_queue_id,'green')))                                  
+            self.objObserv.set_obs (curr_queue_id,  serv_rate, queue_intensity, exp_delay, "jockeyed", reward, curr_pose, req, len(self.queue))            
+            self.history.append(self.objObserv.get_obs()) # curr_queue_id, queue_intensity, curr_pose))            
             self.objObserv.set_jockey_obs(curr_pose,  decision, exp_delay, req.exp_time_service_end, reward, 1.0, "jockeyed", len(self.queue)) # time_alt_queue        
-            #self.curr_obs_jockey.append(self.objObserv.get_jockey_obs(curr_queue_id, queue_intensity, curr_pose))
-            #self.history.append(self.objObserv.get_jockey_obs(curr_queue_id, queue_intensity, curr_pose))                                      
+                                          
             self.curr_req = req        
             self.objQueues.update_queue_status(curr_queue_id)# long_avg_serv_time
         
@@ -2944,7 +2945,7 @@ class RequestQueue:
         }
     
     
-    def makeJockeyingDecision(self, req, curr_queue_id, alt_queue_id, customerid, serv_rate, anchor):
+    def makeJockeyingDecision(self, req, curr_queue_id, alt_queue_id, customerid, serv_rate, anchor, queue_state, combined_solver): #  policy_thresholds,
         # We make this decision if we have already joined the queue
         # First we analyse our current state -> which server, server intensity and expected remaining latency
         # Then we get information about the state of the alternative queue
@@ -3014,10 +3015,10 @@ class RequestQueue:
               jockey_flag : bool
             """
             fsd_result = compare_mmtwo_fsd(lambda1, mu1, lambda2, mu2)
-            # If current is 1 and Queue 2 dominates, jockey
+            
             if  "1" in current_queue and fsd_result == 2:
                 return True
-            # If current is 2 and Queue 1 dominates, jockey
+            
             if "2" in current_queue and fsd_result == 1:
                 return True
                 
@@ -3066,8 +3067,7 @@ class RequestQueue:
                 return w2
             else:
                 return min(w1, w2)	
-                	
-        # print("\n Rates: ", self.srvrates_1,self.srvrates_2 )
+                	        
         if "1" in curr_queue_id:
             self.queue = self.dict_queues_obj["1"]  # Server1     
             serv_rate = self.get_service_rates(curr_queue_id) #self.dict_servers_info["1"]          get_service_rate    
@@ -3085,40 +3085,24 @@ class RequestQueue:
             alt_queue_state = self.get_queue_state("1", serv_rate)
 
         decision=False                
-        # queue_intensity = self.arr_rate/self.dict_servers_info[alt_queue_id]
+       
         curr_queue = self.dict_queues_obj.get(curr_queue_id)
         dest_queue = self.dict_queues_obj.get(alt_queue_id)
 
-        self.avg_delay = self.generateExpectedJockeyCloudDelay ( req, curr_queue_id) 
-        #self.objRequest.estimateMarkovWaitingTime(len(dest_queue)+1, features) #len(dest_queue)+1) #, queue_intensity, req.time_entrance)
-        
+        self.avg_delay = self.generateExpectedJockeyCloudDelay ( req, curr_queue_id)                 
         curr_pose = self.get_request_position(curr_queue_id, customerid)
         
         if curr_pose is None:
             print(f"Request ID {customerid} not found in queue {curr_queue_id}. Continuing with processing...")
             
         else:                                
-            time_to_get_served = self.get_remaining_time(curr_queue_id, curr_pose)            
-        
-            '''
-                I am at a position in server1 for example and the remaining
-                time I will spend when I jockey to server2 is less than time
-                left until I get served in the current queue, then jockey 
-            '''
+            time_to_get_served = self.get_remaining_time(curr_queue_id, curr_pose)                   
             
             '''
                Observe the state of the current queue and compare that with the state of the
                other queue and jockey if the other queue is better than the current one.
                The better state is defined by first-order stochatsic dorminance and the jockeying rate (orprobability)
-            ''' 
-                        
-            #queue_states_compared = self.compare_queues(alt_steady_state, curr_steady_state, K=1) 
-            
-            # options = random.choice(["steady_state_distribution", "inter_change_time"])
-            #anchor = options[self.anchor_counter % 2]
-            #self.anchor_counter += 1                       
-            
-            #print(f"Anchor in makeJockeyDecison: {anchor}")
+            '''                     
             if "markov_model_service_rate" in anchor: 
                 # Use steady-state distribution comparison (as currently implemented)
                 #queue_states_compared = mmc_wait_cdf_and_tail(curr_arriv_rate, serv_rate, c, t): #self.compare_queues(alt_steady_state, curr_steady_state, K=1)
@@ -3134,9 +3118,7 @@ class RequestQueue:
                 if jockey_flag: #queue_states_compared['first_order_dominance']:
                     decision = True
                     self.reqJockey(curr_queue_id, alt_queue_id, req, req.customerid, serv_rate, dest_queue, self.avg_delay, decision, curr_pose, self.dict_queues_obj.get(curr_queue_id), anchor)
-            
-            # For high throughput as objective, a low interchange_time shows a better state, if stability is the objective, a high value is better                       
-            #elif anchor == "inter_change_time":
+
             elif  "markov_model_inter_change_time" in anchor:
 				
                 if "1" in curr_queue_id:
@@ -3147,6 +3129,27 @@ class RequestQueue:
                 if alt_queue_state["markov_model_inter_change_time"] > curr_queue_state["markov_model_inter_change_time"]:
                     decision = True 
                     self.reqJockey(curr_queue_id, alt_queue_id, req, req.customerid, serv_rate, dest_queue, self.avg_delay, decision, curr_pose, self.dict_queues_obj.get(curr_queue_id), anchor)
+                    
+            elif "policy_queue_length_thresholds" in anchor:
+                # Decision based on queue length thresholds using CombinedPolicySolver
+                if combined_solver is not None:
+                    # Assume queue_state gives server idx and queue lengths
+                    # queue_state should have keys: 'server_idx', 'server_1_length', 'server_2_length'
+                    server_idx = curr_queue_id  # queue_state.get('server_idx', None)
+                    x1 = queue_state.get('total_customers', 0)
+                    x2 = alt_queue_state.get('total_customers', 0)
+                    # CombinedPolicySolver expects idx 1 or 2
+                    
+                    print("\n GOT HERE TO JOCKEY: ", combined_solver.get_renege_decision(server_idx, x1, x2))
+                    
+                    return combined_solver.get_jockey_decision(server_idx, x1, x2)
+                #else:
+                #    diff = queue_state.get("queue_length_difference", 0)
+                #    threshold = policy_thresholds.get('jockey_threshold', 2)
+                #    return diff >= threshold
+
+            else:
+                raise ValueError(f"Unknown anchor: {anchor}")
   
         return decision
         
@@ -3505,15 +3508,13 @@ def extract_waiting_times_and_outcomes(request_queue):
     return waiting_times, outcomes, time_stamps    
     
 
-import pandas as pd
-import seaborn as sns
 
-def plot_boxplot_waiting_times_by_outcome_2x2(histories_nopolicy, histories_rates_policy, histories_queue_length_policy):
-
+def plot_boxplot_waiting_times_by_outcome_2x2(histories_policy_rule, histories_policy_qlen, histories_nopolicy):
     def flatten(histories, policy_label):
         data = []
         for h in histories:
-            anchor = h.get('anchor')
+            anchor = h.get('anchor', 'Default')
+            interval = h.get('interval', None)
             for obs in h.get('history', []):
                 waited = obs.get('Waited')
                 cid = obs.get('customerid', '')
@@ -3527,19 +3528,32 @@ def plot_boxplot_waiting_times_by_outcome_2x2(histories_nopolicy, histories_rate
                     data.append({
                         'Policy': policy_label,
                         'Anchor': anchor,
+                        'Interval': interval,
                         'Outcome': outcome,
                         'Waiting Time': waited
                     })
         return pd.DataFrame(data)
 
-    df_nopolicy = flatten(histories_nopolicy, "No Policy")
-    df_rates    = flatten(histories_rates_policy, "Rates Policy")
-    df_qlen     = flatten(histories_queue_length_policy, "QueueLength Policy")
+    df_policy_rule = flatten(histories_policy_rule, "Policy: Rule")
+    df_policy_qlen = flatten(histories_policy_qlen, "Policy: QueueLen")
+    df_nopolicy    = flatten(histories_nopolicy, "No Policy")
 
-    df = pd.concat([df_nopolicy, df_rates, df_qlen], ignore_index=True)
+    df = pd.concat([df_policy_rule, df_policy_qlen, df_nopolicy], ignore_index=True)
+
+    # ---- Fix: Ensure columns are present ----
+    for col, default in [('Policy', 'Unknown'), ('Anchor', 'Default')]:
+        if col not in df.columns:
+            df[col] = default
+        df[col] = df[col].replace(np.nan, default)
 
     anchors = sorted(df['Anchor'].dropna().unique())
-    policies = ["No Policy", "Rates Policy", "QueueLength Policy"]
+    policies = sorted(df['Policy'].dropna().unique())
+
+    # ---- Robust fix for empty anchors/policies ----
+    if not anchors or not policies:
+        print("Warning: No anchors or policies found in input data. No plots will be generated.")
+        return
+
     palette = {
         'served': 'green',
         'jockeyed': 'blue',
@@ -3549,7 +3563,6 @@ def plot_boxplot_waiting_times_by_outcome_2x2(histories_nopolicy, histories_rate
     n_rows = len(policies)
     n_cols = len(anchors)
     fig, axs = plt.subplots(n_rows, n_cols, figsize=(7 * n_cols, 4.5 * n_rows), sharey=True)
-    # --- Robust subplot handling ---
     if n_rows == 1 and n_cols == 1:
         axs = np.array([[axs]])
     elif n_rows == 1 or n_cols == 1:
@@ -3927,26 +3940,23 @@ def plot_six_panels(results, intervals, jockey_anchors):
 
 
 def plot_six_panels_multi_policy(
-    results_nopolicy,
-    results_rates_policy,
-    results_queue_length_policy,
+    results_no_policy,
+    results_policy_rule,
+    results_policy_qlen,
     intervals,
     jockey_anchors
 ):
 
-
     policy_labels = ["No Policy", "Rates Policy", "QueueLength Policy"]
-    result_dicts = [results_nopolicy, results_rates_policy, results_queue_length_policy]
+    result_dicts = [results_no_policy, results_policy_rule, results_policy_qlen]
+
     n_rows = len(policy_labels)
     n_cols = len(jockey_anchors)
 
     for interval in intervals:
-        fig, axs = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows), sharex=False)
-        # Robustly ensure 2D shape
-        if n_rows == 1 and n_cols == 1:
-            axs = np.array([[axs]])
-        elif n_rows == 1 or n_cols == 1:
-            axs = np.atleast_2d(axs)
+        # For QueueLength Policy, only one panel per interval, regardless of anchor count
+        fig, axs = plt.subplots(n_rows, max(n_cols, 1), figsize=(6 * max(n_cols,1), 4 * n_rows), sharex=False)
+        axs = np.array(axs).reshape(n_rows, max(n_cols, 1))
 
         colors = {
             "markov_model_service_rate": "blue",
@@ -3959,40 +3969,392 @@ def plot_six_panels_multi_policy(
             "policy_queue_length_thresholds": "-."
         }
 
+        # Top two rows: No Policy and Rates Policy -- loop over anchors as columns
         for i, (policy_label, results) in enumerate(zip(policy_labels, result_dicts)):
-            for j, anchor in enumerate(jockey_anchors):
-                ax = axs[i, j]
-                # Defensive: check anchor exists for interval
-                ren_dict = results.get(interval, {}).get("reneging_rates", {}).get(anchor, None)
-                jky_dict = results.get(interval, {}).get("jockeying_rates", {}).get(anchor, None)
-                # Plot Reneging
+            if policy_label == "QueueLength Policy":
+                # Only one panel (column) for QLen policy
+                ax = axs[i, 0]
+                ren_dict = results.get(interval, {}).get("reneging_rates", None)
+                jky_dict = results.get(interval, {}).get("jockeying_rates", None)
+                # Defensive: If result is per anchor, pick first available anchor
+                if isinstance(ren_dict, dict) and "server_1" not in ren_dict:
+                    ren_dict = next(iter(ren_dict.values()), {})
+                if isinstance(jky_dict, dict) and "server_1" not in jky_dict:
+                    jky_dict = next(iter(jky_dict.values()), {})
                 for server in ["server_1", "server_2"]:
-                    if isinstance(ren_dict, dict) and server in ren_dict:
-                        y_ren = np.array(ren_dict[server])
-                        x = np.arange(len(y_ren))
-                        ax.plot(
-                            x, y_ren,
-                            label=f"Reneging | {server.replace('_',' ').title()}",
-                            color=colors.get(anchor, "black"),
-                            linestyle=linestyles.get(anchor, "-") if server == "server_1" else ':'
-                        )
-                # Plot Jockeying
-                for server in ["server_1", "server_2"]:
-                    if isinstance(jky_dict, dict) and server in jky_dict:
-                        y_jky = np.array(jky_dict[server])
-                        x = np.arange(len(y_jky))
-                        ax.plot(
-                            x, y_jky,
-                            label=f"Jockeying | {server.replace('_',' ').title()}",
-                            color=colors.get(anchor, "black"),
-                            linestyle=linestyles.get(anchor, "-") if server == "server_1" else ':',
-                            alpha=0.5
-                        )
-                ax.set_title(f"{policy_label} | Anchor: {anchor}")
+                    y_ren = ren_dict.get(server) if ren_dict else None
+                    y_jky = jky_dict.get(server) if jky_dict else None
+                    x_ren = np.arange(len(y_ren)) if y_ren is not None else []
+                    x_jky = np.arange(len(y_jky)) if y_jky is not None else []
+                    if y_ren is not None and len(y_ren) > 0:
+                        ax.plot(x_ren, y_ren, label=f"Reneging | {server.replace('_',' ').title()}")
+                    if y_jky is not None and len(y_jky) > 0:
+                        ax.plot(x_jky, y_jky, label=f"Jockeying | {server.replace('_',' ').title()}", alpha=0.7)
+                ax.set_title(f"{policy_label} Policy")
                 ax.set_xlabel("Steps")
                 ax.set_ylabel("Rate")
                 ax.grid(True, linestyle='--', alpha=0.5)
                 ax.legend(fontsize=8)
+            else:
+                # Loop over anchors as columns
+                for j, anchor in enumerate(jockey_anchors):
+                    ax = axs[i, j]
+                    ren_dict = results.get(interval, {}).get("reneging_rates", {}).get(anchor, None)
+                    jky_dict = results.get(interval, {}).get("jockeying_rates", {}).get(anchor, None)
+                    for server in ["server_1", "server_2"]:
+                        y_ren = ren_dict.get(server) if ren_dict else None
+                        y_jky = jky_dict.get(server) if jky_dict else None
+                        x_ren = np.arange(len(y_ren)) if y_ren is not None else []
+                        x_jky = np.arange(len(y_jky)) if y_jky is not None else []
+                        # Only plot if data is non-empty and not all zero
+                        if y_ren is not None and len(y_ren) > 0 and np.any(np.array(y_ren) != 0):
+                            ax.plot(x_ren, y_ren, label=f"Reneging | {server.replace('_',' ').title()}",
+                                    color=colors.get(anchor,"black"),
+                                    linestyle=linestyles.get(anchor,"-") if server=="server_1" else ':')
+                        if y_jky is not None and len(y_jky) > 0 and np.any(np.array(y_jky) != 0):
+                            ax.plot(x_jky, y_jky, label=f"Jockeying | {server.replace('_',' ').title()}",
+                                    color=colors.get(anchor,"black"),
+                                    linestyle=linestyles.get(anchor,"-") if server=="server_1" else ':',
+                                    alpha=0.7)
+                    ax.set_title(f"{policy_label} | Anchor: {anchor}")
+                    ax.set_xlabel("Steps")
+                    ax.set_ylabel("Rate")
+                    ax.grid(True, linestyle='--', alpha=0.5)
+                    ax.legend(fontsize=8)
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.show()
+        
+        
+def plot_queue_length_vs_rule_policy_original(
+    results_policy_rule,
+    results_policy_qlen,
+    intervals,
+    jockey_anchors
+):
+
+    n_intervals = len(intervals)
+    fig, axs = plt.subplots(n_intervals, 2, figsize=(12, 4 * n_intervals), squeeze=False)
+
+    colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'gray', 'olive']
+
+    for i, interval in enumerate(intervals):
+        # --- Rule Based Policy (left column) ---
+        ax = axs[i, 0]
+        color_idx = 0
+        for anchor in jockey_anchors:
+            ren_dict = results_policy_rule.get(interval, {}).get("reneging_rates", {}).get(anchor, None)
+            jky_dict = results_policy_rule.get(interval, {}).get("jockeying_rates", {}).get(anchor, None)
+            for server in ["server_1", "server_2"]:
+                y_ren = ren_dict.get(server) if ren_dict else None
+                y_jky = jky_dict.get(server) if jky_dict else None
+                x_ren = np.arange(len(y_ren)) if y_ren is not None else []
+                x_jky = np.arange(len(y_jky)) if y_jky is not None else []
+                if y_ren is not None and len(y_ren) > 0:
+                    ax.plot(x_ren, y_ren, label=f"Reneging | {server.title()} | {anchor}", color=colors[color_idx % len(colors)])
+                if y_jky is not None and len(y_jky) > 0:
+                    ax.plot(x_jky, y_jky, label=f"Jockeying | {server.title()} | {anchor}", alpha=0.7, linestyle="--", color=colors[(color_idx+1) % len(colors)])
+            color_idx += 2
+        ax.set_title(f"Rule Based Policy | Interval: {interval}")
+        ax.set_xlabel("Steps")
+        ax.set_ylabel("Rate")
+        ax.grid(True, linestyle='--', alpha=0.5)
+        ax.legend(fontsize=8)
+
+        # --- Queue Length Policy (right column) ---
+        ax = axs[i, 1]
+        ren_dict = results_policy_qlen.get(interval, {}).get("reneging_rates", None)
+        jky_dict = results_policy_qlen.get(interval, {}).get("jockeying_rates", None)
+        # Defensive: If result is per anchor, pick first available anchor value
+        if isinstance(ren_dict, dict) and "server_1" not in ren_dict:
+            ren_dict = next(iter(ren_dict.values()), {})
+        if isinstance(jky_dict, dict) and "server_1" not in jky_dict:
+            jky_dict = next(iter(jky_dict.values()), {})
+        for idx, server in enumerate(["server_1", "server_2"]):
+            y_ren = ren_dict.get(server) if ren_dict else None
+            y_jky = jky_dict.get(server) if jky_dict else None
+            x_ren = np.arange(len(y_ren)) if y_ren is not None else []
+            x_jky = np.arange(len(y_jky)) if y_jky is not None else []
+            if y_ren is not None and len(y_ren) > 0:
+                ax.plot(x_ren, y_ren, label=f"Reneging | {server.title()}", color=colors[idx % len(colors)])
+            if y_jky is not None and len(y_jky) > 0:
+                ax.plot(x_jky, y_jky, label=f"Jockeying | {server.title()}", alpha=0.7, linestyle="--", color=colors[(idx+1) % len(colors)])
+        ax.set_title(f"Queue Length Policy | Interval: {interval}")
+        ax.set_xlabel("Steps")
+        ax.set_ylabel("Rate")
+        ax.grid(True, linestyle='--', alpha=0.5)
+        ax.legend(fontsize=8)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+    plt.show()
+    
+    
+
+def plot_queue_length_vs_rule_policy(
+    results_policy_rule,           # dict[interval][anchor]['reneging_rates'/'jockeying_rates'][server]
+    results_policy_qlen,           # dict[interval][anchor]['reneging_rates'/'jockeying_rates'][server]
+    intervals=(3,5,7,9),
+    anchors=None
+):
+    """
+    Plots a 4x2 subplot grid comparing reneging and jockeying rates for:
+    - Top two rows: reneging rates (row 0: rule, row 1: queue length)
+    - Bottom two rows: jockeying rates (row 2: rule, row 3: queue length)
+    - Columns: intervals (3,5,7,9)
+    For each anchor, subplot compares rule-based policy vs queue-length policy for both servers.
+    Automatically detects anchors if not provided.
+    """
+    servers = ["server_1", "server_2"]
+    anchor_labels = {
+        "markov_model_service_rate": "Markov Service Rate",
+        "markov_model_inter_change_time": "Markov Inter-Change Time"
+    }
+    colors = {
+        "server_1": "blue",
+        "server_2": "green"
+    }
+    legend_labels = {
+        "server_1": "Server 1",
+        "server_2": "Server 2"
+    }
+
+    # --- Fix: Robust anchor detection ---
+    anchors_rule = set()
+    anchors_qlen = set()
+    for interval in intervals:
+        anchors_rule |= set(results_policy_rule.get(interval, {}).get("reneging_rates", {}).keys())
+        anchors_qlen |= set(results_policy_qlen.get(interval, {}).get("reneging_rates", {}).keys())
+    all_anchors = sorted(list(anchors_rule | anchors_qlen))
+    if anchors is None or not anchors:
+        anchors = all_anchors
+
+    n_rows = 4
+    n_cols = len(intervals)
+    fig, axs = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4.2 * n_rows), sharex=False)
+
+    for col, interval in enumerate(intervals):
+        for anchor in anchors:
+            # Row 0: Reneging rates (rule-based)
+            ax_ren_rule = axs[0, col]
+            ren_dict_rule = results_policy_rule.get(interval, {}).get("reneging_rates", {}).get(anchor, {})
+            for server in servers:
+                y = np.array(ren_dict_rule.get(server, []))
+                x = np.arange(len(y))
+                label = f"{legend_labels[server]} ({anchor_labels.get(anchor, anchor)})"
+                ax_ren_rule.plot(x, y, label=label, color=colors[server], linestyle='-')
+            ax_ren_rule.set_title(f"Interval {interval}s\nReneging (Rule Policy)")
+            ax_ren_rule.set_ylabel("Reneging Rate")
+            ax_ren_rule.grid(True, linestyle='--', alpha=0.5)
+            if col == 0:
+                ax_ren_rule.legend(fontsize=8)
+
+            # Row 1: Reneging rates (queue-length)
+            ax_ren_qlen = axs[1, col]
+            ren_dict_qlen = results_policy_qlen.get(interval, {}).get("reneging_rates", {}).get(anchor, {})
+            for server in servers:
+                y = np.array(ren_dict_qlen.get(server, []))
+                x = np.arange(len(y))
+                label = f"{legend_labels[server]} ({anchor_labels.get(anchor, anchor)})"
+                ax_ren_qlen.plot(x, y, label=label, color=colors[server], linestyle='--')
+            ax_ren_qlen.set_title(f"Interval {interval}s\nReneging (QueueLen Policy)")
+            ax_ren_qlen.set_ylabel("Reneging Rate")
+            ax_ren_qlen.grid(True, linestyle='--', alpha=0.5)
+            if col == 0:
+                ax_ren_qlen.legend(fontsize=8)
+
+            # Row 2: Jockeying rates (rule-based)
+            ax_jky_rule = axs[2, col]
+            jky_dict_rule = results_policy_rule.get(interval, {}).get("jockeying_rates", {}).get(anchor, {})
+            for server in servers:
+                y = np.array(jky_dict_rule.get(server, []))
+                x = np.arange(len(y))
+                label = f"{legend_labels[server]} ({anchor_labels.get(anchor, anchor)})"
+                ax_jky_rule.plot(x, y, label=label, color=colors[server], linestyle='-')
+            ax_jky_rule.set_title(f"Interval {interval}s\nJockeying (Rule Policy)")
+            ax_jky_rule.set_ylabel("Jockeying Rate")
+            ax_jky_rule.grid(True, linestyle='--', alpha=0.5)
+            if col == 0:
+                ax_jky_rule.legend(fontsize=8)
+
+            # Row 3: Jockeying rates (queue-length)
+            ax_jky_qlen = axs[3, col]
+            jky_dict_qlen = results_policy_qlen.get(interval, {}).get("jockeying_rates", {}).get(anchor, {})
+            for server in servers:
+                y = np.array(jky_dict_qlen.get(server, []))
+                x = np.arange(len(y))
+                label = f"{legend_labels[server]} ({anchor_labels.get(anchor, anchor)})"
+                ax_jky_qlen.plot(x, y, label=label, color=colors[server], linestyle='--')
+            ax_jky_qlen.set_title(f"Interval {interval}s\nJockeying (QueueLen Policy)")
+            ax_jky_qlen.set_ylabel("Jockeying Rate")
+            ax_jky_qlen.grid(True, linestyle='--', alpha=0.5)
+            if col == 0:
+                ax_jky_qlen.legend(fontsize=8)
+
+        # Set xlabel only for bottom row
+        axs[3, col].set_xlabel("Simulation Step")
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+    # plt.suptitle("Comparison: Rule-Based Policy vs Queue-Length Policy\nReneging & Jockeying Rates, Intervals & Anchors", fontsize=18)
+    plt.show()
+    
+
+def plot_queue_length_vs_rule_policy_overlay(
+    results_policy_rule,           # dict[interval][anchor]['reneging_rates'/'jockeying_rates'][server]
+    results_policy_qlen,           # dict[interval][anchor]['reneging_rates'/'jockeying_rates'][server]
+    intervals,
+    anchors=("markov_model_service_rate", "markov_model_inter_change_time")
+):
+    """
+    For each interval, plot:
+        - Top row: Reneging rates (both policies, all anchors/servers overlayed per subplot)
+        - Bottom row: Jockeying rates (both policies, all anchors/servers overlayed per subplot)
+    Columns are intervals (3,5,7,9).
+    """
+    servers = ["server_1", "server_2"]
+    anchor_labels = {
+        "markov_model_service_rate": "Markov Service Rate",
+        "markov_model_inter_change_time": "Markov Inter-Change Time"
+    }
+    policy_styles = {
+        "Rule": {"linestyle": "-", "alpha": 0.85},
+        "QueueLen": {"linestyle": "--", "alpha": 0.85}
+    }
+    server_colors = {
+        ("server_1", "markov_model_service_rate"): "blue",
+        ("server_2", "markov_model_service_rate"): "deepskyblue",
+        ("server_1", "markov_model_inter_change_time"): "green",
+        ("server_2", "markov_model_inter_change_time"): "lime"
+    }
+    legend_labels = {
+        "server_1": "Server 1",
+        "server_2": "Server 2"
+    }
+
+    n_rows = 2
+    n_cols = len(intervals)
+    fig, axs = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4.2 * n_rows), sharex=False)
+
+    for col, interval in enumerate(intervals):
+        # Reneging rates subplot
+        ax_ren = axs[0, col]
+        for anchor in anchors:
+            for server in servers:
+                # Rule-based
+                y_rule = np.array(results_policy_rule.get(interval, {}).get("reneging_rates", {}).get(anchor, {}).get(server, []))
+                x_rule = np.arange(len(y_rule))
+                label_rule = f"Rule {legend_labels[server]} ({anchor_labels.get(anchor, anchor)})"
+                ax_ren.plot(
+                    x_rule, y_rule, 
+                    color=server_colors.get((server, anchor), "gray"),
+                    linestyle=policy_styles["Rule"]["linestyle"],
+                    alpha=policy_styles["Rule"]["alpha"],
+                    label=label_rule
+                )
+                # QueueLen-based
+                y_qlen = np.array(results_policy_qlen.get(interval, {}).get("reneging_rates", {}).get(anchor, {}).get(server, []))
+                x_qlen = np.arange(len(y_qlen))
+                label_qlen = f"QueueLen {legend_labels[server]} ({anchor_labels.get(anchor, anchor)})"
+                ax_ren.plot(
+                    x_qlen, y_qlen, 
+                    color=server_colors.get((server, anchor), "gray"),
+                    linestyle=policy_styles["QueueLen"]["linestyle"],
+                    alpha=policy_styles["QueueLen"]["alpha"],
+                    label=label_qlen
+                )
+        ax_ren.set_title(f"Interval {interval}s\nReneging Rate")
+        ax_ren.set_ylabel("Reneging Rate")
+        ax_ren.grid(True, linestyle='--', alpha=0.5)
+        if col == 0:
+            ax_ren.legend(fontsize=8, loc="upper right")
+
+        # Jockeying rates subplot
+        ax_jky = axs[1, col]
+        for anchor in anchors:
+            for server in servers:
+                # Rule-based
+                y_rule = np.array(results_policy_rule.get(interval, {}).get("jockeying_rates", {}).get(anchor, {}).get(server, []))
+                x_rule = np.arange(len(y_rule))
+                label_rule = f"Rule {legend_labels[server]} ({anchor_labels.get(anchor, anchor)})"
+                ax_jky.plot(
+                    x_rule, y_rule, 
+                    color=server_colors.get((server, anchor), "gray"),
+                    linestyle=policy_styles["Rule"]["linestyle"],
+                    alpha=policy_styles["Rule"]["alpha"],
+                    label=label_rule
+                )
+                # QueueLen-based
+                y_qlen = np.array(results_policy_qlen.get(interval, {}).get("jockeying_rates", {}).get(anchor, {}).get(server, []))
+                x_qlen = np.arange(len(y_qlen))
+                label_qlen = f"QueueLen {legend_labels[server]} ({anchor_labels.get(anchor, anchor)})"
+                ax_jky.plot(
+                    x_qlen, y_qlen, 
+                    color=server_colors.get((server, anchor), "gray"),
+                    linestyle=policy_styles["QueueLen"]["linestyle"],
+                    alpha=policy_styles["QueueLen"]["alpha"],
+                    label=label_qlen
+                )
+        ax_jky.set_title(f"Interval {interval}s\nJockeying Rate")
+        ax_jky.set_ylabel("Jockeying Rate")
+        ax_jky.grid(True, linestyle='--', alpha=0.5)
+        ax_jky.set_xlabel("Simulation Step")
+        if col == 0:
+            ax_jky.legend(fontsize=8, loc="upper right")
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+    plt.suptitle("Comparison: Rule-Based Policy vs Queue-Length Policy\nReneging & Jockeying Rates Overlayed by Interval", fontsize=16)
+    plt.show()
+    
+
+def plot_all_policy_comparison(
+    results_no_policy,
+    results_policy_rule,
+    results_policy_qlen,
+    intervals,
+    jockey_anchors
+):
+
+    policy_labels = ["No Policy", "Rule Based Policy", "Queue Length Policy"]
+    result_dicts = [results_no_policy, results_policy_rule, results_policy_qlen]
+
+    for interval in intervals:
+        fig, axs = plt.subplots(1, 3, figsize=(18, 4), sharex=False)
+        for i, (policy_label, results) in enumerate(zip(policy_labels, result_dicts)):
+            ax = axs[i]
+            if policy_label == "Queue Length Policy":
+                ren_dict = results.get(interval, {}).get("reneging_rates", None)
+                jky_dict = results.get(interval, {}).get("jockeying_rates", None)
+                if isinstance(ren_dict, dict) and "server_1" not in ren_dict:
+                    ren_dict = next(iter(ren_dict.values()), {})
+                if isinstance(jky_dict, dict) and "server_1" not in jky_dict:
+                    jky_dict = next(iter(jky_dict.values()), {})
+                for server in ["server_1", "server_2"]:
+                    y_ren = ren_dict.get(server) if ren_dict else None
+                    y_jky = jky_dict.get(server) if jky_dict else None
+                    x_ren = np.arange(len(y_ren)) if y_ren is not None else []
+                    x_jky = np.arange(len(y_jky)) if y_jky is not None else []
+                    if y_ren is not None and len(y_ren) > 0:
+                        ax.plot(x_ren, y_ren, label=f"Reneging | {server.title()}")
+                    if y_jky is not None and len(y_jky) > 0:
+                        ax.plot(x_jky, y_jky, label=f"Jockeying | {server.title()}", alpha=0.7)
+            else:
+                for anchor in jockey_anchors:
+                    ren_dict = results.get(interval, {}).get("reneging_rates", {}).get(anchor, None)
+                    jky_dict = results.get(interval, {}).get("jockeying_rates", {}).get(anchor, None)
+                    for server in ["server_1", "server_2"]:
+                        y_ren = ren_dict.get(server) if ren_dict else None
+                        y_jky = jky_dict.get(server) if jky_dict else None
+                        x_ren = np.arange(len(y_ren)) if y_ren is not None else []
+                        x_jky = np.arange(len(y_jky)) if y_jky is not None else []
+                        if y_ren is not None and len(y_ren) > 0:
+                            ax.plot(x_ren, y_ren, label=f"Reneging | {server.title()} | {anchor}")
+                        if y_jky is not None and len(y_jky) > 0:
+                            ax.plot(x_jky, y_jky, label=f"Jockeying | {server.title()} | {anchor}", alpha=0.7)
+            ax.set_title(policy_label)
+            ax.set_xlabel("Steps")
+            ax.set_ylabel("Rate")
+            ax.grid(True, linestyle='--', alpha=0.5)
+            ax.legend(fontsize=8)
+
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.show()
 
@@ -5060,7 +5422,7 @@ def build_surface_datas_for_comparison_original(policy_objs, static_objs, reques
     return surface_datas
     
  
-def build_surface_datas_for_comparison(policy_objs, static_objs, request_objs_egreedy, intervals, objective_func):
+def build_surface_datas_for_comparison(policy_objs, static_objs, intervals, objective_func):
     """
     Returns a list of dicts (surface_datas) for use in surface_plot_comparison,
     one per interval, each containing all required keys for plotting.
@@ -5154,7 +5516,7 @@ def main():
         C_R=4.0
     )
     # requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True, params=params)
-    duration = 2 #0 #00         
+    duration = 5  #0 #00         
     
     # Set intervals for dispatching queue states
     intervals = [3, 5, 7, 9]
@@ -5180,8 +5542,9 @@ def main():
     all_jockeying_rates = []             
     
     
-    def run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled, jockey_anchors):
+    def run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled, jockey_anchors, policy_type=None):
         
+        '''
         results = {
             interval: {
                 "reneging_rates": {anchor: {} for anchor in jockey_anchors},
@@ -5193,204 +5556,84 @@ def main():
      
         # Optionally, collect histories for the last interval/anchor run
         all_histories = []  # To store (interval, anchor, history) for each run
-
+        '''
+       
+        results = {}
+        histories = []
         combined_policy_solver = CombinedPolicySolver(params) 
         
-        for interval in intervals:
-            for anchor in jockey_anchors:
-                if policy_enabled and not ("policy_queue_length_thresholds" in anchor):
-                    # Policy-enabled (default Markov/baseline)
-                    requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=policy_enabled)
-                    requestObj.jockey_anchor = anchor
-                    requestObj.run(duration, interval)
-                    request_objs_opt.append(requestObj)
-                    results[interval]["reneging_rates"][anchor] = {
+        if policy_type == "queue_length_threshold":
+        # Ignore anchors; run once per interval
+            for interval in intervals:
+                requestObj = RequestQueue(
+                    utility_basic, discount_coef,
+                    policy_enabled=True,
+                    combined_policy_solver=combined_policy_solver,
+                    params=Params()
+                )
+                requestObj.run(duration, interval, policy_type="queue_length_threshold")
+                results[interval] = {
+                    "reneging_rates": {
                         "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
                         "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
-                    }
-                    
-                    results[interval]["jockeying_rates"][anchor] = {
+                    },
+                    "jockeying_rates": {
                         "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
                         "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
                     }
-                    
-                    all_histories_opt.append({
-                        "interval": interval,
-                        "anchor": anchor,
-                        "history": list(requestObj.get_history())
-                    })
-                    GLOBAL_SIMULATION_HISTORIES_POLICY.append({
-                        "anchor": anchor,
-                        "interval": interval,
-                        "history": list(requestObj.history)
-                    })
-                elif policy_enabled and "policy_queue_length_thresholds" in anchor:
-                    # Policy-enabled with queue-length-thresholds
-                    requestObj = RequestQueue(
-                        utility_basic, discount_coef, policy_enabled=True,
-                        combined_policy_solver=combined_policy_solver,
-                        anchor=anchor, params=params
-                    )
-                    requestObj.jockey_anchor = anchor
-                    requestObj.run(duration, interval)
-                    request_objs_queue_length.append(requestObj)
-                    results[interval]["reneging_rates"][anchor] = {
-                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
-                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
-                    }
-                    
-                    results[interval]["jockeying_rates"][anchor] = {
-                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
-                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
-                    }
-                    
-                    all_histories_queue_length.append({
-                        "interval": interval,
-                        "anchor": anchor,
-                        "history": list(requestObj.get_history())
-                    })
-                    GLOBAL_SIMULATION_HISTORIES_POLICY_QUEUE_LEN.append({
-                        "anchor": anchor,
-                        "interval": interval,
-                        "history": list(requestObj.history)
-                    })
-                else:
-                    # No policy case
-                    requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=False)
-                    requestObj.jockey_anchor = anchor
-                    requestObj.run(duration, interval)
-                    request_objs_nonopt.append(requestObj)
-                    results[interval]["reneging_rates"][anchor] = {
-                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
-                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
-                    }
-                    
-                    results[interval]["jockeying_rates"][anchor] = {
-                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
-                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
-                    }
-                    
-                    all_histories_nonopt.append({
-                        "interval": interval,
-                        "anchor": anchor,
-                        "history": list(requestObj.get_history())
-                    })
-                    GLOBAL_SIMULATION_HISTORIES_NOPOLICY.append({
-                        "anchor": anchor,
-                        "interval": interval,
-                        "history": list(requestObj.history)
-                    })
-
-                # Clear request log if present
-                if hasattr(requestObj, "request_log"):
-                    requestObj.request_log.clear()
-                elif "request_log" in globals():
-                    request_log.clear()
-                    
-        # FINAL RETURN: choose which histories to return based on which branch matches
-        if policy_enabled and any("policy_queue_length_thresholds" in anchor for anchor in jockey_anchors):
-            return results, GLOBAL_SIMULATION_HISTORIES_POLICY_QUEUE_LEN
-        elif policy_enabled:
-            return results, GLOBAL_SIMULATION_HISTORIES_POLICY
-        else:
-            return results, GLOBAL_SIMULATION_HISTORIES_NOPOLICY       
-        
-        '''    
-        for interval in intervals:
-            for anchor in jockey_anchors:
-                if policy_enabled and not ("policy_queue_length_thresholds" in anchor):
-					
-                    # Default (Markov or baseline) policy
-                    requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=policy_enabled)
-                    requestObj.jockey_anchor = anchor
-                    requestObj.run(duration, interval)
-                    results[interval]["reneging_rates"][anchor] = {
-                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
-                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
-                    }
-                    
-                    results[interval]["jockeying_rates"][anchor] = {
-                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
-                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
-                    }
-                    
-                    request_objs_opt.append(requestObj)
-                    GLOBAL_SIMULATION_HISTORIES_POLICY.append({
-                        "anchor": anchor,
-                        "interval": interval,
-                        "history": list(requestObj.history)
-                    })
-                    
-                elif policy_enabled and "policy_queue_length_thresholds" in anchor:
-                    # Your custom queue-length-thresholds policy
-                    requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True, combined_policy_solver=combined_policy_solver, anchor=anchor, params=params)
-                    requestObj.jockey_anchor = anchor
-                    requestObj.run(duration, interval)
-                    results[interval]["reneging_rates"][anchor] = {
-                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
-                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
-                    }
-                    results[interval]["jockeying_rates"][anchor] = {
-                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
-                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
-                    }
-                    request_objs_queue_length.append(requestObj)
-                    GLOBAL_SIMULATION_HISTORIES_POLICY_QUEUE_LEN.append({
-                        "anchor": anchor,
-                        "interval": interval,
-                        "history": list(requestObj.history)
-                    })                    
-                else:
-                    # No policy case
-                    requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=False)
-                    requestObj.jockey_anchor = anchor
-                    requestObj.run(duration, interval)
-                    results[interval]["reneging_rates"][anchor] = {
-                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
-                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
-                    }
-                    results[interval]["jockeying_rates"][anchor] = {
-                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
-                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
-                    }
-                    request_objs_nonopt.append(requestObj)
-                    GLOBAL_SIMULATION_HISTORIES_NOPOLICY.append({
-                        "anchor": anchor,
-                        "interval": interval,
-                        "history": list(requestObj.history)
-                    })
-
-                all_histories.append({
+                }
+                histories.append({
                     "interval": interval,
-                    "anchor": anchor,
+                    "anchor": "queue_length_threshold",  # label for this policy
                     "history": list(requestObj.get_history())
                 })
-
-                if hasattr(requestObj, "request_log"):
-                    requestObj.request_log.clear()
-                elif "request_log" in globals():
-                    request_log.clear()
-
-            request_objs.append(requestObj)
-
-        # FINAL RETURN: choose which histories to return based on which branch matches
-        if policy_enabled and any("policy_queue_length_thresholds" in anchor for anchor in jockey_anchors):
-            return results, GLOBAL_SIMULATION_HISTORIES_POLICY_QUEUE_LEN
-        elif policy_enabled:
-            return results, GLOBAL_SIMULATION_HISTORIES_POLICY
         else:
-            return results, GLOBAL_SIMULATION_HISTORIES_NOPOLICY
-        '''
+            # For rule or no-policy, loop over anchors
+            for interval in intervals:
+                for anchor in jockey_anchors:
+                    requestObj = RequestQueue(
+                        utility_basic, discount_coef,
+                        policy_enabled=policy_enabled,
+                        params=Params()
+                    )
+                    requestObj.jockey_anchor = anchor
+                    requestObj.run(duration, interval, policy_type="rule" if policy_enabled else "none")
+                    results.setdefault(interval, {"reneging_rates": {}, "jockeying_rates": {}})
+                    results[interval]["reneging_rates"][anchor] = {
+                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
+                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
+                    }
+                    results[interval]["jockeying_rates"][anchor] = {
+                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
+                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
+                    }
+                    histories.append({
+                        "interval": interval,
+                        "anchor": anchor,
+                        "history": list(requestObj.get_history())
+                    })
+
+        return results, histories
+                     
         
     # With policy-driven service rates
-    results_policy , histories_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=True,  jockey_anchors=jockey_anchors)  
+    #### results_policy , histories_policy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=True,  jockey_anchors=jockey_anchors)  
     # results_policy, histories_policy, histories_egreedy = run_simulation_for_policy_mode( utility_basic, discount_coef, intervals, duration, policy_enabled=True, jockey_anchors=jockey_anchors, use_e_greedy_policy=True)
     # results_policy, (histories_policy, histories_nopolicy, histories_egreedy) = run_simulation_for_policy_mode( utility_basic, discount_coef, intervals, duration, policy_enabled=True, jockey_anchors=jockey_anchors, use_e_greedy_policy=True) 
 
     # With static/non-policy-driven service rates
-    results_no_policy, histories_nopolicy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=False, jockey_anchors=jockey_anchors) # , use_e_greedy_policy=False)              
+    #### results_no_policy, histories_nopolicy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=False, jockey_anchors=jockey_anchors) # , use_e_greedy_policy=False)              
     
     ##### waiting_times, outcomes, time_stamps = extract_waiting_times_and_outcomes(request_objs) # requestObj)
+    
+    # --- Rule-based policy ---
+    results_policy_rule, histories_policy_rule = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=True, jockey_anchors=jockey_anchors, policy_type="rule")
+
+    # --- Queue-length-threshold policy ---
+    results_policy_qlen, histories_policy_qlen = run_simulation_for_policy_mode( utility_basic, discount_coef, intervals, duration, policy_enabled=True, jockey_anchors=jockey_anchors, policy_type="queue_length_threshold" )
+
+    # --- No policy ---
+    results_no_policy, histories_nopolicy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=False, jockey_anchors=jockey_anchors, policy_type=None )
     
     all_waiting_times_opt = []
     all_outcomes_opt = []
@@ -5432,10 +5675,13 @@ def main():
     # requestObj.plot_rates_by_intervals()
     
     plot_boxplot_waiting_times_by_outcome_2x2(all_histories_nonopt, all_histories_opt, all_histories_queue_length)
+    plot_queue_length_vs_rule_policy_overlay(results_policy_rule, results_policy_qlen, intervals)
+    ####plot_queue_length_vs_rule_policy(results_policy_rule, results_policy_qlen, intervals, jockey_anchors)
+    #### => FIX ME plot_all_policy_comparison(results_no_policy, results_policy_rule, results_policy_qlen, intervals, jockey_anchors)
     
     #### plot_six_panels(results_no_policy, intervals, jockey_anchors)    
     #### plot_six_panels(results_policy, intervals, jockey_anchors)
-    plot_six_panels_multi_policy(results_no_policy, results_rates_policy, results_queue_length_policy, intervals, jockey_anchors)
+    #plot_six_panels_multi_policy(results_no_policy, results_policy_rule, results_policy_qlen, intervals, jockey_anchors)
     # plot_six_panels_combo(results_policy, intervals, jockey_anchors, histories_egreedy=histories_egreedy)         
         
     surface_datas = build_surface_datas_for_comparison(request_objs_opt, request_objs_nonopt,  intervals, objective_func) # request_objs_egreedy,
@@ -5545,5 +5791,92 @@ if __name__ == "__main__":
         return results, GLOBAL_SIMULATION_HISTORIES_POLICY if policy_enabled else GLOBAL_SIMULATION_HISTORIES_NOPOLICY  
         
     ''' 
+    
+    '''    
+        for interval in intervals:
+            for anchor in jockey_anchors:
+                if policy_enabled and not ("policy_queue_length_thresholds" in anchor):
+					
+                    # Default (Markov or baseline) policy
+                    requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=policy_enabled)
+                    requestObj.jockey_anchor = anchor
+                    requestObj.run(duration, interval)
+                    results[interval]["reneging_rates"][anchor] = {
+                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
+                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
+                    }
+                    
+                    results[interval]["jockeying_rates"][anchor] = {
+                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
+                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
+                    }
+                    
+                    request_objs_opt.append(requestObj)
+                    GLOBAL_SIMULATION_HISTORIES_POLICY.append({
+                        "anchor": anchor,
+                        "interval": interval,
+                        "history": list(requestObj.history)
+                    })plot_queue_length_vs_rule_policy_overlay
+                    
+                elif policy_enabled and "policy_queue_length_thresholds" in anchor:
+                    # Your custom queue-length-thresholds policy
+                    requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True, combined_policy_solver=combined_policy_solver, anchor=anchor, params=params)
+                    requestObj.jockey_anchor = anchor
+                    requestObj.run(duration, interval)
+                    results[interval]["reneging_rates"][anchor] = {
+                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
+                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
+                    }
+                    results[interval]["jockeying_rates"][anchor] = {
+                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
+                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
+                    }
+                    request_objs_queue_length.append(requestObj)
+                    GLOBAL_SIMULATION_HISTORIES_POLICY_QUEUE_LEN.append({
+                        "anchor": anchor,
+                        "interval": interval,
+                        "history": list(requestObj.history)
+                    })                    
+                else:
+                    # No policy case
+                    requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=False)
+                    requestObj.jockey_anchor = anchor
+                    requestObj.run(duration, interval)
+                    results[interval]["reneging_rates"][anchor] = {
+                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
+                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
+                    }
+                    results[interval]["jockeying_rates"][anchor] = {
+                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
+                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
+                    }
+                    request_objs_nonopt.append(requestObj)
+                    GLOBAL_SIMULATION_HISTORIES_NOPOLICY.append({
+                        "anchor": anchor,
+                        "interval": interval,
+                        "history": list(requestObj.history)
+                    })
 
+                all_histories.append({
+                    "interval": interval,
+                    "anchor": anchor,
+                    "history": list(requestObj.get_history())
+                })
+
+                if hasattr(requestObj, "request_log"):
+                    requestObj.request_log.clear()
+                elif "request_log" in globals():
+                    request_log.clear()
+
+            request_objs.append(requestObj)
+
+        # FINAL RETURN: choose which histories to return based on which branch matches
+        if policy_enabled and any("policy_queue_length_thresholds" in anchor for anchor in jockey_anchors):
+            return results, GLOBAL_SIMULATION_HISTORIES_POLICY_QUEUE_LEN
+        elif policy_enabled:
+            return results, GLOBAL_SIMULATION_HISTORIES_POLICY
+        else:
+            return results, GLOBAL_SIMULATION_HISTORIES_NOPOLICY
+    '''
+        
    
