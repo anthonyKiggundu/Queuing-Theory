@@ -13,6 +13,7 @@ import itertools
 import random
 import schedule
 import threading
+import seaborn as sns
 from tqdm import tqdm
 import MarkovStateMachine as msm
 from timeit import default_timer as timer
@@ -578,19 +579,29 @@ class CombinedPolicySolver:
         """
         Returns True if reneging is optimal at this state for the given queue_idx and T_local.
         """
-        Nx, Ny = self.N_x, self.N_y
-        x1 = max(0, min(x1, Nx))
-        x2 = max(0, min(x2, Ny))
+        
+        print(f"get_renege_decision: queue_idx={queue_idx}, x1={x1}, x2={x2}, T_local={T_local}, mu1={self.params.mu1}, mu2={self.params.mu2}")
+        
+        
+        #Nx, Ny = self.N_x, self.N_y
+        #x1 = max(0, min(x1, Nx))
+        #x2 = max(0, min(x2, Ny))
         if "1" in queue_idx:
             mu1 = self.params.mu1
             remaining_time = x1 / mu1 if mu1 > 0 else float("inf")
+            print(f"remaining_time={remaining_time}, condition={(x2 > x1) and (remaining_time > T_local)} for queue 1")
+            
             return (x2 > x1) and (remaining_time > T_local)
         elif "2" in queue_idx:
             mu2 = self.params.mu2
             remaining_time = x2 / mu2 if mu2 > 0 else float("inf")
+            print(f"remaining_time={remaining_time}, condition={(x1 > x2) and (remaining_time > T_local)} for queue 2")
+            
             return (x1 > x2) and (remaining_time > T_local)
         else:
             raise ValueError("queue_idx must be 1 or 2")
+            
+        
 
     def get_routing_decision(self, x1, x2):
         """
@@ -1650,8 +1661,7 @@ class RequestQueue:
         jockeying_rate = self.compute_jockeying_rate(curr_queue)
         num_requests = curr_queue_state['total_customers'] # len(curr_queue) 
          
-        anchor = random.choice(["markov_model_inter_change_time", "markov_model_service_rate", "policy_queue_length_thresholds"])        
-        # print("Selected anchor:", anchor)
+        anchor = random.choice(["markov_model_inter_change_time", "markov_model_service_rate", "policy_queue_length_thresholds"])                
             
         for client in range(len(curr_queue)):            
             req = curr_queue[client] 
@@ -2640,31 +2650,11 @@ class RequestQueue:
             alt_queue_state = self.get_queue_state(alt_queue_id, serv_rate)  
             alt_interchange_time = alt_queue_state["markov_model_inter_change_time"]  
             # T_local = stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=0.75/req.pos_in_queue)  
-            T_local = self.generateLocalCompUtility(req)                                                         
-        
-        #options = ["steady_state_distribution", "inter_change_time"]
-        #anchor = options[self.anchor_counter % 2]
-        #self.anchor_counter += 1
-        '''
-        options = ["steady_state_distribution", "inter_change_time"]
-
-        # Choose the anchor with fewer selections so far; if equal, pick randomly
-        counts = self.anchor_counts
-        if counts[options[0]] > counts[options[1]]:
-            anchor = options[1]
-        elif counts[options[0]] < counts[options[1]]:
-            anchor = options[0]
-        else:    
-            anchor = random.choice(options)
-
-        self.anchor_counts[anchor] += 1
-        '''
+            T_local = self.generateLocalCompUtility(req)                                                                        
         
         mu1 = self.get_service_rates("1") # self.srvrates_1 # self.dict_servers_info["1"]
         mu2 = self.get_service_rates("2") # self.srvrates_2 # self.dict_servers_info["2"]
         
-        # print(f"Anchor in makeRenegeDecison: {anchor}")
-            
         if "markov_model_service_rate" in anchor:
             
             # Use steady-state distribution comparison (as currently implemented)
@@ -2686,10 +2676,7 @@ class RequestQueue:
             cdf2 = np.zeros_like(t_vals)
             
             cdf1 = 1 - np.exp(-self.srvrates_1 * t_vals)  
-            cdf2 = 1 - np.exp(-self.srvrates_2 * t_vals) 
-            #for idx, t in enumerate(t_vals):
-            #    cdf1,_ = 1 - np.exp(-mu1 * t_vals) # mmc_wait_cdf_and_tail(lambda1, mu1, c, t) #[0] # return only the cdf as a float from the turple
-            #    cdf2,_ = 1 - np.exp(-mu2 * t_vals) # mmc_wait_cdf_and_tail(lambda2, mu2, c, t) #[0] # 1 - np.exp(-mu2 * t_vals)  # Exp(mu2)
+            cdf2 = 1 - np.exp(-self.srvrates_2 * t_vals)             
     
             eps = 1e-6  # small tolerance
     
@@ -2732,7 +2719,7 @@ class RequestQueue:
 
                         # If remaining wait exceeds T_local, renege
                         renege = (remaining_wait_time > T_local)
-                        #print("\n I took the remaining time -> ", renege)
+                        
                         if renege:
                             decision = True
                             self.reqRenege(req_in_queue, queueid, pos, serv_rate, T_local, req_in_queue.customerid, req_in_queue.service_time, decision, queue, anchor)
@@ -2762,32 +2749,40 @@ class RequestQueue:
 
                     # If remaining wait exceeds T_local, renege
                     renege = (remaining_wait_time > T_local)
-                    
-            
+                                
                     if renege:
                         decision = True 
                         self.reqRenege( req, queueid, pos, serv_rate, T_local, req.customerid, req.service_time, decision, queue, anchor)
+                        found = True
+                        break
                                   
             if not found:
                 #print(f"Request ID {customer_id} not found in queue {queueid}. Continuing with processing...")
                 return False
                 
         elif "policy_queue_length_thresholds" in anchor:
+            found = False
             # Decision based on queue length thresholds using CombinedPolicySolver
             if combined_solver is not None:
                 server_idx = queue_state.get('queue_idx', None)
                 x1 = queue_state.get('total_customers', 0)
                 x2 = alt_queue_state.get('total_customers', 0)
                 
-                should_renege = combined_solver.get_renege_decision(server_idx, x1, x2, T_local)
-                print("\n RENEGE??? ", should_renege)
-                if should_renege:
-                    # pos = self.get_request_position(queueid, customer_id)
-                    if curr_pose is not None:
-                        self.reqRenege(req, queueid, curr_pose, self.get_service_rates(queueid), self.generateLocalCompUtility(req), 
+                for pos, req_in_queue in enumerate(queue):                                
+                    if customer_id in req_in_queue.customerid:           
+                        curr_pose = self.get_request_position(queueid, customer_id)
+                                               
+                        should_renege = combined_solver.get_renege_decision(server_idx, x1, x2, T_local)                    
+                        # print("\n RENEGE??? ", should_renege)
+                 
+                        if should_renege: 
+                            decision = True                                                         
+                            self.reqRenege(req, queueid, curr_pose, self.get_service_rates(queueid), self.generateLocalCompUtility(req), 
                                          req.customerid, req.service_time, True, self.dict_queues_obj[queueid], anchor)
+                            found = True
+                            break
                                          
-                return should_renege          
+                            # return should_renege          
           
         else:
             raise ValueError(f"Unknown anchor: {anchor}")
@@ -3027,7 +3022,7 @@ class RequestQueue:
                 rem_accumulator (int): The variable to which any odd remainder is added.
     
             Returns:
-                tuple:
+                tuple:pos
                     half (int): Result of integer division n // 2.
                     new_accumulator (int): Updated rem_accumulator.
             """
@@ -3129,6 +3124,7 @@ class RequestQueue:
                    
                     x1 = queue_state.get('total_customers', 0)
                     x2 = alt_queue_state.get('total_customers', 0)
+                                        
                     action = combined_solver.get_jockey_decision(server_idx, x1, x2)
                     
                     # print("\n ACTION :: ", action)                   
@@ -3590,9 +3586,7 @@ def plot_boxplot_waiting_times_by_outcome_by_interval_and_anchor(histories_nopol
     """
     For each interval and each anchor, creates a separate plot (2 panels: No Policy, Policy).
     Each panel: boxplot of waiting times by outcome (served/jockeyed/reneged).
-    """
-    
-    import seaborn as sns
+    """        
 
     # Helper to flatten history into DataFrame
     def flatten(histories, policy_label):
@@ -5509,7 +5503,7 @@ def main():
         C_R=4.0
     )
     # requestObj = RequestQueue(utility_basic, discount_coef, policy_enabled=True, params=params)
-    duration = 5  #0 #00         
+    duration = 2 # 5  #0 #00         
     
     # Set intervals for dispatching queue states
     intervals = [3, 5, 7, 9]
@@ -5564,16 +5558,27 @@ def main():
                     combined_policy_solver=combined_policy_solver,
                     params=Params()
                 )
+                requestObj.jockey_anchor = policy_type
+                anchor = policy_type
                 requestObj.run(duration, interval, policy_type="queue_length_threshold")
-                results[interval] = {
-                    "reneging_rates": {
-                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
-                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
-                    },
-                    "jockeying_rates": {
-                        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
-                        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
-                    }
+                #results[interval] = {
+                #    "reneging_rates": {
+                #        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
+                #        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
+                #    },
+                #    "jockeying_rates": {
+                #        "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
+                #        "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
+                #    }
+                #}
+                results.setdefault(interval, {"reneging_rates": {}, "jockeying_rates": {}})
+                results[interval]["reneging_rates"][anchor] = {
+                    "server_1": list(requestObj.dispatch_data[interval]["server_1"]["reneging_rate"]),
+                    "server_2": list(requestObj.dispatch_data[interval]["server_2"]["reneging_rate"]),
+                }
+                results[interval]["jockeying_rates"][anchor] = {
+                    "server_1": list(requestObj.dispatch_data[interval]["server_1"]["jockeying_rate"]),
+                    "server_2": list(requestObj.dispatch_data[interval]["server_2"]["jockeying_rate"]),
                 }
                 histories.append({
                     "interval": interval,
@@ -5623,10 +5628,12 @@ def main():
     results_policy_rule, histories_policy_rule = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=True, jockey_anchors=jockey_anchors, policy_type="rule")
 
     # --- Queue-length-threshold policy ---
-    results_policy_qlen, histories_policy_qlen = run_simulation_for_policy_mode( utility_basic, discount_coef, intervals, duration, policy_enabled=True, jockey_anchors=jockey_anchors, policy_type="queue_length_threshold" )
+    results_policy_qlen, histories_policy_qlen = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=True, jockey_anchors=jockey_anchors, policy_type="queue_length_threshold")
 
     # --- No policy ---
-    results_no_policy, histories_nopolicy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=False, jockey_anchors=jockey_anchors, policy_type=None )
+    results_no_policy, histories_nopolicy = run_simulation_for_policy_mode(utility_basic, discount_coef, intervals, duration, policy_enabled=False, jockey_anchors=jockey_anchors, policy_type=None)
+    
+    print("\n ** ", results_policy_rule, "\n ==== ", results_policy_qlen, "\n *** ", results_no_policy)
     
     all_waiting_times_opt = []
     all_outcomes_opt = []
@@ -5667,7 +5674,7 @@ def main():
     # service rates and jockeying/reneging rates not smooth
     # requestObj.plot_rates_by_intervals()
     
-    plot_boxplot_waiting_times_by_outcome_2x2(all_histories_nonopt, all_histories_opt, all_histories_queue_length)
+    plot_boxplot_waiting_times_by_outcome_2x2(histories_nopolicy, histories_policy_rule, histories_policy_qlen) #all_histories_nonopt, all_histories_opt, all_histories_queue_length)
     plot_queue_length_vs_rule_policy_overlay(results_policy_rule, results_policy_qlen, intervals)
     ####plot_queue_length_vs_rule_policy(results_policy_rule, results_policy_qlen, intervals, jockey_anchors)
     #### => FIX ME plot_all_policy_comparison(results_no_policy, results_policy_rule, results_policy_qlen, intervals, jockey_anchors)
@@ -5806,7 +5813,7 @@ if __name__ == "__main__":
                     
                     request_objs_opt.append(requestObj)
                     GLOBAL_SIMULATION_HISTORIES_POLICY.append({
-                        "anchor": anchor,
+                        "anchor": anchor,curr_obs_renege
                         "interval": interval,
                         "history": list(requestObj.history)
                     })plot_queue_length_vs_rule_policy_overlay
