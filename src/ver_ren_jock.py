@@ -301,7 +301,7 @@ class Request:
 
         self.dist_local_delay=dist_local_delay
         self.loc_local_delay=np.random.uniform(low=float(para_local_delay[0]),high=(para_local_delay[1]))
-        self.scale_local_delay=float(para_local_delay[0]) #2
+        self.scale_local_delay=float(para_local_delay[2]) #0
         self.max_local_delay=self.dist_local_delay.ppf(self.certainty,loc=self.loc_local_delay,scale=self.scale_local_delay)
         self.max_cloud_delay=float(queueObj.get_arrivals_rates()/self.serv_rate) # np.inf
        
@@ -723,6 +723,7 @@ class RequestQueue:
                  alt_option='fixed_revenue', min_amount_observations=1, dist_local_delay=stats.expon,  time_exit=0.0, exp_time_service_end=0.0,
                  para_local_delay=[1.0,2.0,10.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, batchid=np.int16, uses_nn=False, uses_intensity_based = False): # Dispatched
                  
+        self.request_position_history = defaultdict(list)  # NEW: key = request_id, value = list of (time, queue_id, position)
         
         self.dispatch_data = {
             "server_1": {
@@ -847,6 +848,22 @@ class RequestQueue:
         
         return               
 		
+	
+	# NEW: Call this on every queue change
+    def track_all_request_positions(self, queue_id):
+        """
+        Track the current positions of all requests in the specified queue.
+        """
+        queue = self.dict_queues_obj[queue_id]
+        for position, req in enumerate(queue):
+            self.request_position_history[req.customerid].append({
+                "time": self.time,
+                "queue_id": queue_id,
+                "position": position
+            })
+        # Optionally track requests no longer present (e.g., mark as -1 or 'removed')
+        # You can implement more logic if needed
+	
 	
     def setActCritNet(self, state_dim, action_dim):
 		
@@ -1436,12 +1453,12 @@ class RequestQueue:
         #req=Request(req)
         self.compute_counter = self.compute_counter + 1
         
-        local_delay=req.dist_local_delay.rvs(loc=req.loc_local_delay,scale=2.0) #req.scale_local_delay)
+        local_delay=req.dist_local_delay.rvs(loc=req.loc_local_delay, scale=2.0) #scale=2.0) #req.scale_local_delay)
         
         delay=float(self.time-req.time_entrance)+local_delay        
         self.local_utility = float(req.utility_basic*np.exp(-delay*req.discount_coef))
 
-        self.avg_delay = (self.local_utility + self.avg_delay)/self.compute_counter
+        #self.avg_delay = (self.local_utility + self.avg_delay)/self.compute_counter
 
         return self.local_utility
     
@@ -1520,7 +1537,8 @@ class RequestQueue:
                     
             self.state_subscribers.append(req)          
   
-        self.dict_queues_obj[server_id] = np.append(self.dict_queues_obj[server_id], req)        
+        self.dict_queues_obj[server_id] = np.append(self.dict_queues_obj[server_id], req)  
+        self.track_all_request_positions(server_id)  # <--- track after add      
         self.queueID = server_id        
         self.curr_req = req        
         self.all_requests.append(req)
@@ -1641,7 +1659,7 @@ class RequestQueue:
                     }
                     self.makeRenegingDecision(req, curr_queue_id, next_state_renege, curr_queue_state)
                     #self.makeRenegingDecision(req, curr_queue_id, uses_intensity_based, req.customerid)
-                    remaining_time = self.get_remaining_time(curr_queue_id, curr_pose)
+                    remaining_time = self.get_remaining_time(curr_pose-1, serv_rate) # self.get_remaining_time(curr_queue_id, curr_pose)
                     reward_jockey = self.get_jockey_reward(req, remaining_time)
                     next_state_jockey = {
                         "ServerID": alt_queue_id, 
@@ -2294,7 +2312,7 @@ class RequestQueue:
         }
         
         
-    def get_remaining_time(self, queue_id, position): # plot_rates
+    def get_remaining_time_old(self, queue_id, position): # plot_rates
         """
         Calculate the remaining time until a request at a given position is processed.
         
@@ -2320,6 +2338,25 @@ class RequestQueue:
         
         return remaining_time
         
+  
+    def get_remaining_time(self, k, mu_i):
+        """
+        Returns the total remaining time for a pending request with k requests ahead,
+        where each request ahead has an iid exponential service time with rate mu_i.
+    
+        Parameters:
+            k (int): Number of requests ahead in the queue.
+            mu_i (float): Service rate (requests per unit time).
+    
+        Returns:
+            float: Total remaining time (sum of k exponential random variables).
+        """
+        # Each X_{i,t} ~ Exp(mu_i), so sum of k exponentials
+        if k <= 0 or mu_i <= 0:
+            return 0.0
+            
+        return np.sum(np.random.exponential(scale=1/mu_i, size=k))
+        
         
     def calculate_max_cloud_delay(self, position, queue_intensity, req):
         """
@@ -2343,7 +2380,7 @@ class RequestQueue:
 			    
             position = max(1, req.pos_in_queue - int(srv_rate * self.time-req.time_entrance))
                 
-        base_delay = req.service_time #1.0  # Base delay for the first position
+        base_delay = 1.0  # Base delay for the first position # req.service_time 
         position_factor = 0.01  # Incremental delay factor per position
         intensity_factor = 2.0  # Factor to adjust delay based on queue intensity
 
@@ -2406,11 +2443,11 @@ class RequestQueue:
         decision=False                  
         
         if "1" in queueid:
-            serv_rate = self.dict_servers_info["1"]
+            serv_rate = self.srvrates_1 # self.dict_servers_info["1"]
             queue =  self.dict_queues_obj["1"]  
             dest_queue = self.dict_queues_obj["2"]    
         else:
-            serv_rate = self.dict_servers_info["2"] 
+            serv_rate = self.srvrates_2 # self.dict_servers_info["2"] 
             queue =  self.dict_queues_obj["2"]
             dest_queue = self.dict_queues_obj["1"] 
         
@@ -2435,12 +2472,12 @@ class RequestQueue:
                 queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate
                 self. max_cloud_delay = self.calculate_max_cloud_delay(curr_pose, queue_intensity, req) #self.calculate_max_cloud_delay(curr_pose, serv_rate)                                                           
             
-            if "1" in queueid:
-                self.queue = self.dict_queues_obj["1"] 
-                serv_rate = self.srvrates_1           
-            else:
-                self.queue = self.dict_queues_obj["2"] 
-                serv_rate = self.srvrates_2
+            #if "1" in queueid:
+            #    self.queue = self.dict_queues_obj["1"] 
+            #    serv_rate = self.srvrates_1           
+            #else:
+            #    self.queue = self.dict_queues_obj["2"] 
+            #    serv_rate = self.srvrates_2
              
             self.avg_delay = self.calculate_max_cloud_delay(len(dest_queue)+1, queue_intensity, req)    
             # Get the relevant queue
@@ -2453,7 +2490,7 @@ class RequestQueue:
                 
             #if customer_id in req.customerid: # _in_queue
                 
-            remaining_wait_time = self.get_remaining_time(queueid, curr_pose)  # pos) #               
+            remaining_wait_time = self.get_remaining_time(curr_pose-1, serv_rate) # get_remaining_time(queueid, curr_pose)  # pos) #               
             renege = (remaining_wait_time > self.max_local_delay) #T_local)
                                     
             if renege:
@@ -2490,6 +2527,7 @@ class RequestQueue:
                 queue.pop(curr_pose)
             # Update the main queue object
             self.dict_queues_obj[queueid] = queue
+            self.track_all_request_positions(queueid)
             self.queueID = queueid  
         
             # req.customerid = req.customerid+"_reneged"
@@ -2530,7 +2568,7 @@ class RequestQueue:
         return self.objObserv.get_renege_obs()
 
 
-    def get_request_position(self, queue_id, request_id):
+    def get_request_position_old(self, queue_id, request_id):
         """
         Get the position of a given request in the queue.
         
@@ -2548,6 +2586,54 @@ class RequestQueue:
                 return position
 
         return None
+        
+        
+    def get_request_position(self, queue_id, request_id):
+        """
+        Get the position of a given request in the queue, update its position history,
+        and also update 'at_pose' in self.curr_obs_jockey for the matching request.
+        """
+        if "1" in queue_id:
+            queue = self.dict_queues_obj["1"]
+        else:
+            queue = self.dict_queues_obj["2"]
+
+        found_position = None
+        for position, req in enumerate(queue):
+            if req.customerid == request_id:
+                found_position = position
+                # Track the position history
+                self.request_position_history[request_id].append({
+                    "time": self.time,
+                    "queue_id": queue_id,
+                    "position": position
+                })
+                break
+
+        if found_position is None:
+            # Not found: track position as -1
+            self.request_position_history[request_id].append({
+                "time": self.time,
+                "queue_id": queue_id,
+                "position": -1
+            })
+
+        # Update self.curr_obs_jockey
+        for obs in self.curr_obs_jockey:
+            req = obs.get("Request")
+            if req is not None and request_id in req.customerid:
+                obs["at_pose"] = found_position if found_position is not None else -1
+
+        return found_position
+        
+        
+    def get_request_position_history(self, request_id):
+        """
+        Get the recorded position history of the specified request.
+        :param request_id: The ID of the request.
+        :return: List of dicts with keys 'time', 'queue_id', 'position'
+        """
+        return self.request_position_history.get(request_id, [])
         
             
     def reqJockey(self, curr_queue_id, dest_queue_id, req, customerid, serv_rate, remaining_time, exp_delay, decision, curr_pose, curr_queue, uses_nn, diff_wait):	
@@ -2571,11 +2657,13 @@ class RequestQueue:
             if 0 <= curr_pose < len(queue):
                 queue.pop(curr_pose)
             self.dict_queues_obj[curr_queue_id] = queue
+            self.track_all_request_positions(curr_queue_id)  # <--- track after add
 
             # Add to destination queue
             dest_queue_list = list(self.dict_queues_obj[dest_queue_id])
             dest_queue_list.append(req)
             self.dict_queues_obj[dest_queue_id] = dest_queue_list
+            self.track_all_request_positions(dest_queue_id) 
             
             if not req.customerid.endswith("_jockeyed"):
                 req.customerid = req.customerid+"_jockeyed"
@@ -2643,7 +2731,7 @@ class RequestQueue:
         
         curr_queue = self.dict_queues_obj.get(curr_queue_id)
         dest_queue = self.dict_queues_obj.get(alt_queue_id)
-        curr_pose = self.get_request_position( curr_queue_id, req.customerid)
+        curr_pose = self.get_request_position( curr_queue_id, req.customerid)       
         queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate                
         
         self.avg_delay = self.calculate_max_cloud_delay(len(dest_queue)+1, queue_intensity, req) # self.calculate_max_cloud_delay(curr_pose, serv_rate) 
@@ -2651,28 +2739,27 @@ class RequestQueue:
         # curr_pose = req.pos_in_queue # self.get_request_position(curr_queue_id, customerid)
         
         if curr_pose is None:
-            print(f" Request ID {req.customerid} not found in queue {curr_queue_id}. Continuing with processing...")
+            # print(f" CurrPose is None -> Request ID {req.customerid} not found in queue {curr_queue_id}. Continuing with processing...")
+            return
             
-        else:                                
-   
-            remaining_wait_time = self.get_remaining_time(curr_queue_id, curr_pose) # pos) #
-            time_already_spent_in_curr_queue = self.time - req.time_entrance
+        else: 
+            # print(f" Found request at {curr_pose} ")                               
+            found = True
+            remaining_wait_time = self.get_remaining_time(curr_pose-1, serv_rate) # self.get_remaining_time(curr_queue_id, curr_pose) # pos) #
+            # time_already_spent_in_curr_queue = self.time - req.time_entrance
             
             # The time expected to spent in the other queue is what has already been 
             # spent plus the new time when the jockey lands at a particular position in the other queue
-            jockey_total_expected_time_to_service = time_already_spent_in_curr_queue + self.avg_delay
+            jockey_total_expected_time_to_service = remaining_wait_time + self.avg_delay # remaining_wait_time
              
-        
+            # print("\n --- jockey expected", jockey_total_expected_time_to_service, " --- until service ",remaining_wait_time)
             if remaining_wait_time > jockey_total_expected_time_to_service: # self.avg_delay:
                 decision = True
                 diff_wait = remaining_wait_time - jockey_total_expected_time_to_service
                 reward = self.reqJockey(curr_queue_id, alt_queue_id, req, req.customerid, serv_rate, remaining_wait_time, self.avg_delay, decision, curr_pose, curr_queue, req.uses_nn, diff_wait)
-                found = True
-                #return 
-                    #break
 
                 if not found:
-                    print(f"Request ID {req.customerid} not found in queue {curr_queue_id}. Continuing with processing...")
+                    # print(f"Request ID {req.customerid} not found in queue {curr_queue_id}. Continuing with processing...")
                     return False
                     
     
@@ -3931,7 +4018,7 @@ def main():
         args=(duration, env),
         kwargs={
             'adjust_service_rate': False,
-            'num_episodes': 10, #   <-- set to 120 episodes, or any number > 100
+            'num_episodes': 150, #   <-- set to 120 episodes, or any number > 100
             'save_to_file': "non_adjusted_metrics.csv"
             # "arrival_rates": env.arrival_rates
         }
