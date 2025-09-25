@@ -152,7 +152,7 @@ class Observations:
     
     def get_jockey_obs(self):
 		
-        return self. curr_obs_jockey    
+        return self.curr_obs_jockey    
 
 
 class Queues(object):
@@ -1135,9 +1135,7 @@ class RequestQueue:
             srv1_jockeying_rates = []
             srv2_reneging_rates = []
             
-            #actor_losses = []
-            #critic_losses = []
-            #total_losses = []
+            step_rewards = 0
         
             for i in step_loop: 
                 self.arr_rate = self.objQueues.randomize_arrival_rate()  # Randomize arrival rate
@@ -1211,15 +1209,15 @@ class RequestQueue:
                 #episode_policy_entropy += policy_entropy
                 
                 # Step 2: Apply the action to the environment and get feedback
-                next_state, reward, done, info = self.env.step(action)
-                # print("\n NEXT STATE: ", next_state)
+                next_state, reward, done, info = self.env.step(action)                
                 
                 # Update queue state in the environment
                 self.env.update_queue_state(next_state)                               
 
                 # Step 3: Store the reward for training
                 self.agent.store_reward(reward)
-                total_reward += reward
+                step_rewards += reward
+                #total_reward += reward
 
                 # Step 4: Update the state for the next step
                 state = next_state
@@ -1231,19 +1229,7 @@ class RequestQueue:
                 # Step 4 (Optional): Adjust service rates if enabled
                 if adjust_service_rate:
                     self.adjust_service_rates()
-
-                # Step 5: Compute jockeying and reneging rates
-                '''
-                queue1_jockeying_rate = self.compute_jockeying_rate(self.dict_queues_obj["1"])
-                queue1_reneging_rate = self.compute_reneging_rate(self.dict_queues_obj["1"])
-                srv1_jockeying_rates.append(queue1_jockeying_rate)
-                srv1_reneging_rates.append(queue1_reneging_rate)
-                
-                queue2_jockeying_rate = self.compute_jockeying_rate(self.dict_queues_obj["2"])
-                queue2_reneging_rate = self.compute_reneging_rate(self.dict_queues_obj["2"])
-                srv2_jockeying_rates.append(queue2_jockeying_rate)
-                srv2_reneging_rates.append(queue2_reneging_rate)
-                '''                                
+                 
                 
                 # Ensure dispatch data is updated at each step
                 self.dispatch_all_queues() #dispatch_all_queues()
@@ -1255,8 +1241,10 @@ class RequestQueue:
             
                 self.set_batch_id(i)
                 
-            # Update the RL agent at the end of each episode
-            #self.agent.update()
+                total_reward += step_rewards
+                
+                print(f"Step {i + 1}: Action={action}, Reward={reward}, Step Total Reward={step_rewards}, Total Reward={total_reward}")
+                
             # Update the RL agent at the end of each episode
             actor_loss, critic_loss, total_loss = self.agent.update()
                         
@@ -1751,7 +1739,7 @@ class RequestQueue:
 
             ax.set_xlabel('Information Source')
             ax.set_ylabel('Rate')
-            ax.set_title('Reneging and Jockeying Rates by Information Source')
+            ax.set_title('Reneging and Jockeying Rates by Queue and Information Source')
             ax.set_xticks([i + width / 2 for i in x])
             ax.set_xticklabels(sources)
             ax.legend()
@@ -1888,7 +1876,7 @@ class RequestQueue:
         #schedule.every(60).seconds.do(self.dispatch_all_queues)       
             
             
-    def plot_rates(self):
+    def plot_rates_original(self):
         """
         Plot the comparison of jockeying and reneging rates
         for each queue for each individual information source subscribed to.
@@ -1932,6 +1920,62 @@ class RequestQueue:
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()
         
+        
+    def plot_rates(self):
+        """
+        Plot the comparison of jockeying and reneging rates
+        for each queue for each individual information source subscribed to.
+        This version uses self.nn_subscribers and self.state_subscribers
+        instead of dispatch_data.
+        """
+    
+        sources = ["Raw Markov State", "NN-based"]  # Information sources
+        queues = ["Server 1", "Server 2"]
+
+        # Helper function to collect rates for each queue and info source
+        def collect_rates(subscribers, server_id):
+            jockeying_rates = []
+            reneging_rates = []
+            queue_sizes = []
+            # Get requests for this server
+            reqs = [req for req in subscribers if getattr(req, "server_id", None) == server_id]
+            for i in range(1, len(reqs)+1):
+                current = reqs[:i]
+                queue_sizes.append(i)
+                num_jockeyed = sum(getattr(req, 'jockeyed', False) for req in current)
+                num_reneged = sum(getattr(req, 'reneged', False) for req in current)
+                jockeying_rates.append(num_jockeyed / i)
+                reneging_rates.append(num_reneged / i)
+            return queue_sizes, jockeying_rates, reneging_rates
+
+        fig, axes = plt.subplots(len(queues), 2, figsize=(12, 10))
+        # fig.suptitle("Comparison of Jockeying and Reneging Rates by Queue and Information Source", fontsize=16)
+
+        for i, server_id in enumerate(["1", "2"]):
+            # Markov (raw state)
+            queue_sizes_state, jockeying_state, reneging_state = collect_rates(self.state_subscribers, server_id)
+            # NN-based
+            queue_sizes_nn, jockeying_nn, reneging_nn = collect_rates(self.nn_subscribers, server_id)
+
+            # Plot jockeying rates
+            axes[i, 0].plot(queue_sizes_state, jockeying_state, label=f'{sources[0]}', linestyle='dashed', color='blue')
+            axes[i, 0].plot(queue_sizes_nn, jockeying_nn, label=f'{sources[1]}', color='orange')
+            axes[i, 0].set_title(f"Jockeying Rates - {queues[i]}")
+            axes[i, 0].set_xlabel("Number of Requests")
+            axes[i, 0].set_ylabel("Jockeying Rate")
+            axes[i, 0].legend()
+
+            # Plot reneging rates
+            axes[i, 1].plot(queue_sizes_state, reneging_state, label=f'{sources[0]}', linestyle='dashed', color='blue')
+            axes[i, 1].plot(queue_sizes_nn, reneging_nn, label=f'{sources[1]}', color='orange')
+            axes[i, 1].set_title(f"Reneging Rates - {queues[i]}")
+            axes[i, 1].set_xlabel("Number of Requests")
+            axes[i, 1].set_ylabel("Reneging Rate")
+            axes[i, 1].legend()
+
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.show()    
+    
         
     def adjust_service_rates(self):
         """
@@ -2864,8 +2908,8 @@ class RequestQueue:
 
         plt.figure(figsize=(12, 6))
         for label, (queue_sizes, reneging_rates, jockeying_rates) in rate_results.items():
-            plt.plot(queue_sizes, reneging_rates, '-o', label=f'{label} Reneging Rate')
-            plt.plot(queue_sizes, jockeying_rates, '-x', label=f'{label} Jockeying Rate')
+            plt.plot(queue_sizes, reneging_rates, '-o', label=f'{label} Reneging Rate', markersize=1)
+            plt.plot(queue_sizes, jockeying_rates, '-x', label=f'{label} Jockeying Rate', markersize=1)
 
         plt.xlabel("Queue Size (Number of Requests Entered)")
         plt.ylabel("Rate")
@@ -2957,6 +3001,328 @@ class RequestQueue:
         plt.tight_layout()
         plt.show()
 
+    
+    
+    def plot_asymptotic_behavior_of_jockeying_and_reneging(self, max_queue_length=100, bin_width=2):
+        """
+        Plot the probability of beneficial jockeying and reneging as queue length increases,
+        for both NN-based and Markov information sources. Demonstrates asymptotic convergence
+        to extrema (0 or 1) and negligible difference between information sources.
+        """
+
+        # Gather events from observations
+        jockey_obs = self.objObserv.get_jockey_obs()
+        renege_obs = self.objObserv.get_renege_obs()
+
+        # Bin queue lengths
+        bins = np.arange(1, max_queue_length+bin_width, bin_width)
+        
+        def bin_by_length(obs_list, reward_key='reward'):
+            count_nn = np.zeros(len(bins))
+            total_nn = np.zeros(len(bins))
+            count_state = np.zeros(len(bins))
+            total_state = np.zeros(len(bins))
+            for obs in obs_list:
+                if not isinstance(obs, dict):
+                    continue
+                pos = obs.get("at_pose")
+                uses_nn = obs.get("intensity_based_info", False)
+                reward = obs.get(reward_key, 0)
+                if pos is None:
+                    continue
+                # Find bin index
+                idx = np.digitize(pos, bins) - 1
+                if idx < 0 or idx >= len(bins):
+                    continue
+                if uses_nn:
+                    total_nn[idx] += 1
+                    if reward > 0:
+                        count_nn[idx] += 1
+                else:
+                    total_state[idx] += 1
+                    if reward > 0:
+                        count_state[idx] += 1
+            # Probability per bin
+            prob_nn = np.divide(count_nn, total_nn, out=np.zeros_like(count_nn), where=total_nn>0)
+            prob_state = np.divide(count_state, total_state, out=np.zeros_like(count_state), where=total_state>0)
+            return prob_nn, prob_state
+
+        # Compute probabilities for jockeying and reneging
+        jockey_nn, jockey_state = bin_by_length(jockey_obs)
+        renege_nn, renege_state = bin_by_length(renege_obs)
+
+        plt.figure(figsize=(12, 6))
+        plt.plot(bins, jockey_nn, '-o', color='orange', label='Jockeying (NN-based)',markersize=1)
+        plt.plot(bins, jockey_state, '-o', color='red', label='Jockeying (Markov-based)', markersize=1)
+        plt.plot(bins, renege_nn, '-x', color='blue', label='Reneging (NN-based)', markersize=1)
+        plt.plot(bins, renege_state, '-x', color='green', label='Reneging (Markov-based)', markersize=1)
+        plt.xlabel("Queue Length")
+        plt.ylabel("Probability of Beneficial Action")
+        plt.title("Asymptotic Behavior of Jockeying and Reneging vs Queue Length")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+        # Validation printout for theorem
+        print("Asymptotic regime validation: For large queue lengths, probabilities approach extrema (0 or 1), and curves for NN-based and Markov-based decisions become indistinguishable.")
+        
+        
+    def plot_decision_probability_vs_queue_length(self, bin_width=1, min_count_per_n=1):
+        """
+        Improved: Plot Pr{estimator declares switch} vs queue length n for Markov, actor-critic, and oracle.
+        Only plot bins with at least min_count_per_bin observations.
+        """
+
+        obs_jockey = self.objObserv.get_jockey_obs()
+        # Gather all observed queue lengths
+        queue_lengths = [obs.get("at_pose") for obs in obs_jockey if isinstance(obs, dict) and obs.get("at_pose") is not None]
+        unique_ns = sorted(set(queue_lengths))
+        print("Observed queue lengths (n):", unique_ns)
+
+        # Prepare data per queue length
+        stats = { "Markov": {}, "NN": {}, "Oracle": {} }
+        for n in unique_ns:
+            stats["Markov"][n] = {"switch": 0, "total": 0}
+            stats["NN"][n] = {"switch": 0, "total": 0}
+            stats["Oracle"][n] = {"switch": 0, "total": 0}
+
+        def oracle_decision(obs):
+            req = obs.get("Request")
+            if req is None:
+                return False
+            waiting_time = getattr(req, 'time_exit', 0) - getattr(req, 'time_entrance', 0)
+            try:
+                true_switch = waiting_time > obs.get("expected_service_time", 0)
+            except Exception:
+                true_switch = False
+            return true_switch
+
+        for obs in obs_jockey:
+            if not isinstance(obs, dict):
+                continue
+            n = obs.get("at_pose")
+            if n is None:
+                continue
+            uses_nn = obs.get("intensity_based_info", False)
+            declared_switch = bool(obs.get("action", 0))
+            oracle_switch = oracle_decision(obs)
+            if uses_nn:
+                stats["NN"][n]["total"] += 1
+                if declared_switch:
+                    stats["NN"][n]["switch"] += 1
+            else:
+                stats["Markov"][n]["total"] += 1
+                if declared_switch:
+                    stats["Markov"][n]["switch"] += 1
+            stats["Oracle"][n]["total"] += 1
+            if oracle_switch:
+                stats["Oracle"][n]["switch"] += 1
+
+        # Prepare data for plotting: only n values with enough data
+        plot_ns = []
+        markov_probs = []
+        nn_probs = []
+        oracle_probs = []
+        for n in unique_ns:
+            t_markov = stats["Markov"][n]["total"]
+            t_nn = stats["NN"][n]["total"]
+            t_oracle = stats["Oracle"][n]["total"]
+            if (t_markov + t_nn + t_oracle) >= min_count_per_n:
+                plot_ns.append(n)
+                markov_probs.append(stats["Markov"][n]["switch"] / t_markov if t_markov else np.nan)
+                nn_probs.append(stats["NN"][n]["switch"] / t_nn if t_nn else np.nan)
+                oracle_probs.append(stats["Oracle"][n]["switch"] / t_oracle if t_oracle else np.nan)
+
+        plt.figure(figsize=(10,6))
+        plt.plot(plot_ns, markov_probs, '-o', label="Markov estimator")
+        plt.plot(plot_ns, nn_probs, '-x', label="Actor-Critic estimator")
+        plt.plot(plot_ns, oracle_probs, '--s', label="Oracle (true)")
+        plt.xlabel("Queue Length (n)")
+        plt.ylabel("Pr{Declares Switch}")
+        plt.title("Decision Probability vs Queue Length (integer n)")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+        
+
+    def plot_diagnostics_error_and_misclassification(self, min_count_per_n=1):
+        """
+        Plot normalized estimation error and misclassification rate vs actual integer queue length n for each model.
+        Only plot queue lengths with at least min_count_per_n observations.
+        """
+
+
+        obs_jockey = self.objObserv.get_jockey_obs()
+        for obs in obs_jockey:
+            print("\n ************ ", obs)
+            
+        queue_lengths = [obs.get("at_pose") for obs in obs_jockey if isinstance(obs, dict) and obs.get("at_pose") is not None]
+        unique_ns = sorted(set(queue_lengths))
+        print("Observed queue lengths (n):", unique_ns)
+
+        error_markov = {n: [] for n in unique_ns}
+        error_nn = {n: [] for n in unique_ns}
+        misclass_markov = {n: [] for n in unique_ns}
+        misclass_nn = {n: [] for n in unique_ns}
+
+        def oracle_decision(obs):
+            req = obs.get("Request")
+            if req is None:
+                return False
+            waiting_time = getattr(req, 'time_exit', 0) - getattr(req, 'time_entrance', 0)
+            try:
+                true_switch = waiting_time > obs.get("expected_service_time", 0)
+            except Exception:
+                true_switch = False
+            return true_switch
+
+        for obs in obs_jockey:
+            if not isinstance(obs, dict):
+                continue
+            n = obs.get("at_pose")
+            uses_nn = obs.get("intensity_based_info", False)
+            req = obs.get("Request")
+            estimator_wait = obs.get("expected_service_time", 0)
+            true_wait = getattr(req, 'time_exit', 0) - getattr(req, 'time_entrance', 0)
+            declared_switch = bool(obs.get("action"))
+            oracle_switch = oracle_decision(obs)
+            if n is None or true_wait is None:
+                continue
+            norm_error = abs(estimator_wait - true_wait) / n if n > 0 else 0
+            misclass = int(declared_switch != oracle_switch)
+            if uses_nn:
+                error_nn[n].append(norm_error)
+                misclass_nn[n].append(misclass)
+            else:
+                error_markov[n].append(norm_error)
+                misclass_markov[n].append(misclass)
+
+        # Prepare data for plotting
+        plot_ns = []
+        err_markov_plot = []
+        err_markov_std_plot = []
+        err_nn_plot = []
+        err_nn_std_plot = []
+        misclass_markov_plot = []
+        misclass_nn_plot = []
+
+        for n in unique_ns:
+            # Only plot if enough data
+            if len(error_markov[n]) + len(error_nn[n]) >= min_count_per_n:
+                plot_ns.append(n)
+                err_markov_plot.append(np.mean(error_markov[n]) if error_markov[n] else np.nan)
+                err_markov_std_plot.append(np.std(error_markov[n]) if error_markov[n] else np.nan)
+                err_nn_plot.append(np.mean(error_nn[n]) if error_nn[n] else np.nan)
+                err_nn_std_plot.append(np.std(error_nn[n]) if error_nn[n] else np.nan)
+                misclass_markov_plot.append(np.mean(misclass_markov[n]) if misclass_markov[n] else np.nan)
+                misclass_nn_plot.append(np.mean(misclass_nn[n]) if misclass_nn[n] else np.nan)
+
+        fig, axs = plt.subplots(1, 2, figsize=(14, 5))
+        axs[0].errorbar(plot_ns, err_markov_plot, yerr=err_markov_std_plot, fmt='-o', label="Markov")
+        axs[0].errorbar(plot_ns, err_nn_plot, yerr=err_nn_std_plot, fmt='-x', label="Actor-Critic")
+        axs[0].set_xlabel("Queue Length (n)")
+        axs[0].set_ylabel("Normalized Error: E[|cWi(n)-Wi(n)|/n]")
+        axs[0].set_title("Normalized Estimation Error vs n")
+        axs[0].legend()
+        axs[0].grid(True)
+        axs[1].plot(plot_ns, misclass_markov_plot, '-o', label="Markov")
+        axs[1].plot(plot_ns, misclass_nn_plot, '-x', label="Actor-Critic")
+        axs[1].set_xlabel("Queue Length (n)")
+        axs[1].set_ylabel("Misclassification Rate")
+        axs[1].set_title("Misclassification Rate vs n")
+        axs[1].legend()
+        axs[1].grid(True)
+        plt.tight_layout()
+        plt.show()
+        
+        
+    def plot_successful_jockey_probability_vs_queue_length(self, T=None, min_count_per_n=1):
+        """
+        Plot Pr{switch & complete before T} vs actual integer queue length n for Markov, NN, and Oracle.
+        Only plot queue lengths with at least min_count_per_n observations.
+        """
+
+        obs_jockey = self.objObserv.get_jockey_obs()
+        queue_lengths = [obs.get("at_pose") for obs in obs_jockey if isinstance(obs, dict) and obs.get("at_pose") is not None]
+        unique_ns = sorted(set(queue_lengths))
+        print("Observed queue lengths (n):", unique_ns)
+
+        stats = { "Markov": {}, "NN": {}, "Oracle": {} }
+        for n in unique_ns:
+            stats["Markov"][n] = {"success": 0, "total": 0}
+            stats["NN"][n] = {"success": 0, "total": 0}
+            stats["Oracle"][n] = {"success": 0, "total": 0}
+
+        def oracle_decision(obs, T):
+            req = obs.get("Request")
+            if req is None:
+                return False
+            time_entrance = getattr(req, 'time_entrance', None)
+            time_exit = getattr(req, 'time_exit', None)
+            completion_time = time_exit - time_entrance if time_exit is not None and time_entrance is not None else None
+            try:
+                true_switch = completion_time > obs.get("expected_service_time", 0)
+            except Exception:
+                true_switch = False
+            threshold_T = T if T is not None else obs.get("expected_service_time", None)
+            success_oracle = true_switch and (completion_time is not None and threshold_T is not None and completion_time < threshold_T)
+            return success_oracle
+
+        for obs in obs_jockey:
+            if not isinstance(obs, dict):
+                continue
+            n = obs.get("at_pose")
+            if n is None:
+                continue
+            uses_nn = obs.get("intensity_based_info", False)
+            declared_switch = bool(obs.get("action", 0))
+            req = obs.get("Request")
+            time_entrance = getattr(req, 'time_entrance', None)
+            time_exit = getattr(req, 'time_exit', None)
+            completion_time = time_exit - time_entrance if time_exit is not None and time_entrance is not None else None
+            threshold_T = T if T is not None else obs.get("expected_service_time", None)
+            success = declared_switch and (completion_time is not None and threshold_T is not None and completion_time < threshold_T)
+            success_oracle = oracle_decision(obs, T)
+            if uses_nn:
+                stats["NN"][n]["total"] += 1
+                if success:
+                    stats["NN"][n]["success"] += 1
+            else:
+                stats["Markov"][n]["total"] += 1
+                if success:
+                    stats["Markov"][n]["success"] += 1
+            stats["Oracle"][n]["total"] += 1
+            if success_oracle:
+                stats["Oracle"][n]["success"] += 1
+
+        plot_ns = []
+        markov_probs = []
+        nn_probs = []
+        oracle_probs = []
+        for n in unique_ns:
+            t_markov = stats["Markov"][n]["total"]
+            t_nn = stats["NN"][n]["total"]
+            t_oracle = stats["Oracle"][n]["total"]
+            if (t_markov + t_nn + t_oracle) >= min_count_per_n:
+                plot_ns.append(n)
+                markov_probs.append(stats["Markov"][n]["success"] / t_markov if t_markov else np.nan)
+                nn_probs.append(stats["NN"][n]["success"] / t_nn if t_nn else np.nan)
+                oracle_probs.append(stats["Oracle"][n]["success"] / t_oracle if t_oracle else np.nan)
+
+        plt.figure(figsize=(10,6))
+        plt.plot(plot_ns, markov_probs, '-o', label="Markov estimator")
+        plt.plot(plot_ns, nn_probs, '-x', label="Actor-Critic estimator")
+        plt.plot(plot_ns, oracle_probs, '--s', label="Oracle (true)")
+        plt.xlabel("Queue Length (n)")
+        plt.ylabel("Pr{Switch & Complete before T}")
+        plt.title("Successful Jockey Probability vs Queue Length (integer n)")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+        
     
     def run_equal_service_rate_experiment(self, arrival_rates_even, duration, env, num_episodes=10):
         """
@@ -3392,7 +3758,7 @@ class ImpatientTenantEnv:
         return raw_server_status  
               
 
-def visualize_results(metrics_file="simu_results.csv"):
+def visualize_results(metrics_file="simu_results.csv", window=5):
     """
     Visualize simulation results recorded in the metrics file.
 
@@ -3405,12 +3771,26 @@ def visualize_results(metrics_file="simu_results.csv"):
     # Load metrics from the CSV file
     metrics = pd.read_csv(metrics_file)
 
-    # Plot Total Rewards per Episode
+    # Get average rewards
+    avg_rewards = metrics['average_reward'].to_numpy()
+
+    # Compute moving average for smoothing
+    def moving_average(x, w):
+        if w < 2:
+            return x
+        return np.convolve(x, np.ones(w)/w, mode='valid')
+
+    smoothed_rewards = moving_average(avg_rewards, window)
+    # Adjust episode numbers to match smoothed length
+    episodes = metrics['episode'].to_numpy()
+    episodes_smoothed = episodes[:len(smoothed_rewards)]
+
+    # Plot Smoothed Average Rewards per Episode
     plt.figure(figsize=(10, 6))
-    plt.plot(metrics['episode'], metrics['total_reward'], label='Total Reward', marker='o') 
-    plt.title("Total Rewards per Episode")
+    plt.plot(episodes_smoothed, smoothed_rewards, label=f'Avg Reward (window={window})', marker='o')
+    plt.title("Smoothed Average Rewards per Episode")
     plt.xlabel("Episode")
-    plt.ylabel("Total Reward")
+    plt.ylabel("Average Reward")
     plt.grid()
     plt.legend()
     plt.show()
@@ -3449,47 +3829,47 @@ def visualize_results(metrics_file="simu_results.csv"):
 
     # Plot Jockeying and Reneging Rates
     # Plot Reneging Rates
-    plt.figure(figsize=(12,7))
+    #plt.figure(figsize=(12,7))
 
     # Reneging rates comparison
-    plt.plot(metrics['episode'], metrics['srv1_reneging_rate_markov'], label='Srv1 Reneging Markov', color='blue', linestyle='-')
-    plt.plot(metrics['episode'], metrics['srv2_reneging_rate_markov'], label='Srv2 Reneging Markov', color='blue', linestyle='--')
-    plt.plot(metrics['episode'], metrics['srv1_reneging_rate_nn'], label='Srv1 Reneging NN', color='red', linestyle='-')
-    plt.plot(metrics['episode'], metrics['srv2_reneging_rate_nn'], label='Srv2 Reneging NN', color='red', linestyle='--')
+    #plt.plot(metrics['episode'], metrics['srv1_reneging_rate_markov'], label='Srv1 Reneging Markov', color='blue', linestyle='-')
+    #plt.plot(metrics['episode'], metrics['srv2_reneging_rate_markov'], label='Srv2 Reneging Markov', color='blue', linestyle='--')
+    #plt.plot(metrics['episode'], metrics['srv1_reneging_rate_nn'], label='Srv1 Reneging NN', color='red', linestyle='-')
+    #plt.plot(metrics['episode'], metrics['srv2_reneging_rate_nn'], label='Srv2 Reneging NN', color='red', linestyle='--')
 
     # Jockeying rates comparison
-    plt.plot(metrics['episode'], metrics['srv1_jockeying_rate_markov'], label='Srv1 Jockeying Markov', color='green', linestyle='-')
-    plt.plot(metrics['episode'], metrics['srv2_jockeying_rate_markov'], label='Srv2 Jockeying Markov', color='green', linestyle='--')
-    plt.plot(metrics['episode'], metrics['srv1_jockeying_rate_nn'], label='Srv1 Jockeying NN', color='orange', linestyle='-')
-    plt.plot(metrics['episode'], metrics['srv2_jockeying_rate_nn'], label='Srv2 Jockeying NN', color='orange', linestyle='--')
+    #plt.plot(metrics['episode'], metrics['srv1_jockeying_rate_markov'], label='Srv1 Jockeying Markov', color='green', linestyle='-')
+    #plt.plot(metrics['episode'], metrics['srv2_jockeying_rate_markov'], label='Srv2 Jockeying Markov', color='green', linestyle='--')
+    #plt.plot(metrics['episode'], metrics['srv1_jockeying_rate_nn'], label='Srv1 Jockeying NN', color='orange', linestyle='-')
+    #plt.plot(metrics['episode'], metrics['srv2_jockeying_rate_nn'], label='Srv2 Jockeying NN', color='orange', linestyle='--')
 
-    plt.xlabel('Episode')
-    plt.ylabel('Rate')
-    plt.title('Comparison of Jockeying and Reneging Rates: NN vs Markov')
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()    
+    #plt.xlabel('Episode')
+    #plt.ylabel('Rate')
+    #plt.title('Comparison of Jockeying and Reneging Rates: NN vs Markov')
+    #plt.legend()
+    #plt.grid(True)
+    #plt.tight_layout()
+    #plt.show()    
 
     # Calculate mean rates per source per episode
-    metrics['mean_reneging_markov'] = metrics[['srv1_reneging_rate_markov', 'srv2_reneging_rate_markov']].mean(axis=1)
-    metrics['mean_jockeying_markov'] = metrics[['srv1_jockeying_rate_markov', 'srv2_jockeying_rate_markov']].mean(axis=1)
-    metrics['mean_reneging_nn'] = metrics[['srv1_reneging_rate_nn', 'srv2_reneging_rate_nn']].mean(axis=1)
-    metrics['mean_jockeying_nn'] = metrics[['srv1_jockeying_rate_nn', 'srv2_jockeying_rate_nn']].mean(axis=1)
+    #metrics['mean_reneging_markov'] = metrics[['srv1_reneging_rate_markov', 'srv2_reneging_rate_markov']].mean(axis=1)
+    #metrics['mean_jockeying_markov'] = metrics[['srv1_jockeying_rate_markov', 'srv2_jockeying_rate_markov']].mean(axis=1)
+    #metrics['mean_reneging_nn'] = metrics[['srv1_reneging_rate_nn', 'srv2_reneging_rate_nn']].mean(axis=1)
+    #metrics['mean_jockeying_nn'] = metrics[['srv1_jockeying_rate_nn', 'srv2_jockeying_rate_nn']].mean(axis=1)
 
     # Plot the mean rates per episode
-    plt.figure(figsize=(10,6))
-    plt.plot(metrics['episode'], metrics['mean_reneging_markov'], label='Mean Reneging Markov', color='blue')
-    plt.plot(metrics['episode'], metrics['mean_reneging_nn'], label='Mean Reneging NN', color='red')
-    plt.plot(metrics['episode'], metrics['mean_jockeying_markov'], label='Mean Jockeying Markov', color='green')
-    plt.plot(metrics['episode'], metrics['mean_jockeying_nn'], label='Mean Jockeying NN', color='orange')
-    plt.xlabel('Episode')
-    plt.ylabel('Mean Rate')
-    plt.title('Mean Reneging and Jockeying Rates per Source (Aggregated Across Both Servers)')
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
+    #plt.figure(figsize=(10,6))
+    #plt.plot(metrics['episode'], metrics['mean_reneging_markov'], label='Mean Reneging Markov', color='blue')
+    #plt.plot(metrics['episode'], metrics['mean_reneging_nn'], label='Mean Reneging NN', color='red')
+    #plt.plot(metrics['episode'], metrics['mean_jockeying_markov'], label='Mean Jockeying Markov', color='green')
+    #plt.plot(metrics['episode'], metrics['mean_jockeying_nn'], label='Mean Jockeying NN', color='orange')
+    #plt.xlabel('Episode')
+    #plt.ylabel('Mean Rate')
+    #plt.title('Mean Reneging and Jockeying Rates per Source (Aggregated Across Both Servers)')
+    #plt.legend()
+    #plt.grid(True)
+    #plt.tight_layout()
+    #plt.show()
 
 
 def visualize_comparison(adjusted_file="adjusted_metrics.csv", non_adjusted_file="non_adjusted_metrics.csv"):
@@ -3540,7 +3920,9 @@ def main():
 
     print("Environment and RequestQueue initialized successfully!")
     
-    duration = 10 #  5 #
+    # These are the number of iterations also labelled as step in the simulation
+    # Ideally each step corresponds to an arrival and processing iteration
+    duration = 10     
     
     # Start the scheduler
     #scheduler_thread = threading.Thread(target=request_queue.run(duration, env, adjust_service_rate=False, save_to_file="non_adjusted_metrics.csv")) # requestObj.run_scheduler) #
@@ -3549,7 +3931,7 @@ def main():
         args=(duration, env),
         kwargs={
             'adjust_service_rate': False,
-            'num_episodes': 120, #   <-- set to 120 episodes, or any number > 100
+            'num_episodes': 10, #   <-- set to 120 episodes, or any number > 100
             'save_to_file': "non_adjusted_metrics.csv"
             # "arrival_rates": env.arrival_rates
         }
@@ -3558,12 +3940,20 @@ def main():
     scheduler_thread.join()  # <-- Wait until simulation is done then plot below functions
     
     # Let us visualize some results
-    visualize_results(metrics_file="simu_results.csv")    
-    request_queue.plot_rates() # change me not to use dispatch_data but use self.subscribers variables
-    # request_queue.compare_behavior_rates_by_information_how_often()
+    # visualize_results(metrics_file="simu_results.csv") # has the rewards metrics, and figure 2 in the paper
+    request_queue.plot_rates() # change me not to use dispatch_data but use self.subscribers variables    
     request_queue.compare_rates_by_information_source() # _with_graph
+    # request_queue.plot_asymptotic_behavior_of_jockeying_and_reneging(max_queue_length=1000)
     request_queue.plot_reneging_and_jockeying_rates_vs_queue_size_by_type() # plot_reneging_and_jockeying_rates_vs_queue_size()
-    request_queue.plot_jockeying_reneging_rates_vs_waiting_time_difference()
+    
+    request_queue.plot_decision_probability_vs_queue_length(bin_width=1)
+    request_queue.plot_diagnostics_error_and_misclassification() #max_queue_length=500)    
+    request_queue.plot_successful_jockey_probability_vs_queue_length() # T=None, bin_width=1)
+    
+    #request_queue.plot_successful_jockey_probability_vs_queue_length(T=None, max_queue_length=500)
+    
+    # request_queue.compare_behavior_rates_by_information_how_often()
+    # request_queue.plot_jockeying_reneging_rates_vs_waiting_time_difference()
     
     # request_queue.plot_reneging_time_vs_queue_length()
     # request_queue.plot_jockeying_time_vs_queue_length()
