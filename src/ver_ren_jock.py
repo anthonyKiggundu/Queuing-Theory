@@ -309,8 +309,47 @@ class Request:
         self.observations=np.array([])
         self.error_loss=1
         self.optimal_learning_achieved=False
+        
+        #  utility accounting:
+        self.served = False      # will be set True when request is served in serveOneRequest
+        self.reneged = False     # set in reqRenege
+        self.jockeyed = False    # set in reqJockey
 
         return
+    
+    
+    def compute_observed_utility(self, c_wait=0.1, c_local=0.5, c_switch=0.2, v_local=0.0):
+        """
+        Compute observed utility for this request given realized outcomes.
+        Parameters:
+            c_wait: cost per unit waiting time
+            c_local: cost/penalty incurred when reneging (local processing cost)
+            c_switch: cost/penalty for jockeying
+            v_local: value recovered from local processing if reneged
+        Returns:
+            utility (float)
+        Uses fields:
+            - self.utility_basic: value if served (v_i)
+            - self.time_entrance, self.time_exit
+            - self.served, self.reneged, self.jockeyed
+        """
+        # Ensure we can compute waiting time
+        if (self.time_exit is None) or (self.time_entrance is None):
+            waiting_time = 0.0
+        else:
+            waiting_time = float(self.time_exit - self.time_entrance)
+
+        # Value if served
+        served_value = float(self.utility_basic) if getattr(self, "served", False) else 0.0
+
+        # Costs
+        waiting_cost = c_wait * waiting_time
+        local_cost = c_local if getattr(self, "reneged", False) else 0.0
+        switch_cost = c_switch if getattr(self, "jockeyed", False) else 0.0
+        local_value = v_local if getattr(self, "reneged", False) else 0.0
+
+        utility = served_value - waiting_cost - local_cost - switch_cost + local_value
+        return utility
     
     
     def renege(self):
@@ -725,6 +764,15 @@ class RequestQueue:
                  
         self.request_position_history = defaultdict(list)  # NEW: key = request_id, value = list of (time, queue_id, position)
         
+        # new runtime cost config (can be a single number or a (min,max) tuple for ranges)
+        cost_wait_range=(0.05,0.2), #None,    # e.g. 0.1 or (0.05,0.2)
+        cost_local_range=(0.3,0.8), #None,   # e.g. 0.5 or (0.3,0.8)
+        cost_switch_range=(0.1,0.4), #None,  # e.g. 0.2 or (0.1,0.4)
+        value_local_range=(0.0,0.5), #None,  # e.g. 0.0 or (0.0,0.5)
+        randomize_costs=False,   # if True pick costs at construction
+        randomize_per_episode=False,  # if True re-pick costs each episode during run()
+        cost_seed=None           # RNG seed for reproducible draws
+        
         self.dispatch_data = {
             "server_1": {
                 "num_requests": [],
@@ -842,13 +890,119 @@ class RequestQueue:
         self.state_subscribers = []  # Requests that use raw queue state        
         self.departure_dispatch_count = 0
         self.intensity_dispatch_count = 0 
-        self.all_requests = []  # Stores all requests throughout the simulation
+        self.all_requests = []  # Stores all requests throughout the simulation            
+        
+        # existing initialization code (unchanged) ...
+        # Add cost / local-value defaults (these can be tuned externally if you want)
+        # Interpret single float as fixed range (min==max)
+        # Helper to normalise a provided range-like or scalar into (min, max)
+        def _norm_range(x, default):
+            if x is None:
+                return (default, default)
+            # If single numeric value
+            if isinstance(x, (int, float, np.floating, np.integer)):
+                return (float(x), float(x))
+            # If a sequence of two numbers
+            try:
+                seq = list(x)
+                if len(seq) == 2:
+                    return (float(seq[0]), float(seq[1]))
+            except Exception:
+                pass
+            # Fallback
+            return (default, default)
+
+        # defaults (previous hard-coded params)
+        default_cost_wait = 0.1
+        default_cost_local = 0.5
+        default_cost_switch = 0.2
+        default_value_local = 0.0
+
+        # normalize provided ranges
+        self.cost_wait_range = _norm_range(cost_wait_range, default_cost_wait)
+        self.cost_local_range = _norm_range(cost_local_range, default_cost_local)
+        self.cost_switch_range = _norm_range(cost_switch_range, default_cost_switch)
+        self.value_local_range = _norm_range(value_local_range, default_value_local)
+
+        # randomization flags and seed
+        self.randomize_costs = bool(randomize_costs)
+        self.randomize_per_episode = bool(randomize_per_episode)
+        self._cost_rng = np.random.default_rng(cost_seed) if cost_seed is not None else np.random.default_rng()
+
+        # active cost params (initialized either to defaults or randomized below)
+        self.cost_wait = default_cost_wait
+        self.cost_local = default_cost_local
+        self.cost_switch = default_cost_switch
+        self.value_local = default_value_local
+
+        # If randomize_costs True but not per-episode, do a single draw at construction
+        if self.randomize_costs and not self.randomize_per_episode:
+            # only randomize now if any range is non-degenerate
+            if any(a != b for (a, b) in [self.cost_wait_range, self.cost_local_range, self.cost_switch_range, self.value_local_range]):
+                self._randomize_costs(log_prefix="[init]")
+
+        # Per-episode accounting (reset at start of each episode in run())
+        self.current_episode_utilities = []   # observed utilities for requests in current episode
+        self.episode_requests_count = 0
+        self.episode_reneges = 0
+        self.episode_jockeys = 0
         
         BROADCAST_INTERVAL = 5
         
         return               
 		
 	
+    def _range_is_random(self, rng_tuple):
+        """
+        Return True if the tuple represents a non-degenerate range (min != max).
+        Accepts None or (min, max).
+        """
+        try:
+            a, b = float(rng_tuple[0]), float(rng_tuple[1])
+            return a != b
+        except Exception:
+            return False
+
+
+    # --- Replace or add this helper inside RequestQueue ---
+    def _randomize_costs(self, log_prefix="[costs]"):
+        """
+        Randomize active cost parameters from the configured ranges using self._cost_rng.
+        Uniform draw between min and max when min != max, otherwise use fixed value.
+        Prints the ranges and chosen values for debugging.
+        Returns chosen dict.
+        """
+        choices = {}
+        a, b = self.cost_wait_range
+        choices["cost_wait"] = float(self._cost_rng.uniform(a, b)) if a != b else float(a)
+
+        a, b = self.cost_local_range
+        choices["cost_local"] = float(self._cost_rng.uniform(a, b)) if a != b else float(a)
+
+        a, b = self.cost_switch_range
+        choices["cost_switch"] = float(self._cost_rng.uniform(a, b)) if a != b else float(a)
+
+        a, b = self.value_local_range
+        choices["value_local"] = float(self._cost_rng.uniform(a, b)) if a != b else float(a)
+
+        # set active costs
+        self.cost_wait = choices["cost_wait"]
+        self.cost_local = choices["cost_local"]
+        self.cost_switch = choices["cost_switch"]
+        self.value_local = choices["value_local"]
+
+        # debug print showing both ranges and chosen values
+        ranges = {
+            "cost_wait_range": self.cost_wait_range,
+            "cost_local_range": self.cost_local_range,
+            "cost_switch_range": self.cost_switch_range,
+            "value_local_range": self.value_local_range
+        }
+        print(colored(f"{log_prefix} ranges: {ranges}", "cyan"))
+        print(colored(f"{log_prefix} chosen: {choices}", "cyan"))
+
+        return choices
+    
 	# NEW: Call this on every queue change
     def track_all_request_positions(self, queue_id):
         """
@@ -908,8 +1062,8 @@ class RequestQueue:
             return 0.0
         jockeys = sum(1 for req in subscribers if getattr(req, 'jockeyed', False))
         
-        return jockeys / len(subscribers)
-        
+        return jockeys / len(subscribers)            
+       
     
     def compute_reneging_rate(self, subscribers):
         """
@@ -1134,13 +1288,29 @@ class RequestQueue:
         else:
             step_loop = range(steps_per_episode)                             
         
-        
-        # srv_1 = self.dict_queues_obj.get("1") # Server1
-        # srv_2 = self.dict_queues_obj.get("2") # Server2               
+        # If user requested randomize_costs at construction but did not request per-episode randomization,
+        # and ranges are non-degenerate, we still consider per-episode randomization to match user expectation.
+        # (But we preserve the original option that allows a single random draw at construction time.)
+        # Determine whether to enforce per-episode draws when ranges are non-degenerate
+        enforce_per_episode_if_ranges = False
+        if self.randomize_costs and not self.randomize_per_episode:
+            if any(a != b for (a, b) in [self.cost_wait_range, self.cost_local_range, self.cost_switch_range, self.value_local_range]):
+                enforce_per_episode_if_ranges = True          
         
         for episode in range(num_episodes):
             print(f"Starting Episode {episode + 1}/{num_episodes}")            
             
+            # if randomization per episode requested, sample new costs here (reproducible via cost_seed)
+            if self.randomize_per_episode or enforce_per_episode_if_ranges:
+                chosen = self._randomize_costs(log_prefix=f"[episode {episode+1}]")
+            elif self.randomize_costs and not self.randomize_per_episode:
+                # previous behavior: randomize once at construction - keep backward compatibility
+                # If costs were not randomized at construction time, do a one-off draw now and log it.
+                if (self.cost_wait == 0.0 and self.cost_local == 0.0 and self.cost_switch == 0.0 and self.value_local == 0.0) or \
+                   (self._range_is_random(self.cost_wait_range) or self._range_is_random(self.cost_local_range) or \
+                    self._range_is_random(self.cost_switch_range) or self._range_is_random(self.value_local_range)):
+                    chosen = self._randomize_costs()
+                
             # Reset environment for the new episode
             state, info = self.env.reset(seed=42)
             total_reward = 0
@@ -1148,11 +1318,24 @@ class RequestQueue:
             episode_start_time = time.time()
             i = 0
             episode_policy_entropy = 0  # Track total policy entropy for the episode
+            
+            # per-episode trackers already initialized in __init__, ensure cleared
+            self.current_episode_utilities = []
+            self.episode_requests_count = 0
+            self.episode_reneges = 0
+            self.episode_jockeys = 0
+            
             #losses = {"actor_loss": 0, "critic_loss": 0, "total_loss": 0}
             srv1_jockeying_rates = []
             srv2_reneging_rates = []
             
             step_rewards = 0
+            
+            # Reset per-episode trackers
+            self.current_episode_utilities = []
+            self.episode_requests_count = 0
+            self.episode_reneges = 0
+            self.episode_jockeys = 0
         
             for i in step_loop: 
                 self.arr_rate = self.objQueues.randomize_arrival_rate()  # Randomize arrival rate
@@ -1309,7 +1492,38 @@ class RequestQueue:
                 #"srv2_average_jockeying_rate": sum(srv2_jockeying_rates) / len(srv2_jockeying_rates) if srv2_jockeying_rates else 0,
                 #"srv2_average_reneging_rate": sum(srv2_reneging_rates) / len(srv2_reneging_rates) if srv2_reneging_rates else 0
             }
+            
+            # Episode-level utility/impatience logging
+            if len(self.current_episode_utilities) > 0:
+                avg_utility_episode = float(np.nanmean(self.current_episode_utilities))
+            else:
+                avg_utility_episode = 0.0
+
+            total_impatience = float(self.episode_reneges + self.episode_jockeys)
+            total_requests = float(self.episode_requests_count if self.episode_requests_count>0 else 1.0)
+            impatience_rate_episode = total_impatience / total_requests
+
+            # add to episode_metrics
+            episode_metrics.update({
+                "avg_tenant_utility": avg_utility_episode,
+                "impatience_rate": impatience_rate_episode,
+                "num_requests_episode": int(self.episode_requests_count),
+                "num_reneges_episode": int(self.episode_reneges),
+                "num_jockeys_episode": int(self.episode_jockeys),
+                # log chosen cost parameters for this episode
+                "cost_wait": float(self.cost_wait),
+                "cost_local": float(self.cost_local),
+                "cost_switch": float(self.cost_switch),
+                "value_local": float(self.value_local)
+            })
+            
             metrics.append(episode_metrics)            
+            
+            # Reset per-episode trackers for next episode
+            self.current_episode_utilities = []
+            self.episode_requests_count = 0
+            self.episode_reneges = 0
+            self.episode_jockeys = 0
             
             # Print episode summary
             print(f"Episode {episode + 1} Summary: Total Reward={episode_metrics['total_reward']}, "
@@ -1544,6 +1758,9 @@ class RequestQueue:
         self.all_requests.append(req)
         # After creating req
         req.server_id = server_id
+        
+        # Per-episode accounting
+        self.episode_requests_count += 1
         
         return req #self.curr_req
 
@@ -1937,9 +2154,84 @@ class RequestQueue:
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()
-        
-        
+
+
     def plot_rates(self):
+        """
+        Plot the comparison of jockeying and reneging rates
+        for each queue for each individual information source subscribed to.
+
+        Modifications:
+        - Use a logarithmic y-axis on each subplot to improve visibility when rates are small.
+        - Add clean major-grid only (no dense minor grid) for readability.
+        - Return the matplotlib Figure object (so callers can save or modify it).
+        """
+        sources = ["Raw Markov State", "NN-based"]
+        queues = ["Server 1", "Server 2"]
+
+        def collect_rates(subscribers, server_id):
+            jockeying_rates = []
+            reneging_rates = []
+            queue_sizes = []
+            reqs = [req for req in subscribers if getattr(req, "server_id", None) == server_id]
+            for i in range(1, len(reqs) + 1):
+                current = reqs[:i]
+                queue_sizes.append(i)
+                num_jockeyed = sum(getattr(req, "jockeyed", False) for req in current)
+                num_reneged = sum(getattr(req, "reneged", False) for req in current)
+                jockeying_rates.append(num_jockeyed / i)
+                reneging_rates.append(num_reneged / i)
+            return queue_sizes, jockeying_rates, reneging_rates
+
+        fig, axes = plt.subplots(len(queues), 2, figsize=(12, 10))
+        eps = 1e-3 #1e-9
+
+        for i, server_id in enumerate(["1", "2"]):
+            queue_sizes_state, jockeying_state, reneging_state = collect_rates(self.state_subscribers, server_id)
+            queue_sizes_nn, jockeying_nn, reneging_nn = collect_rates(self.nn_subscribers, server_id)
+
+            # convert and add eps to avoid zeros
+            jockeying_state_arr = (np.array(jockeying_state) if len(jockeying_state) > 0 else np.array([])) + eps
+            jockeying_nn_arr = (np.array(jockeying_nn) if len(jockeying_nn) > 0 else np.array([])) + eps
+            reneging_state_arr = (np.array(reneging_state) if len(reneging_state) > 0 else np.array([])) + eps
+            reneging_nn_arr = (np.array(reneging_nn) if len(reneging_nn) > 0 else np.array([])) + eps
+
+            ax_jock = axes[i, 0]
+            if len(queue_sizes_state) > 0:
+                ax_jock.plot(queue_sizes_state, jockeying_state_arr, label=f"{sources[0]}", linestyle="dashed", color="blue")
+            if len(queue_sizes_nn) > 0:
+                ax_jock.plot(queue_sizes_nn, jockeying_nn_arr, label=f"{sources[1]}", color="orange")
+            ax_jock.set_title(f"Jockeying Rates - {queues[i]}")
+            ax_jock.set_xlabel("Number of Requests")
+            ax_jock.set_ylabel("Jockeying Rate (log scale)")
+            ax_jock.set_yscale("log")
+            ax_jock.set_ylim(bottom=eps)
+            ax_jock.legend(loc="best", fontsize=12, ncol=2)
+            ax_jock.grid(which="major", linestyle="--", alpha=0.7)
+            ax_jock.minorticks_off()
+
+            ax_renege = axes[i, 1]
+            if len(queue_sizes_state) > 0:
+                ax_renege.plot(queue_sizes_state, reneging_state_arr, label=f"{sources[0]}", linestyle="dashed", color="blue")
+            if len(queue_sizes_nn) > 0:
+                ax_renege.plot(queue_sizes_nn, reneging_nn_arr, label=f"{sources[1]}", color="orange")
+            ax_renege.set_title(f"Reneging Rates - {queues[i]}")
+            ax_renege.set_xlabel("Number of Requests")
+            ax_renege.set_ylabel("Reneging Rate (log scale)")
+            ax_renege.set_yscale("log")
+            ax_renege.set_ylim(bottom=eps)
+            # ax_renege.legend()
+            ax_renege.legend(loc="best", fontsize=12)
+            ax_renege.grid(which="major", linestyle="--", alpha=0.7)
+            ax_renege.minorticks_off()
+
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.savefig("logarithmic_rates_perqueue_length.pdf", format="pdf", dpi=300, bbox_inches="tight")
+        # plt.show()
+        return fig
+
+    
+    def plot_rates_old(self):
         """
         Plot the comparison of jockeying and reneging rates
         for each queue for each individual information source subscribed to.
@@ -2142,6 +2434,13 @@ class RequestQueue:
         reward = 1.0 if time_in_queue < req.service_time else 0.0
         
         len_queue_1, len_queue_2 = self.get_queue_sizes()
+        
+        # Mark as served for utility accounting
+        req.served = True
+
+        # Compute observed utility for request and store in episode list
+        util = req.compute_observed_utility(c_wait=self.cost_wait, c_local=self.cost_local, c_switch=self.cost_switch, v_local=self.value_local)
+        self.current_episode_utilities.append(util)
                               
         
         if "1" in queueID:
@@ -2358,7 +2657,7 @@ class RequestQueue:
         return np.sum(np.random.exponential(scale=1/mu_i, size=k))
         
         
-    def calculate_max_cloud_delay(self, position, queue_intensity, req):
+    def calculate_max_cloud_delay_old(self, position, queue_intensity, req):
         """
         Calculate the max cloud delay based on the position in the queue and the current queue intensity.
         
@@ -2390,6 +2689,26 @@ class RequestQueue:
         # Adjust for queue intensity
         max_cloud_delay = position_delay * (1 + (queue_intensity / intensity_factor))
         
+        return max_cloud_delay
+        
+    
+    def calculate_max_cloud_delay(self, position, queue_intensity, req):
+        # Use M/M/1 expected wait time as the cloud delay
+        if "1" in req.server_id:
+            srv_rate = self.srvrates_1
+        else:
+            srv_rate = self.srvrates_2
+
+        if position is None:
+            position = req.pos_in_queue
+
+        # Expected waiting time: sum of k exponentials = k / mu
+        if srv_rate > 0 and position >= 0:
+            max_cloud_delay = position / srv_rate
+        else:
+            max_cloud_delay = 0.0
+
+        # print(f"DEBUG calculate_max_cloud_delay: position={position}, srv_rate={srv_rate}, max_cloud_delay={max_cloud_delay}")
         return max_cloud_delay
         
         
@@ -2538,6 +2857,11 @@ class RequestQueue:
             req.time_exit = self.time  
             
             self.log_action("Reneged", req, queueid)
+            
+            # compute and record utility for this reneged request
+            util = req.compute_observed_utility(c_wait=self.cost_wait, c_local=self.cost_local, c_switch=self.cost_switch, v_local=self.value_local)
+            self.current_episode_utilities.append(util)
+            self.episode_reneges += 1
         
             # reward = self.getRenegeRewardPenalty(req, time_local_service, time_to_service_end)
             reward = self.get_renege_reward( req, time_local_service)
@@ -2670,6 +2994,12 @@ class RequestQueue:
                 
             req.jockeyed = True
             req.time_exit = self.time  
+            
+            # compute and record utility for this jockeyed request (note: jockeying often means they may re-enter another queue;
+            # if you treat jockeying as immediate exit for utility accounting, keep this. Otherwise, adapt to compute only on final exit)
+            util = req.compute_observed_utility(c_wait=self.cost_wait, c_local=self.cost_local, c_switch=self.cost_switch, v_local=self.value_local)
+            self.current_episode_utilities.append(util)
+            self.episode_jockeys += 1
         
             if  "1" in curr_queue_id: # Server1
                 queue_intensity = self.arr_rate/self.dict_servers_info["1"] # Server1
@@ -2753,9 +3083,11 @@ class RequestQueue:
             jockey_total_expected_time_to_service = remaining_wait_time + self.avg_delay # remaining_wait_time
              
             # print("\n --- jockey expected", jockey_total_expected_time_to_service, " --- until service ",remaining_wait_time)
-            if remaining_wait_time > jockey_total_expected_time_to_service: # self.avg_delay:
+            # if remaining_wait_time > jockey_total_expected_time_to_service: # self.avg_delay:
+            # margin = 0.5  # or any value you want
+            if remaining_wait_time > self.avg_delay: #jockey_total_expected_time_to_service - margin: # or random.random() < 0.1:                
                 decision = True
-                diff_wait = remaining_wait_time - jockey_total_expected_time_to_service
+                diff_wait = remaining_wait_time - self.avg_delay # jockey_total_expected_time_to_service
                 reward = self.reqJockey(curr_queue_id, alt_queue_id, req, req.customerid, serv_rate, remaining_wait_time, self.avg_delay, decision, curr_pose, curr_queue, req.uses_nn, diff_wait)
 
                 if not found:
@@ -2964,6 +3296,67 @@ class RequestQueue:
     def set_equal_service_rates(self, rate):
         self.dict_servers_info["1"] = rate
         self.dict_servers_info["2"] = rate
+        
+        
+    import numpy as np
+
+    def compute_success_table(self, time_limit=10.0):
+        """
+        Compute success rates and standard errors for jockeying and reneging, per server and info source,
+        and format as LaTeX table rows.
+        """
+        # Helper
+        def compute_stats(obs_list, info_flag, server_id):
+            count = 0
+            success = 0
+            for obs in obs_list:
+                req = obs.get("Request")
+                if req is None:
+                    continue
+                uses_nn = obs.get("intensity_based_info", False)
+                srv = str(obs.get("ServerID"))
+                if (uses_nn == info_flag) and (srv == server_id):
+                    time_entrance = getattr(req, 'time_entrance', None)
+                    time_exit = getattr(req, 'time_exit', None)
+                    if time_entrance is not None and time_exit is not None:
+                        count += 1
+                        duration = time_exit - time_entrance
+                        if duration <= time_limit:
+                            success += 1
+            p = success / count if count > 0 else 0.0
+            se = np.sqrt(p * (1 - p) / count) if count > 0 else 0.0
+            return p, se, count
+
+        jockey_obs = self.objObserv.get_jockey_obs()
+        renege_obs = self.objObserv.get_renege_obs()
+
+        # Prepare result rows
+        rows = []
+        for server_id, queue_label in zip(["1", "2"], ["Srv1", "Srv2"]):
+            # Markov (False), then NN (True)
+            for info_flag, info_label in zip([False, True], ["Markov", "NN"]):
+                p_renege, se_renege, n_renege = compute_stats(renege_obs, info_flag, server_id)
+                p_jockey, se_jockey, n_jockey = compute_stats(jockey_obs, info_flag, server_id)
+                n = max(n_renege, n_jockey)
+                rows.append((
+                    queue_label, info_label,
+                    f"${p_renege:.3f}\\pm{se_renege:.4f}$",
+                    f"${p_jockey:.4f}\\pm{se_jockey:.4f}$",
+                    f"{n}"
+                ))
+
+        # Format for LaTeX table
+        print("\\begin{tabular}{llccc}")
+        print("\\toprule")
+        print("Queue & Info & Reneging $p\\pm$SE & Jockey $p\\pm$SE & $N$ \\\\")
+        print("\\midrule")
+        for r in rows:
+            print("    {} & {} & {} & {} & {} \\\\".format(*r))
+        print("\\bottomrule")
+        print("\\end{tabular}")
+        print("\\vspace{2pt}")
+        print("\\footnotesize")
+        print("Binomial standard error (SE) computed as $\\sqrt{p(1-p)/N}$.")
         
         
     def plot_reneging_and_jockeying_rates_vs_queue_size_by_type(self):
@@ -3242,8 +3635,8 @@ class RequestQueue:
 
 
         obs_jockey = self.objObserv.get_jockey_obs()
-        for obs in obs_jockey:
-            print("\n ************ ", obs)
+        #for obs in obs_jockey:
+        #    print("\n ************ ", obs)
             
         queue_lengths = [obs.get("at_pose") for obs in obs_jockey if isinstance(obs, dict) and obs.get("at_pose") is not None]
         unique_ns = sorted(set(queue_lengths))
@@ -3434,6 +3827,36 @@ class RequestQueue:
             #self.plot_reneging_time_vs_queue_length()
             #self.plot_jockeying_time_vs_queue_length()
             # self.plot_queue_intensity_vs_requests()
+            
+            
+    def compute_success_table_with_max_local_utility(self):
+        """
+        Computes the LaTeX table for success rates using the maximum value of generateLocalCompUtility as the time limit.
+        """
+        # Gather all generateLocalCompUtility values for requests in jockey and renege observations
+        jockey_obs = self.objObserv.get_jockey_obs()
+        renege_obs = self.objObserv.get_renege_obs()
+        all_obs = jockey_obs + renege_obs
+
+        comp_utils = []
+        for obs in all_obs:
+            req = obs.get("Request")
+            if req is not None:
+                try:
+                    val = self.generateLocalCompUtility(req)
+                    comp_utils.append(val)
+                except Exception:
+                    continue  # If for any reason utility cannot be computed, skip
+
+        if not comp_utils:
+            print("No generateLocalCompUtility values found.")
+            return
+
+        time_limit = max(comp_utils)
+        print(f"Using max(generateLocalCompUtility) as time_limit: {time_limit:.4f}")
+
+        # Now call your existing success table function with this time limit
+        self.compute_success_table(time_limit=time_limit)
        
 
 class ImpatientTenantEnv:
@@ -3849,6 +4272,329 @@ def visualize_results(metrics_file="simu_results.csv", window=5):
     """
     Visualize simulation results recorded in the metrics file.
 
+    - Single combined rates plot showing both reneging and jockeying for each server.
+    - Logarithmic y-axis with only major grid lines (clean look).
+    - Distinct colors for metric types, line style differentiates servers.
+    - Small epsilon added before log-scaling to avoid zeros.
+    Returns the matplotlib Figure object.
+    """
+    import matplotlib.ticker as mticker
+
+    metrics = pd.read_csv(metrics_file)
+
+    # moving average helper
+    def moving_average(x, w):
+        if w < 2:
+            return x
+        return np.convolve(x, np.ones(w) / w, mode="valid")
+
+    # Smoothed average rewards
+    episodes = metrics["episode"].to_numpy()
+    avg_rewards = metrics.get("average_reward", pd.Series(np.zeros(len(metrics)))).to_numpy()
+    smoothed_rewards = moving_average(avg_rewards, window)
+    episodes_smoothed = episodes[: len(smoothed_rewards)]
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(episodes_smoothed, smoothed_rewards, label=f"Avg Reward (window={window})", marker="o")
+    plt.title("Smoothed Average Rewards per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Average Reward")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # Loss metrics
+    plt.figure(figsize=(10, 5))
+    if "actor_loss" in metrics.columns:
+        plt.plot(metrics["episode"], metrics["actor_loss"], label="Actor Loss", marker="o", color="red")
+    if "critic_loss" in metrics.columns:
+        plt.plot(metrics["episode"], metrics["critic_loss"], label="Critic Loss", marker="o", color="blue")
+    if "total_loss" in metrics.columns:
+        plt.plot(metrics["episode"], metrics["total_loss"], label="Total Loss", marker="o", color="purple")
+    plt.title("Loss Metrics per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Loss")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # Helper to safely fetch a series (returns zeros if missing)
+    def get_series(df, col):
+        return df[col].to_numpy() if col in df.columns else np.zeros(len(df))
+
+    # Server-specific columns
+    srv1_renege_markov = get_series(metrics, "srv1_reneging_rate_markov")
+    srv2_renege_markov = get_series(metrics, "srv2_reneging_rate_markov")
+    srv1_renege_nn = get_series(metrics, "srv1_reneging_rate_nn")
+    srv2_renege_nn = get_series(metrics, "srv2_reneging_rate_nn")
+
+    srv1_jock_markov = get_series(metrics, "srv1_jockeying_rate_markov")
+    srv2_jock_markov = get_series(metrics, "srv2_jockeying_rate_markov")
+    srv1_jock_nn = get_series(metrics, "srv1_jockeying_rate_nn")
+    srv2_jock_nn = get_series(metrics, "srv2_jockeying_rate_nn")
+
+    # Add small epsilon so log scale works even when values are zero
+    eps = 1e-3 #1e-9
+    srv1_renege_markov = srv1_renege_markov + eps
+    srv2_renege_markov = srv2_renege_markov + eps
+    srv1_renege_nn = srv1_renege_nn + eps
+    srv2_renege_nn = srv2_renege_nn + eps
+    srv1_jock_markov = srv1_jock_markov + eps
+    srv2_jock_markov = srv2_jock_markov + eps
+    srv1_jock_nn = srv1_jock_nn + eps
+    srv2_jock_nn = srv2_jock_nn + eps
+
+    # Single combined plot: lines grouped by metric-type color, server distinguished by linestyle
+    fig, ax = plt.subplots(figsize=(14, 7))
+
+    # Colors grouped by metric type:
+    # - Reneging: blue (markov) / red (nn) color family
+    # - Jockeying: purple / cyan (avoids green/yellow)
+    # Server differentiation: solid = srv1, dotted = srv2
+    ax.plot(metrics["episode"], srv1_renege_markov, label="Srv1 Reneging Markov", color="purple", linestyle="-", linewidth=1.5) # tab:
+    ax.plot(metrics["episode"], srv2_renege_markov, label="Srv2 Reneging Markov", color="purple", linestyle=":", linewidth=1.5) # tab:
+    ax.plot(metrics["episode"], srv1_renege_nn, label="Srv1 Reneging NN", color="tab:red", linestyle="-", linewidth=1.5)
+    ax.plot(metrics["episode"], srv2_renege_nn, label="Srv2 Reneging NN", color="tab:red", linestyle=":", linewidth=1.5)
+
+    #ax.plot(metrics["episode"], srv1_jock_markov, label="Srv1 Jockeying Markov", color="tab:purple", linestyle="-", linewidth=1.5)
+    #ax.plot(metrics["episode"], srv2_jock_markov, label="Srv2 Jockeying Markov", color="tab:purple", linestyle=":", linewidth=1.5)
+    #ax.plot(metrics["episode"], srv1_jock_nn, label="Srv1 Jockeying NN", color="tab:cyan", linestyle="-", linewidth=1.5)
+    #ax.plot(metrics["episode"], srv2_jock_nn, label="Srv2 Jockeying NN", color="tab:cyan", linestyle=":", linewidth=1.5)
+    # JOCKEYING lines - DARKER colors (replaced cyan/purple with navy and darkslategray)
+    # navy = dark blue (distinct from tab:blue by linestyle/linewidth), darkslategray = dark gray
+    ax.plot(metrics["episode"], srv1_jock_markov, label="Srv1 Jockeying Markov", color="navy", linestyle="-", linewidth=1.5)
+    ax.plot(metrics["episode"], srv2_jock_markov, label="Srv2 Jockeying Markov", color="navy", linestyle=":", linewidth=1.5)
+    ax.plot(metrics["episode"], srv1_jock_nn, label="Srv1 Jockeying NN", color="green", linestyle="-", linewidth=1.5) # darkslategray
+    ax.plot(metrics["episode"], srv2_jock_nn, label="Srv2 Jockeying NN", color="green", linestyle=":", linewidth=1.5) # darkslategray
+
+    # Log scale, grid (major only), and tick formatting
+    ax.set_yscale("log")
+    ax.set_ylim(bottom=eps)
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Rate (log scale)")
+    ax.set_title("Jockeying and Reneging Rates per Server (log y-axis)")
+    ax.grid(which="major", linestyle="--", linewidth=0.6, color="gray", alpha=0.7)
+    ax.minorticks_off()
+
+    # Use LogLocator for nicer major ticks and scientific formatting
+    ax.yaxis.set_major_locator(mticker.LogLocator(base=10.0))
+    ax.yaxis.set_major_formatter(mticker.LogFormatterSciNotation(base=10.0))
+
+    # ax.legend(loc="best", fontsize="small", ncol=2)
+    ax.legend(loc="best", fontsize=12, ncol=2)
+    plt.tight_layout()
+    plt.savefig("logarithmic_rates_episodic.pdf", format="pdf", dpi=300, bbox_inches="tight")
+    # plt.show()
+
+    return fig
+
+
+def plot_utility_vs_impatience(metrics_file="non_adjusted_metrics.csv", bins=5, annotate=True, annotate_every=1):
+    """
+    Read per-episode metrics CSV and plot average tenant utility vs impatience rate.
+    Points are colored by the cost_wait parameter used that episode (binned into 'bins' intervals).
+    Options:
+      - bins: number of discrete cost intervals (use bins=1 for continuous colormap)
+      - annotate: whether to draw a small text label near each point with the cost_wait value
+      - annotate_every: annotate every N-th point (useful when many episodes)
+    Returns:
+      (fig, ax)
+    """
+    import matplotlib as mpl
+
+    metrics = pd.read_csv(metrics_file)
+    required = {"impatience_rate", "avg_tenant_utility", "cost_wait"}
+    if not required.issubset(set(metrics.columns)):
+        raise ValueError(f"Metrics file must contain columns: {required}. Found: {list(metrics.columns)}")
+
+    x = metrics["impatience_rate"].to_numpy(dtype=float)
+    y = metrics["avg_tenant_utility"].to_numpy(dtype=float)
+    c = metrics["cost_wait"].to_numpy(dtype=float)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # If all cost_wait values identical, use a single color and avoid colorbar issues
+    if np.allclose(c, c[0]):
+        sc = ax.scatter(x, y, c="tab:blue", edgecolor="k", s=70)
+        cbar = None
+    else:
+        cmap = plt.get_cmap("viridis")
+        if bins is None or bins <= 1:
+            # continuous colormap
+            sc = ax.scatter(x, y, c=c, cmap=cmap, edgecolor="k", s=70)
+            cbar = plt.colorbar(sc, ax=ax)
+            cbar.set_label("cost_wait")
+        else:
+            # discrete bins with boundary normalization
+            bounds = np.linspace(c.min(), c.max(), bins + 1)
+            norm = mpl.colors.BoundaryNorm(bounds, ncolors=cmap.N, clip=True)
+            sc = ax.scatter(x, y, c=c, cmap=cmap, norm=norm, edgecolor="k", s=70)
+            cbar = plt.colorbar(mpl.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, boundaries=bounds)
+            # label tick values with bin centers for readability
+            tick_locs = 0.5 * (bounds[:-1] + bounds[1:])
+            cbar.set_ticks(tick_locs)
+            cbar.set_ticklabels([f"{t:.3f}" for t in tick_locs])
+            cbar.set_label("cost_wait (binned)")
+
+    # Annotate points with cost_wait value (small font), but avoid overcrowding by annotate_every
+    if annotate:
+        for idx, (xx, yy, cc) in enumerate(zip(x, y, c)):
+            if idx % annotate_every == 0:
+                ax.annotate(f"{cc:.2f}", (xx, yy),
+                            textcoords="offset points", xytext=(5, 3), ha="left", fontsize=8, alpha=0.9)
+
+    # regression line (optional) + robust plotting niceties
+    try:
+        if len(x) > 1:
+            coeffs = np.polyfit(x, y, 1)
+            xs = np.linspace(np.nanmin(x), np.nanmax(x), 200)
+            ax.plot(xs, np.polyval(coeffs, xs), color="tab:orange", linestyle="--", label=f"Linear fit (slope={coeffs[0]:.3f})")
+    except Exception:
+        pass
+
+    ax.set_xlabel("Impatience Rate (reneges + jockeys) / requests")
+    ax.set_ylabel("Average Tenant Utility (per episode)")
+    ax.set_title("Average Tenant Utility vs Impatience Rate\n(points colored by cost_wait)")
+    ax.grid(True, linestyle="--", alpha=0.6)
+    ax.legend(loc="best", fontsize=12, ncol=2)
+    plt.tight_layout()
+    plt.savefig("impatience_utility_episodic.pdf", format="pdf", dpi=300, bbox_inches="tight")
+    plt.tight_layout()
+    return fig, ax
+
+
+def visualize_results_broken(metrics_file="simu_results.csv", window=5):
+    """
+    Visualize simulation results recorded in the metrics file.
+
+    Changes in this version:
+    - Plot reneging and jockeying rates separately for each server (srv1, srv2)
+      instead of plotting aggregated means.
+    - Use a logarithmic y-axis for the rate plots.
+    - Use major-grid only (cleaner) to avoid the dense dotted grid on log scale.
+    - Add a tiny epsilon before applying log scale so zero values don't cause errors.
+    """
+    import matplotlib.ticker as mticker
+
+    metrics = pd.read_csv(metrics_file)
+
+    # moving average helper
+    def moving_average(x, w):
+        if w < 2:
+            return x
+        return np.convolve(x, np.ones(w) / w, mode="valid")
+
+    # Smoothed average rewards (same as before)
+    avg_rewards = metrics["average_reward"].to_numpy()
+    smoothed_rewards = moving_average(avg_rewards, window)
+    episodes = metrics["episode"].to_numpy()
+    episodes_smoothed = episodes[: len(smoothed_rewards)]
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(episodes_smoothed, smoothed_rewards, label=f"Avg Reward (window={window})", marker="o")
+    plt.title("Smoothed Average Rewards per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Average Reward")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # Loss metrics (unchanged)
+    plt.figure(figsize=(10, 6))
+    if "actor_loss" in metrics.columns:
+        plt.plot(metrics["episode"], metrics["actor_loss"], label="Actor Loss", marker="o", color="red")
+    if "critic_loss" in metrics.columns:
+        plt.plot(metrics["episode"], metrics["critic_loss"], label="Critic Loss", marker="o", color="blue")
+    if "total_loss" in metrics.columns:
+        plt.plot(metrics["episode"], metrics["total_loss"], label="Total Loss", marker="o", color="purple")
+    plt.title("Loss Metrics per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Loss")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # --- Rates per server (log y-axis) ---
+    # helper to safely get series (returns zeros if missing)
+    def get_series(df, col):
+        if col in df.columns:
+            return df[col].to_numpy()
+        else:
+            return np.zeros(len(df))
+
+    # read server-specific columns
+    srv1_renege_markov = get_series(metrics, "srv1_reneging_rate_markov")
+    srv2_renege_markov = get_series(metrics, "srv2_reneging_rate_markov")
+    srv1_renege_nn = get_series(metrics, "srv1_reneging_rate_nn")
+    srv2_renege_nn = get_series(metrics, "srv2_reneging_rate_nn")
+
+    srv1_jock_markov = get_series(metrics, "srv1_jockeying_rate_markov")
+    srv2_jock_markov = get_series(metrics, "srv2_jockeying_rate_markov")
+    srv1_jock_nn = get_series(metrics, "srv1_jockeying_rate_nn")
+    srv2_jock_nn = get_series(metrics, "srv2_jockeying_rate_nn")
+
+    # epsilon to avoid zeros on log scale
+    eps = 1e-9
+    srv1_renege_markov = srv1_renege_markov + eps
+    srv2_renege_markov = srv2_renege_markov + eps
+    srv1_renege_nn = srv1_renege_nn + eps
+    srv2_renege_nn = srv2_renege_nn + eps
+    srv1_jock_markov = srv1_jock_markov + eps
+    srv2_jock_markov = srv2_jock_markov + eps
+    srv1_jock_nn = srv1_jock_nn + eps
+    srv2_jock_nn = srv2_jock_nn + eps
+
+    # Create two subplots: one for reneging (srv1 & srv2), one for jockeying (srv1 & srv2)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharex=True)
+    ax_r, ax_j = axes
+
+    # RENEGING: server 1 and server 2, markov vs nn
+    ax_r.plot(metrics["episode"], srv1_renege_markov, label="Srv1 Reneging Markov", color="tab:blue", linestyle="-")
+    ax_r.plot(metrics["episode"], srv1_renege_nn, label="Srv1 Reneging NN", color="tab:red", linestyle="--")
+    ax_r.plot(metrics["episode"], srv2_renege_markov, label="Srv2 Reneging Markov", color="tab:green", linestyle="-")
+    ax_r.plot(metrics["episode"], srv2_renege_nn, label="Srv2 Reneging NN", color="tab:orange", linestyle="--")
+    ax_r.set_yscale("log")
+    ax_r.set_ylim(bottom=eps)
+    ax_r.set_xlabel("Episode")
+    ax_r.set_ylabel("Reneging Rate (log scale)")
+    ax_r.set_title("Reneging Rates per Server (log y-axis)")
+    # Major grid only for clarity
+    ax_r.grid(which="major", linestyle="--", linewidth=0.6, color="gray", alpha=0.7)
+    ax_r.minorticks_off()
+    ax_r.legend()
+
+    # JOCKEYING: server 1 and server 2, markov vs nn
+    ax_j.plot(metrics["episode"], srv1_jock_markov, label="Srv1 Jockeying Markov", color="tab:purple", linestyle="-")
+    ax_j.plot(metrics["episode"], srv1_jock_nn, label="Srv1 Jockeying NN", color="tab:cyan", linestyle="--")
+    ax_j.plot(metrics["episode"], srv2_jock_markov, label="Srv2 Jockeying Markov", color="tab:brown", linestyle="-")
+    ax_j.plot(metrics["episode"], srv2_jock_nn, label="Srv2 Jockeying NN", color="tab:pink", linestyle="--")
+    ax_j.set_yscale("log")
+    ax_j.set_ylim(bottom=eps)
+    ax_j.set_xlabel("Episode")
+    ax_j.set_ylabel("Jockeying Rate (log scale)")
+    ax_j.set_title("Jockeying Rates per Server (log y-axis)")
+    ax_j.grid(which="major", linestyle="--", linewidth=0.6, color="gray", alpha=0.7)
+    ax_j.minorticks_off()
+    ax_j.legend()
+
+    # Improve tick formatting on y axis (show powers of 10)
+    import matplotlib.ticker as mticker
+    ax_r.yaxis.set_major_locator(mticker.LogLocator(base=10.0))
+    ax_j.yaxis.set_major_locator(mticker.LogLocator(base=10.0))
+
+    plt.suptitle("Reneging and Jockeying Rates per Server (log y-axis)")
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.show()
+    
+
+def visualize_results_original(metrics_file="simu_results.csv", window=5):
+    """
+    Visualize simulation results recorded in the metrics file.
+
     Args:
         metrics_file (str): Path to the CSV file containing episode metrics.
 
@@ -3916,27 +4662,27 @@ def visualize_results(metrics_file="simu_results.csv", window=5):
 
     # Plot Jockeying and Reneging Rates
     # Plot Reneging Rates
-    #plt.figure(figsize=(12,7))
+    plt.figure(figsize=(12,7))
 
     # Reneging rates comparison
-    #plt.plot(metrics['episode'], metrics['srv1_reneging_rate_markov'], label='Srv1 Reneging Markov', color='blue', linestyle='-')
-    #plt.plot(metrics['episode'], metrics['srv2_reneging_rate_markov'], label='Srv2 Reneging Markov', color='blue', linestyle='--')
-    #plt.plot(metrics['episode'], metrics['srv1_reneging_rate_nn'], label='Srv1 Reneging NN', color='red', linestyle='-')
-    #plt.plot(metrics['episode'], metrics['srv2_reneging_rate_nn'], label='Srv2 Reneging NN', color='red', linestyle='--')
+    plt.plot(metrics['episode'], metrics['srv1_reneging_rate_markov'], label='Srv1 Reneging Markov', color='blue', linestyle='-')
+    plt.plot(metrics['episode'], metrics['srv2_reneging_rate_markov'], label='Srv2 Reneging Markov', color='blue', linestyle='--')
+    plt.plot(metrics['episode'], metrics['srv1_reneging_rate_nn'], label='Srv1 Reneging NN', color='red', linestyle='-')
+    plt.plot(metrics['episode'], metrics['srv2_reneging_rate_nn'], label='Srv2 Reneging NN', color='red', linestyle='--')
 
     # Jockeying rates comparison
-    #plt.plot(metrics['episode'], metrics['srv1_jockeying_rate_markov'], label='Srv1 Jockeying Markov', color='green', linestyle='-')
-    #plt.plot(metrics['episode'], metrics['srv2_jockeying_rate_markov'], label='Srv2 Jockeying Markov', color='green', linestyle='--')
-    #plt.plot(metrics['episode'], metrics['srv1_jockeying_rate_nn'], label='Srv1 Jockeying NN', color='orange', linestyle='-')
-    #plt.plot(metrics['episode'], metrics['srv2_jockeying_rate_nn'], label='Srv2 Jockeying NN', color='orange', linestyle='--')
+    plt.plot(metrics['episode'], metrics['srv1_jockeying_rate_markov'], label='Srv1 Jockeying Markov', color='green', linestyle='-')
+    plt.plot(metrics['episode'], metrics['srv2_jockeying_rate_markov'], label='Srv2 Jockeying Markov', color='green', linestyle='--')
+    plt.plot(metrics['episode'], metrics['srv1_jockeying_rate_nn'], label='Srv1 Jockeying NN', color='orange', linestyle='-')
+    plt.plot(metrics['episode'], metrics['srv2_jockeying_rate_nn'], label='Srv2 Jockeying NN', color='orange', linestyle='--')
 
-    #plt.xlabel('Episode')
-    #plt.ylabel('Rate')
-    #plt.title('Comparison of Jockeying and Reneging Rates: NN vs Markov')
-    #plt.legend()
-    #plt.grid(True)
-    #plt.tight_layout()
-    #plt.show()    
+    plt.xlabel('Episode')
+    plt.ylabel('Rate')
+    plt.title('Comparison of Jockeying and Reneging Rates: NN vs Markov')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()    
 
     # Calculate mean rates per source per episode
     #metrics['mean_reneging_markov'] = metrics[['srv1_reneging_rate_markov', 'srv2_reneging_rate_markov']].mean(axis=1)
@@ -4009,7 +4755,7 @@ def main():
     
     # These are the number of iterations also labelled as step in the simulation
     # Ideally each step corresponds to an arrival and processing iteration
-    duration = 10     
+    duration = 8     
     
     # Start the scheduler
     #scheduler_thread = threading.Thread(target=request_queue.run(duration, env, adjust_service_rate=False, save_to_file="non_adjusted_metrics.csv")) # requestObj.run_scheduler) #
@@ -4018,7 +4764,7 @@ def main():
         args=(duration, env),
         kwargs={
             'adjust_service_rate': False,
-            'num_episodes': 150, #   <-- set to 120 episodes, or any number > 100
+            'num_episodes': 5, #   <-- set to 120 episodes, or any number > 100
             'save_to_file': "non_adjusted_metrics.csv"
             # "arrival_rates": env.arrival_rates
         }
@@ -4027,15 +4773,17 @@ def main():
     scheduler_thread.join()  # <-- Wait until simulation is done then plot below functions
     
     # Let us visualize some results
-    # visualize_results(metrics_file="simu_results.csv") # has the rewards metrics, and figure 2 in the paper
+    visualize_results(metrics_file="simu_results.csv") # has the rewards metrics, and figure 2 in the paper
     request_queue.plot_rates() # change me not to use dispatch_data but use self.subscribers variables    
     request_queue.compare_rates_by_information_source() # _with_graph
     # request_queue.plot_asymptotic_behavior_of_jockeying_and_reneging(max_queue_length=1000)
     request_queue.plot_reneging_and_jockeying_rates_vs_queue_size_by_type() # plot_reneging_and_jockeying_rates_vs_queue_size()
     
-    request_queue.plot_decision_probability_vs_queue_length(bin_width=1)
-    request_queue.plot_diagnostics_error_and_misclassification() #max_queue_length=500)    
-    request_queue.plot_successful_jockey_probability_vs_queue_length() # T=None, bin_width=1)
+    # request_queue.plot_decision_probability_vs_queue_length(bin_width=1)
+    # request_queue.plot_diagnostics_error_and_misclassification() #max_queue_length=500)    
+    # request_queue.plot_successful_jockey_probability_vs_queue_length() # T=None, bin_width=1)
+    
+    request_queue.compute_success_table_with_max_local_utility()
     
     #request_queue.plot_successful_jockey_probability_vs_queue_length(T=None, max_queue_length=500)
     
