@@ -318,40 +318,6 @@ class Request:
         return
     
     
-    def compute_observed_utility(self, c_wait=0.1, c_local=0.5, c_switch=0.2, v_local=0.0):
-        """
-        Compute observed utility for this request given realized outcomes.
-        Parameters:
-            c_wait: cost per unit waiting time
-            c_local: cost/penalty incurred when reneging (local processing cost)
-            c_switch: cost/penalty for jockeying
-            v_local: value recovered from local processing if reneged
-        Returns:
-            utility (float)
-        Uses fields:
-            - self.utility_basic: value if served (v_i)
-            - self.time_entrance, self.time_exit
-            - self.served, self.reneged, self.jockeyed
-        """
-        # Ensure we can compute waiting time
-        if (self.time_exit is None) or (self.time_entrance is None):
-            waiting_time = 0.0
-        else:
-            waiting_time = float(self.time_exit - self.time_entrance)
-
-        # Value if served
-        served_value = float(self.utility_basic) if getattr(self, "served", False) else 0.0
-
-        # Costs
-        waiting_cost = c_wait * waiting_time
-        local_cost = c_local if getattr(self, "reneged", False) else 0.0
-        switch_cost = c_switch if getattr(self, "jockeyed", False) else 0.0
-        local_value = v_local if getattr(self, "reneged", False) else 0.0
-
-        utility = served_value - waiting_cost - local_cost - switch_cost + local_value
-        return utility
-    
-    
     def renege(self):
         """Request leaves the queue before service."""
         self.reneged = True
@@ -751,6 +717,176 @@ class A2CAgent:
 
         # Return scalars (detached)
         return actor_loss.item(), critic_loss.item(), total_loss.item()
+    
+    
+    def update_vers_(self):
+        """
+        Performs the A2C update using the accumulated log_probs, values, and rewards.
+        Uses GAE for advantage estimation, normalizes advantages, and logs small
+        V vs TD-target samples periodically for debugging.
+
+        Returns:
+            actor_loss (float), critic_loss (float), total_loss (float)
+        """
+    
+        import torch.nn.functional as F
+
+        if not self.log_probs or not self.values or not self.rewards:
+            return 0.0, 0.0, 0.0
+
+        # Convert lists to tensors
+        log_probs = torch.stack(self.log_probs)                         # shape (T,)
+        # values = torch.stack(self.values).squeeze(-1)                   # shape (T,)
+        # --- ensure `values` is a 1D tensor of shape (T,) ---
+        values = torch.stack(self.values)  # original stacked tensor
+        # collapse any trailing singleton dims and ensure 1D
+        if values.dim() > 1:
+            # collapse trailing dims into a single value per timestep
+            values = values.view(values.size(0), -1)
+            if values.size(1) == 1:
+                values = values.squeeze(-1)
+            else:
+                # if critic returns >1 values per state, reduce to scalar (mean) per timestep
+                values = values.mean(dim=1)
+        else:
+            values = values.view(-1)
+    
+        rewards = torch.tensor(self.rewards, dtype=torch.float32, device=values.device)  # shape (T,)
+
+        T = rewards.shape[0]
+
+        # Build next_values for every timestep:
+        # - if a bootstrap value for the last next-state is available (self.last_state and self.critic),
+        #   compute it with the critic; otherwise assume 0 for the terminal bootstrap.
+        # compute last_val robustly (scalar tensor)
+        if hasattr(self, "critic") and hasattr(self, "last_state") and self.last_state is not None:
+            with torch.no_grad():
+                last_state = self.last_state.to(values.device)
+                # ensure last_state has batch dim
+                if last_state.ndim == len(values.shape):   # e.g., values is (T,), last_state should be (state_dim,)
+                    last_state = last_state.unsqueeze(0)
+                last_val = self.critic(last_state)
+                # collapse to scalar
+                if last_val.dim() > 1:
+                    last_val = last_val.view(-1)
+                    if last_val.numel() == 1:
+                        last_val = last_val.squeeze()
+                    else:
+                        last_val = last_val.mean()
+                else:
+                    last_val = last_val.view(-1)[0]
+        else:
+            last_val = torch.tensor(0.0, dtype=torch.float32, device=values.device)
+
+        # now both are 1D scalars: values is (T,), last_val is scalar tensor
+        if values.numel() > 1:
+            next_values = torch.cat([values[1:], last_val.unsqueeze(0)], dim=0)  # shape (T,)
+        else:
+            # single-timestep case
+            next_values = last_val.unsqueeze(0)
+
+        # Dones: if update() is called at episode end, mark last step as terminal.
+        # If you have per-step dones stored, replace this with that tensor.
+        dones = torch.zeros_like(rewards, dtype=torch.float32, device=values.device)
+        dones[-1] = 1.0
+
+        # Compute GAE advantages and returns (requires helper compute_gae_torch to be defined elsewhere in file)
+        gamma = getattr(self, "gamma", 0.99)
+        lam = getattr(self, "gae_lambda", 0.97)
+        advantages, returns = self.compute_gae_torch(rewards, values.detach(), next_values.detach(), dones,
+                                           gamma=gamma, lam=lam, device=values.device)
+
+        # Normalize advantages before using them for the actor update
+        advantages = self.normalize_advantages_torch(advantages)
+
+        # Actor loss (policy gradient) using normalized advantages
+        actor_loss = - (log_probs * advantages.detach()).mean()
+
+        # Critic loss (value regression) -- use returns as target (detach returns)
+        critic_loss = F.mse_loss(values, returns.detach())
+
+        # Total loss (keep original weighting: 0.5 on critic loss)
+        value_loss_coeff = getattr(self, "value_loss_coef", 0.5)
+        total_loss = actor_loss + value_loss_coeff * critic_loss
+
+        # Backprop and optimize (optionally clip gradients if configured)
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        # optional gradient clipping
+        if hasattr(self, "grad_clip_norm") and self.grad_clip_norm is not None:
+            torch.nn.utils.clip_grad_norm_(self.parameters(), self.grad_clip_norm)
+        self.optimizer.step()
+
+        # Increment and use an internal counter for periodic logging
+        if not hasattr(self, "update_count"):
+            self.update_count = 0
+        self.update_count += 1
+        log_interval = getattr(self, "log_interval", 10)
+        if (self.update_count % log_interval) == 0:
+            # log sample V preds vs TD targets for debugging (requires log_v_vs_td_samples to exist)
+            try:
+                self.log_v_vs_td_samples(values, returns, n_samples=6, prefix=f"[update {self.update_count}]")
+            except Exception:
+                # silently ignore if logging helper not present
+                pass
+
+        # Clear buffers for next episode
+        self.log_probs = []
+        self.values = []
+        self.rewards = []
+
+        # Return scalars (detached)
+        return actor_loss.item(), critic_loss.item(), total_loss.item()
+    
+    
+    def compute_gae_torch(self, rewards, values, next_values, dones, gamma=0.99, lam=0.97, device='cpu'):
+        """
+        Compute GAE (PyTorch tensors).
+        Args:
+          rewards: tensor shape (T,)
+          values: tensor shape (T,)
+          next_values: tensor shape (T,)
+          dones: tensor shape (T,) floats (1.0=done, 0.0=not done)
+        Returns:
+          advantages: tensor shape (T,)
+         returns: tensor shape (T,)
+        """
+        T = rewards.shape[0]
+        advantages = torch.zeros(T, dtype=torch.float32, device=device)
+        lastgaelam = 0.0
+        for t in reversed(range(T)):
+            nonterminal = 1.0 - dones[t]
+            delta = rewards[t] + gamma * next_values[t] * nonterminal - values[t]
+            lastgaelam = delta + gamma * lam * nonterminal * lastgaelam
+            advantages[t] = lastgaelam
+        returns = advantages + values
+        return advantages, returns
+
+    def normalize_advantages_torch(self, advantages, eps=1e-8):
+        adv = advantages
+        mean = adv.mean()
+        std = adv.std()
+        return (adv - mean) / (std + eps)
+    
+    
+    def log_v_vs_td_samples(self, values, returns, n_samples=5, prefix="[Vlog]"):
+        """
+        Print small samples of predicted values and TD targets/returns for debugging.
+        values: tensor of V(s) predictions (T,)
+        returns: tensor of TD targets (T,) computed as rewards + gamma*V(next)
+        """
+        try:
+            vals = values.detach().cpu().numpy()
+            tars = returns.detach().cpu().numpy()
+        except Exception:
+            # fallback if tensors are already on cpu
+            vals = values.cpu().numpy() if hasattr(values, 'cpu') else np.array(values)
+            tars = returns.cpu().numpy() if hasattr(returns, 'cpu') else np.array(returns)
+
+        n = min(n_samples, len(vals))
+        ts = ", ".join([f"{tars[i]:.4f}" for i in range(n)])
+        vs = ", ".join([f"{vals[i]:.4f}" for i in range(n)])
+        print(f"{prefix} sample TD_targets: [{ts}] | V_preds: [{vs}] | mean_adv={float(np.mean(tars-vals)):.4f} | time={time.strftime('%H:%M:%S')}")
 
 
 class RequestQueue:
@@ -763,15 +899,6 @@ class RequestQueue:
                  para_local_delay=[1.0,2.0,10.0], truncation_length=np.Inf, preempt_timeout=np.Inf, time_res=1.0, batchid=np.int16, uses_nn=False, uses_intensity_based = False): # Dispatched
                  
         self.request_position_history = defaultdict(list)  # NEW: key = request_id, value = list of (time, queue_id, position)
-        
-        # new runtime cost config (can be a single number or a (min,max) tuple for ranges)
-        cost_wait_range=(0.05,0.2), #None,    # e.g. 0.1 or (0.05,0.2)
-        cost_local_range=(0.3,0.8), #None,   # e.g. 0.5 or (0.3,0.8)
-        cost_switch_range=(0.1,0.4), #None,  # e.g. 0.2 or (0.1,0.4)
-        value_local_range=(0.0,0.5), #None,  # e.g. 0.0 or (0.0,0.5)
-        randomize_costs=False,   # if True pick costs at construction
-        randomize_per_episode=False,  # if True re-pick costs each episode during run()
-        cost_seed=None           # RNG seed for reproducible draws
         
         self.dispatch_data = {
             "server_1": {
@@ -892,54 +1019,11 @@ class RequestQueue:
         self.intensity_dispatch_count = 0 
         self.all_requests = []  # Stores all requests throughout the simulation            
         
-        # existing initialization code (unchanged) ...
         # Add cost / local-value defaults (these can be tuned externally if you want)
-        # Interpret single float as fixed range (min==max)
-        # Helper to normalise a provided range-like or scalar into (min, max)
-        def _norm_range(x, default):
-            if x is None:
-                return (default, default)
-            # If single numeric value
-            if isinstance(x, (int, float, np.floating, np.integer)):
-                return (float(x), float(x))
-            # If a sequence of two numbers
-            try:
-                seq = list(x)
-                if len(seq) == 2:
-                    return (float(seq[0]), float(seq[1]))
-            except Exception:
-                pass
-            # Fallback
-            return (default, default)
-
-        # defaults (previous hard-coded params)
-        default_cost_wait = 0.1
-        default_cost_local = 0.5
-        default_cost_switch = 0.2
-        default_value_local = 0.0
-
-        # normalize provided ranges
-        self.cost_wait_range = _norm_range(cost_wait_range, default_cost_wait)
-        self.cost_local_range = _norm_range(cost_local_range, default_cost_local)
-        self.cost_switch_range = _norm_range(cost_switch_range, default_cost_switch)
-        self.value_local_range = _norm_range(value_local_range, default_value_local)
-
-        # randomization flags and seed
-        self.randomize_costs = bool(randomize_costs)
-        self.randomize_per_episode = bool(randomize_per_episode)
-        self._cost_rng = np.random.default_rng(cost_seed) if cost_seed is not None else np.random.default_rng()
-
-        # active cost params (initialized either to defaults or randomized below)
-        self.cost_wait = default_cost_wait
-        self.cost_local = default_cost_local
-        self.cost_switch = default_cost_switch
-        self.value_local = default_value_local
-
-        # If randomize_costs True but not per-episode, do a single draw at construction
-        if self.randomize_costs and not self.randomize_per_episode:
-            # only randomize now if any range is non-degenerate
-            if any(a != b for (a, b) in [self.cost_wait_range, self.cost_local_range, self.cost_switch_range, self.value_local_range]):
-                self._randomize_costs(log_prefix="[init]")
+        self.cost_wait = 0.1       # per-unit waiting cost for tenants (tunable)
+        self.cost_local = 0.5      # cost of processing locally after reneging (tunable)
+        self.cost_switch = 0.2     # cost of jockeying (tunable)
+        self.value_local = 0.0     # value recovered from local processing if any (tunable)
 
         # Per-episode accounting (reset at start of each episode in run())
         self.current_episode_utilities = []   # observed utilities for requests in current episode
@@ -952,57 +1036,6 @@ class RequestQueue:
         return               
 		
 	
-    def _range_is_random(self, rng_tuple):
-        """
-        Return True if the tuple represents a non-degenerate range (min != max).
-        Accepts None or (min, max).
-        """
-        try:
-            a, b = float(rng_tuple[0]), float(rng_tuple[1])
-            return a != b
-        except Exception:
-            return False
-
-
-    # --- Replace or add this helper inside RequestQueue ---
-    def _randomize_costs(self, log_prefix="[costs]"):
-        """
-        Randomize active cost parameters from the configured ranges using self._cost_rng.
-        Uniform draw between min and max when min != max, otherwise use fixed value.
-        Prints the ranges and chosen values for debugging.
-        Returns chosen dict.
-        """
-        choices = {}
-        a, b = self.cost_wait_range
-        choices["cost_wait"] = float(self._cost_rng.uniform(a, b)) if a != b else float(a)
-
-        a, b = self.cost_local_range
-        choices["cost_local"] = float(self._cost_rng.uniform(a, b)) if a != b else float(a)
-
-        a, b = self.cost_switch_range
-        choices["cost_switch"] = float(self._cost_rng.uniform(a, b)) if a != b else float(a)
-
-        a, b = self.value_local_range
-        choices["value_local"] = float(self._cost_rng.uniform(a, b)) if a != b else float(a)
-
-        # set active costs
-        self.cost_wait = choices["cost_wait"]
-        self.cost_local = choices["cost_local"]
-        self.cost_switch = choices["cost_switch"]
-        self.value_local = choices["value_local"]
-
-        # debug print showing both ranges and chosen values
-        ranges = {
-            "cost_wait_range": self.cost_wait_range,
-            "cost_local_range": self.cost_local_range,
-            "cost_switch_range": self.cost_switch_range,
-            "value_local_range": self.value_local_range
-        }
-        print(colored(f"{log_prefix} ranges: {ranges}", "cyan"))
-        print(colored(f"{log_prefix} chosen: {choices}", "cyan"))
-
-        return choices
-    
 	# NEW: Call this on every queue change
     def track_all_request_positions(self, queue_id):
         """
@@ -1062,7 +1095,41 @@ class RequestQueue:
             return 0.0
         jockeys = sum(1 for req in subscribers if getattr(req, 'jockeyed', False))
         
-        return jockeys / len(subscribers)            
+        return jockeys / len(subscribers)
+    
+    
+    def compute_observed_utility(self, c_wait=0.1, c_local=0.5, c_switch=0.2, v_local=0.0):
+        """
+        Compute observed utility for this request given realized outcomes.
+        Parameters:
+            c_wait: cost per unit waiting time
+            c_local: cost/penalty incurred when reneging (local processing cost)
+            c_switch: cost/penalty for jockeying
+            v_local: value recovered from local processing if reneged
+        Returns:
+            utility (float)
+        Uses fields:
+            - self.utility_basic: value if served (v_i)
+            - self.time_entrance, self.time_exit
+            - self.served, self.reneged, self.jockeyed
+        """
+        # Ensure we can compute waiting time
+        if (self.time_exit is None) or (self.time_entrance is None):
+            waiting_time = 0.0
+        else:
+            waiting_time = float(self.time_exit - self.time_entrance)
+
+        # Value if served
+        served_value = float(self.utility_basic) if getattr(self, "served", False) else 0.0
+
+        # Costs
+        waiting_cost = c_wait * waiting_time
+        local_cost = c_local if getattr(self, "reneged", False) else 0.0
+        switch_cost = c_switch if getattr(self, "jockeyed", False) else 0.0
+        local_value = v_local if getattr(self, "reneged", False) else 0.0
+
+        utility = served_value - waiting_cost - local_cost - switch_cost + local_value
+        return utility
        
     
     def compute_reneging_rate(self, subscribers):
@@ -1260,7 +1327,7 @@ class RequestQueue:
         }
 
 
-    def run(self, duration, env, adjust_service_rate, num_episodes=10, progress_bar=True, progress_log=True, save_to_file="simu_results.csv"):
+    def run(self, duration, env, adjust_service_rate, save_to_file, num_episodes=10, progress_bar=True, progress_log=True): #="simu_results.csv"):
         """
         Run the simulation with episodic training.
 
@@ -1273,11 +1340,10 @@ class RequestQueue:
         Returns:
             None
         """
-        
         self.env = env
         steps_per_episode = int(duration / self.time_res)
         metrics = []  # List to store metrics for all episodes
-        save_to_file = "simu_results.csv"
+        self.save_to_file = save_to_file #"simu_results.csv"
         
         actor_losses = []
         critic_losses = []
@@ -1288,29 +1354,15 @@ class RequestQueue:
         else:
             step_loop = range(steps_per_episode)                             
         
-        # If user requested randomize_costs at construction but did not request per-episode randomization,
-        # and ranges are non-degenerate, we still consider per-episode randomization to match user expectation.
-        # (But we preserve the original option that allows a single random draw at construction time.)
-        # Determine whether to enforce per-episode draws when ranges are non-degenerate
-        enforce_per_episode_if_ranges = False
-        if self.randomize_costs and not self.randomize_per_episode:
-            if any(a != b for (a, b) in [self.cost_wait_range, self.cost_local_range, self.cost_switch_range, self.value_local_range]):
-                enforce_per_episode_if_ranges = True          
         
+        print ("SAVING DESTINATION: ", self.save_to_file)
+
         for episode in range(num_episodes):
             print(f"Starting Episode {episode + 1}/{num_episodes}")            
-            
-            # if randomization per episode requested, sample new costs here (reproducible via cost_seed)
-            if self.randomize_per_episode or enforce_per_episode_if_ranges:
-                chosen = self._randomize_costs(log_prefix=f"[episode {episode+1}]")
-            elif self.randomize_costs and not self.randomize_per_episode:
-                # previous behavior: randomize once at construction - keep backward compatibility
-                # If costs were not randomized at construction time, do a one-off draw now and log it.
-                if (self.cost_wait == 0.0 and self.cost_local == 0.0 and self.cost_switch == 0.0 and self.value_local == 0.0) or \
-                   (self._range_is_random(self.cost_wait_range) or self._range_is_random(self.cost_local_range) or \
-                    self._range_is_random(self.cost_switch_range) or self._range_is_random(self.value_local_range)):
-                    chosen = self._randomize_costs()
-                
+
+            unique_k_i_values = set()
+            episodes_with_backlog = defaultdict(list)
+
             # Reset environment for the new episode
             state, info = self.env.reset(seed=42)
             total_reward = 0
@@ -1318,24 +1370,11 @@ class RequestQueue:
             episode_start_time = time.time()
             i = 0
             episode_policy_entropy = 0  # Track total policy entropy for the episode
-            
-            # per-episode trackers already initialized in __init__, ensure cleared
-            self.current_episode_utilities = []
-            self.episode_requests_count = 0
-            self.episode_reneges = 0
-            self.episode_jockeys = 0
-            
             #losses = {"actor_loss": 0, "critic_loss": 0, "total_loss": 0}
             srv1_jockeying_rates = []
             srv2_reneging_rates = []
             
             step_rewards = 0
-            
-            # Reset per-episode trackers
-            self.current_episode_utilities = []
-            self.episode_requests_count = 0
-            self.episode_reneges = 0
-            self.episode_jockeys = 0
         
             for i in step_loop: 
                 self.arr_rate = self.objQueues.randomize_arrival_rate()  # Randomize arrival rate
@@ -1509,14 +1548,28 @@ class RequestQueue:
                 "impatience_rate": impatience_rate_episode,
                 "num_requests_episode": int(self.episode_requests_count),
                 "num_reneges_episode": int(self.episode_reneges),
-                "num_jockeys_episode": int(self.episode_jockeys),
-                # log chosen cost parameters for this episode
-                "cost_wait": float(self.cost_wait),
-                "cost_local": float(self.cost_local),
-                "cost_switch": float(self.cost_switch),
-                "value_local": float(self.value_local)
+                "num_jockeys_episode": int(self.episode_jockeys)
             })
             
+            errors = []
+            backlogs = sorted(unique_k_i_values)
+
+            for k_i in backlogs:
+                wrong = 0
+                total = 0
+
+                for episode in episodes_with_backlog[k_i]:
+                    s = episode["state"]
+                    a_learned = episode["action"]
+                    a_oracle = oracle_decision(
+                        s["k_i"], s["k_j"], s["mu_i"], s["mu_j"], s["T"]
+                    )
+                    wrong += int(a_learned != a_oracle)
+                    total += 1
+
+                errors.append(wrong / max(total, 1))
+
+
             metrics.append(episode_metrics)            
             
             # Reset per-episode trackers for next episode
@@ -1541,7 +1594,7 @@ class RequestQueue:
         # At the end of the simulation, save metrics to file
         save_adjusted_to_file = "adjusted_metrics.csv" if adjust_service_rate else "non_adjusted_metrics.csv"
         self.save_metrics(metrics, save_adjusted_to_file)
-        self.save_metrics(metrics, save_to_file)
+        self.save_metrics(metrics, self.save_to_file)
         print(f"Metrics saved to {save_to_file}")
         
         print("Training completed.")
@@ -1560,6 +1613,11 @@ class RequestQueue:
         Returns:
             None
         """
+
+        if not metrics:  # Ensure there's data to save
+            print("Warning: No metrics data to save.")
+            return
+
         with open(filename, mode='w', newline='') as file:
             writer = csv.DictWriter(file, fieldnames=metrics[0].keys())
             writer.writeheader()
@@ -2206,7 +2264,7 @@ class RequestQueue:
             ax_jock.set_ylabel("Jockeying Rate (log scale)")
             ax_jock.set_yscale("log")
             ax_jock.set_ylim(bottom=eps)
-            ax_jock.legend(loc="best", fontsize=12, ncol=2)
+            ax_jock.legend(loc="best", fontsize=14, ncol=2)
             ax_jock.grid(which="major", linestyle="--", alpha=0.7)
             ax_jock.minorticks_off()
 
@@ -2221,13 +2279,13 @@ class RequestQueue:
             ax_renege.set_yscale("log")
             ax_renege.set_ylim(bottom=eps)
             # ax_renege.legend()
-            ax_renege.legend(loc="best", fontsize=12)
+            ax_renege.legend(loc="best", fontsize=14)
             ax_renege.grid(which="major", linestyle="--", alpha=0.7)
             ax_renege.minorticks_off()
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.savefig("logarithmic_rates_perqueue_length.pdf", format="pdf", dpi=300, bbox_inches="tight")
-        # plt.show()
+        plt.show()
         return fig
 
     
@@ -2439,8 +2497,8 @@ class RequestQueue:
         req.served = True
 
         # Compute observed utility for request and store in episode list
-        util = req.compute_observed_utility(c_wait=self.cost_wait, c_local=self.cost_local, c_switch=self.cost_switch, v_local=self.value_local)
-        self.current_episode_utilities.append(util)
+        #util = req.compute_observed_utility(c_wait=self.cost_wait, c_local=self.cost_local, c_switch=self.cost_switch, v_local=self.value_local)
+        #self.current_episode_utilities.append(util)
                               
         
         if "1" in queueID:
@@ -2859,8 +2917,8 @@ class RequestQueue:
             self.log_action("Reneged", req, queueid)
             
             # compute and record utility for this reneged request
-            util = req.compute_observed_utility(c_wait=self.cost_wait, c_local=self.cost_local, c_switch=self.cost_switch, v_local=self.value_local)
-            self.current_episode_utilities.append(util)
+            #util = req.compute_observed_utility(c_wait=self.cost_wait, c_local=self.cost_local, c_switch=self.cost_switch, v_local=self.value_local)
+            #self.current_episode_utilities.append(util)
             self.episode_reneges += 1
         
             # reward = self.getRenegeRewardPenalty(req, time_local_service, time_to_service_end)
@@ -2997,8 +3055,8 @@ class RequestQueue:
             
             # compute and record utility for this jockeyed request (note: jockeying often means they may re-enter another queue;
             # if you treat jockeying as immediate exit for utility accounting, keep this. Otherwise, adapt to compute only on final exit)
-            util = req.compute_observed_utility(c_wait=self.cost_wait, c_local=self.cost_local, c_switch=self.cost_switch, v_local=self.value_local)
-            self.current_episode_utilities.append(util)
+            #util = req.compute_observed_utility(c_wait=self.cost_wait, c_local=self.cost_local, c_switch=self.cost_switch, v_local=self.value_local)
+            #self.current_episode_utilities.append(util)
             self.episode_jockeys += 1
         
             if  "1" in curr_queue_id: # Server1
@@ -4288,6 +4346,161 @@ def visualize_results(metrics_file="simu_results.csv", window=5):
             return x
         return np.convolve(x, np.ones(w) / w, mode="valid")
 
+    # Replace the plotting portion in visualize_metrics / visualize_results with this block
+    # (This sets the loss-plot y-axis to log scale safely, handling zeros with a tiny epsilon.)
+    import matplotlib.ticker as mticker
+
+    episodes = metrics["episode"].to_numpy()
+    avg_rewards = metrics.get("average_reward", pd.Series(np.zeros(len(metrics)))).to_numpy()
+    smoothed_rewards = moving_average(avg_rewards, window)
+    episodes_smoothed = episodes[: len(smoothed_rewards)]
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(episodes_smoothed, smoothed_rewards, label=f"Avg Reward (window={window})", marker="o")
+    plt.title("Smoothed Average Rewards per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Average Reward")
+    plt.grid(True)
+    plt.legend(loc="best", fontsize=12) # (loc="best", fontsize=12, ncol=2)
+    plt.tight_layout()
+    plt.show()
+
+    # Loss metrics (log y-axis)
+    plt.figure(figsize=(10, 5))
+    eps = 1e-3  # tiny value to avoid log(0)
+    have_loss = False
+
+    if "actor_loss" in metrics.columns:
+        actor = metrics["actor_loss"].to_numpy(dtype=float) + eps
+        plt.plot(metrics["episode"], actor, label="Actor Loss", marker="o", color="red")
+        have_loss = True
+    if "critic_loss" in metrics.columns:
+        critic = metrics["critic_loss"].to_numpy(dtype=float) + eps
+        plt.plot(metrics["episode"], critic, label="Critic Loss", marker="o", color="blue")
+        have_loss = True
+    if "total_loss" in metrics.columns:
+        total = metrics["total_loss"].to_numpy(dtype=float) + eps
+        plt.plot(metrics["episode"], total, label="Total Loss", marker="o", color="purple")
+        have_loss = True
+
+    plt.title("Loss Metrics per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Loss (log scale)")
+    if have_loss:
+        ax = plt.gca()
+        # set log scale and ensure lower bound > 0
+        ax.set_yscale("log")
+        # set a sensible lower limit based on the plotted data to keep the axis stable
+        ymin = min(
+            np.nanmin(actor) if "actor" in locals() else np.inf,
+            np.nanmin(critic) if "critic" in locals() else np.inf,
+            np.nanmin(total) if "total" in locals() else np.inf,
+        )
+        ax.set_ylim(bottom=max(eps, ymin * 0.8))
+        # Cleaner major ticks for log scale
+        ax.yaxis.set_major_locator(mticker.LogLocator(base=10.0))
+        ax.yaxis.set_major_formatter(mticker.LogFormatterSciNotation(base=10.0))
+        ax.grid(which="major", linestyle="--", linewidth=0.6, color="gray", alpha=0.7)
+        ax.minorticks_off()
+    else:
+        plt.grid(True)
+
+    plt.legend(loc="best", fontsize=14) # ()
+    plt.savefig("logarithmic_all_losses_episodic.pdf", format="pdf", dpi=300, bbox_inches="tight")
+    plt.tight_layout()
+    # plt.show()
+    
+    # Helper to safely fetch a series (returns zeros if missing)
+    def get_series(df, col):
+        return df[col].to_numpy() if col in df.columns else np.zeros(len(df))
+
+    # Server-specific columns
+    srv1_renege_markov = get_series(metrics, "srv1_reneging_rate_markov")
+    srv2_renege_markov = get_series(metrics, "srv2_reneging_rate_markov")
+    srv1_renege_nn = get_series(metrics, "srv1_reneging_rate_nn")
+    srv2_renege_nn = get_series(metrics, "srv2_reneging_rate_nn")
+
+    srv1_jock_markov = get_series(metrics, "srv1_jockeying_rate_markov")
+    srv2_jock_markov = get_series(metrics, "srv2_jockeying_rate_markov")
+    srv1_jock_nn = get_series(metrics, "srv1_jockeying_rate_nn")
+    srv2_jock_nn = get_series(metrics, "srv2_jockeying_rate_nn")
+
+    # Add small epsilon so log scale works even when values are zero
+    eps = 1e-3 #1e-9
+    srv1_renege_markov = srv1_renege_markov + eps
+    srv2_renege_markov = srv2_renege_markov + eps
+    srv1_renege_nn = srv1_renege_nn + eps
+    srv2_renege_nn = srv2_renege_nn + eps
+    srv1_jock_markov = srv1_jock_markov + eps
+    srv2_jock_markov = srv2_jock_markov + eps
+    srv1_jock_nn = srv1_jock_nn + eps
+    srv2_jock_nn = srv2_jock_nn + eps
+
+    # Single combined plot: lines grouped by metric-type color, server distinguished by linestyle
+    fig, ax = plt.subplots(figsize=(14, 7))
+
+    # Colors grouped by metric type:
+    # - Reneging: blue (markov) / red (nn) color family
+    # - Jockeying: purple / cyan (avoids green/yellow)
+    # Server differentiation: solid = srv1, dotted = srv2
+    ax.plot(metrics["episode"], srv1_renege_markov, label="Srv1 Reneging Markov", color="blue", linestyle="-", linewidth=1.0) # tab:
+    ax.plot(metrics["episode"], srv2_renege_markov, label="Srv2 Reneging Markov", color="blue", linestyle=":", linewidth=1.0) # tab:
+    ax.plot(metrics["episode"], srv1_renege_nn, label="Srv1 Reneging NN", color="#FF0000", linestyle="-", linewidth=1.0)
+    ax.plot(metrics["episode"], srv2_renege_nn, label="Srv2 Reneging NN", color="#FF0000", linestyle=":", linewidth=1.0)
+
+    #ax.plot(metrics["episode"], srv1_jock_markov, label="Srv1 Jockeying Markov", color="tab:purple", linestyle="-", linewidth=1.5)
+    #ax.plot(metrics["episode"], srv2_jock_markov, label="Srv2 Jockeying Markov", color="tab:purple", linestyle=":", linewidth=1.5)
+    #ax.plot(metrics["episode"], srv1_jock_nn, label="Srv1 Jockeying NN", color="tab:cyan", linestyle="-", linewidth=1.5)
+    #ax.plot(metrics["episode"], srv2_jock_nn, label="Srv2 Jockeying NN", color="tab:cyan", linestyle=":", linewidth=1.5)
+    # JOCKEYING lines - DARKER colors (replaced cyan/purple with navy and darkslategray)
+    # navy = dark blue (distinct from tab:blue by linestyle/linewidth), darkslategray = dark gray
+    ax.plot(metrics["episode"], srv1_jock_markov, label="Srv1 Jockeying Markov", color="black", linestyle="-", linewidth=1.0) # navy
+    ax.plot(metrics["episode"], srv2_jock_markov, label="Srv2 Jockeying Markov", color="black", linestyle=":", linewidth=1.0) # navy
+    ax.plot(metrics["episode"], srv1_jock_nn, label="Srv1 Jockeying NN", color="green", linestyle="-", linewidth=1.0) # darkslategray
+    ax.plot(metrics["episode"], srv2_jock_nn, label="Srv2 Jockeying NN", color="green", linestyle=":", linewidth=1.0) # darkslategray
+
+    # Log scale, grid (major only), and tick formatting
+    ax.set_yscale("log")
+    ax.set_ylim(bottom=eps)
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Rate (log scale)")
+    ax.set_title("Jockeying and Reneging Rates per Server (log y-axis)")
+    ax.grid(which="major", linestyle="--", linewidth=0.6, color="gray", alpha=0.7)
+    ax.minorticks_off()
+
+    # Use LogLocator for nicer major ticks and scientific formatting
+    ax.yaxis.set_major_locator(mticker.LogLocator(base=10.0))
+    ax.yaxis.set_major_formatter(mticker.LogFormatterSciNotation(base=10.0))
+
+    # ax.legend(loc="best", fontsize="small", ncol=2)
+    ax.legend(loc="best", fontsize=14, ncol=2)
+    plt.tight_layout()
+    plt.savefig("logarithmic_rates_episodic.pdf", format="pdf", dpi=300, bbox_inches="tight")
+    # plt.show()
+
+    return fig
+
+
+def visualize_results_most_recent(metrics_file="simu_results.csv", window=5):
+    """
+    Visualize simulation results recorded in the metrics file.
+
+    - Single combined rates plot showing both reneging and jockeying for each server.
+    - Logarithmic y-axis with only major grid lines (clean look).
+    - Distinct colors for metric types, line style differentiates servers.
+    - Small epsilon added before log-scaling to avoid zeros.
+    Returns the matplotlib Figure object.
+    """
+    import matplotlib.ticker as mticker
+
+    metrics = pd.read_csv(metrics_file)
+
+    # moving average helper
+    def moving_average(x, w):
+        if w < 2:
+            return x
+        return np.convolve(x, np.ones(w) / w, mode="valid")
+
     # Smoothed average rewards
     episodes = metrics["episode"].to_numpy()
     avg_rewards = metrics.get("average_reward", pd.Series(np.zeros(len(metrics)))).to_numpy()
@@ -4383,86 +4596,46 @@ def visualize_results(metrics_file="simu_results.csv", window=5):
     ax.yaxis.set_major_formatter(mticker.LogFormatterSciNotation(base=10.0))
 
     # ax.legend(loc="best", fontsize="small", ncol=2)
-    ax.legend(loc="best", fontsize=12, ncol=2)
+    ax.legend(loc="best", fontsize=14, ncol=2)
     plt.tight_layout()
-    plt.savefig("logarithmic_rates_episodic.pdf", format="pdf", dpi=300, bbox_inches="tight")
+    plt.savefig("logarithmic_rates_episodic.pdf", format="pdf", dpi='300', bbox_inches="tight")
     # plt.show()
 
     return fig
 
 
-def plot_utility_vs_impatience(metrics_file="non_adjusted_metrics.csv", bins=5, annotate=True, annotate_every=1):
+# ----------------------------
+# 8) Plotting helper: plot average tenant utility vs impatience-rate across episodes
+# Add this function somewhere near the other visualize_* helpers:
+# ----------------------------
+def plot_utility_vs_impatience(metrics_file="non_adjusted_metrics.csv"):
     """
     Read per-episode metrics CSV and plot average tenant utility vs impatience rate.
-    Points are colored by the cost_wait parameter used that episode (binned into 'bins' intervals).
-    Options:
-      - bins: number of discrete cost intervals (use bins=1 for continuous colormap)
-      - annotate: whether to draw a small text label near each point with the cost_wait value
-      - annotate_every: annotate every N-th point (useful when many episodes)
-    Returns:
-      (fig, ax)
     """
-    import matplotlib as mpl
-
     metrics = pd.read_csv(metrics_file)
-    required = {"impatience_rate", "avg_tenant_utility", "cost_wait"}
-    if not required.issubset(set(metrics.columns)):
-        raise ValueError(f"Metrics file must contain columns: {required}. Found: {list(metrics.columns)}")
+    if "impatience_rate" not in metrics.columns or "avg_tenant_utility" not in metrics.columns:
+        raise ValueError("Metrics file does not contain 'impatience_rate' or 'avg_tenant_utility' columns. Run simulation to produce these fields first.")
 
-    x = metrics["impatience_rate"].to_numpy(dtype=float)
-    y = metrics["avg_tenant_utility"].to_numpy(dtype=float)
-    c = metrics["cost_wait"].to_numpy(dtype=float)
+    x = metrics["impatience_rate"].to_numpy()
+    y = metrics["avg_tenant_utility"].to_numpy()
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-
-    # If all cost_wait values identical, use a single color and avoid colorbar issues
-    if np.allclose(c, c[0]):
-        sc = ax.scatter(x, y, c="tab:blue", edgecolor="k", s=70)
-        cbar = None
-    else:
-        cmap = plt.get_cmap("viridis")
-        if bins is None or bins <= 1:
-            # continuous colormap
-            sc = ax.scatter(x, y, c=c, cmap=cmap, edgecolor="k", s=70)
-            cbar = plt.colorbar(sc, ax=ax)
-            cbar.set_label("cost_wait")
-        else:
-            # discrete bins with boundary normalization
-            bounds = np.linspace(c.min(), c.max(), bins + 1)
-            norm = mpl.colors.BoundaryNorm(bounds, ncolors=cmap.N, clip=True)
-            sc = ax.scatter(x, y, c=c, cmap=cmap, norm=norm, edgecolor="k", s=70)
-            cbar = plt.colorbar(mpl.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, boundaries=bounds)
-            # label tick values with bin centers for readability
-            tick_locs = 0.5 * (bounds[:-1] + bounds[1:])
-            cbar.set_ticks(tick_locs)
-            cbar.set_ticklabels([f"{t:.3f}" for t in tick_locs])
-            cbar.set_label("cost_wait (binned)")
-
-    # Annotate points with cost_wait value (small font), but avoid overcrowding by annotate_every
-    if annotate:
-        for idx, (xx, yy, cc) in enumerate(zip(x, y, c)):
-            if idx % annotate_every == 0:
-                ax.annotate(f"{cc:.2f}", (xx, yy),
-                            textcoords="offset points", xytext=(5, 3), ha="left", fontsize=8, alpha=0.9)
-
-    # regression line (optional) + robust plotting niceties
+    plt.figure(figsize=(8,6))
+    plt.scatter(x, y, c='tab:blue')
+    # optionally add a regression line
     try:
-        if len(x) > 1:
-            coeffs = np.polyfit(x, y, 1)
-            xs = np.linspace(np.nanmin(x), np.nanmax(x), 200)
-            ax.plot(xs, np.polyval(coeffs, xs), color="tab:orange", linestyle="--", label=f"Linear fit (slope={coeffs[0]:.3f})")
+        coeffs = np.polyfit(x, y, 1)
+        xs = np.linspace(x.min(), x.max(), 100)
+        plt.plot(xs, np.polyval(coeffs, xs), color='tab:orange', linestyle='--', label=f'Linear fit slope={coeffs[0]:.3f}')
     except Exception:
         pass
 
-    ax.set_xlabel("Impatience Rate (reneges + jockeys) / requests")
-    ax.set_ylabel("Average Tenant Utility (per episode)")
-    ax.set_title("Average Tenant Utility vs Impatience Rate\n(points colored by cost_wait)")
-    ax.grid(True, linestyle="--", alpha=0.6)
-    ax.legend(loc="best", fontsize=12, ncol=2)
+    plt.xlabel("Impatience Rate (reneges+jockeys) / requests")
+    plt.ylabel("Average Tenant Utility (per episode)")
+    plt.title("Average Tenant Utility vs Impatience Rate")
+    plt.grid(True)
+    plt.legend()
     plt.tight_layout()
-    plt.savefig("impatience_utility_episodic.pdf", format="pdf", dpi=300, bbox_inches="tight")
-    plt.tight_layout()
-    return fig, ax
+    plt.show()
 
 
 def visualize_results_broken(metrics_file="simu_results.csv", window=5):
@@ -4705,6 +4878,82 @@ def visualize_results_original(metrics_file="simu_results.csv", window=5):
     #plt.show()
 
 
+# Add seed control to run experiments across multiple random seeds
+def run_experiment_with_seeds(request_queue, env, seeds, duration, **kwargs):
+    all_results = []
+    
+    # Temporary file path for results aggregation
+    temp_file = kwargs.get('save_to_file', 'results.csv')
+
+    for seed in seeds:
+        print(f"Running experiment with random seed: {seed}")
+        random.seed(seed)
+        np.random.seed(seed)
+        
+        # Run the main simulation with the specific seed
+        # Save intermediate results to the specified file
+        request_queue.run(duration, env, **{**kwargs, "save_to_file": temp_file})
+        
+        # Read results from the temp file
+        try:
+            single_result = pd.read_csv(temp_file)
+            single_result['seed'] = seed  # Annotate results by seed
+            all_results.append(single_result)
+        except FileNotFoundError:
+            print(f"Warning: Temporary file {temp_file} not found. Skipping seed {seed}.")
+    
+    # Combine results into a single DataFrame
+    if all_results:
+        aggregated_results = pd.concat(all_results, axis=0)
+    else:
+        raise ValueError("No results were collected. Simulation did not generate data.")    
+
+    return aggregated_results
+
+def plot_asymptotic_decision_error(backlogs, error_probs):
+    """
+    Visualizes asymptotic robustness:
+    P(policy != oracle) vs backlog.
+    """
+
+    plt.figure(figsize=(7, 4))
+    plt.semilogy(backlogs, error_probs, marker="o", linewidth=2)
+
+    plt.xlabel("Backlog $k_i$")
+    plt.ylabel("Decision Error Probability (log scale)")
+    plt.title("Asymptotic Robustness of Jockeying–Reneging Decisions")
+
+    plt.grid(True, which="major", linestyle="--", alpha=0.7)
+    plt.tight_layout()
+    plt.show()
+
+
+def oracle_decision(k_i, k_j, mu_i, mu_j, T):
+    stay_delay = min(k_i / (2 * mu_i), T)
+    jockey_delay = k_j / (2 * mu_j)
+    return 0 if stay_delay <= jockey_delay else 1
+
+
+
+# Confidence Interval Computation
+from scipy.stats import t
+
+def compute_confidence_interval(data, confidence=0.95):
+    n = len(data)
+    mean = np.mean(data)
+    stderr = np.std(data, ddof=1) / np.sqrt(n)
+    t_crit = t.ppf((1 + confidence) / 2, n - 1)
+    margin_of_error = t_crit * stderr
+    return mean, stderr, (mean - margin_of_error, mean + margin_of_error)
+
+# Hypothesis Testing
+from scipy.stats import ttest_ind
+
+def test_hypothesis(data1, data2):
+    t_stat, p_value = ttest_ind(data1, data2, equal_var=False)
+    return t_stat, p_value
+
+
 def visualize_comparison(adjusted_file="adjusted_metrics.csv", non_adjusted_file="non_adjusted_metrics.csv"):
     """
     Visualize and compare metrics between adjusted and non-adjusted service rates.
@@ -4755,7 +5004,7 @@ def main():
     
     # These are the number of iterations also labelled as step in the simulation
     # Ideally each step corresponds to an arrival and processing iteration
-    duration = 8     
+    duration = 5
     
     # Start the scheduler
     #scheduler_thread = threading.Thread(target=request_queue.run(duration, env, adjust_service_rate=False, save_to_file="non_adjusted_metrics.csv")) # requestObj.run_scheduler) #
@@ -4772,18 +5021,51 @@ def main():
     scheduler_thread.start()
     scheduler_thread.join()  # <-- Wait until simulation is done then plot below functions
     
+    # - Recent changes start here 
+    # Run simulations with multiple seeds
+    random_seeds = [42, 84, 168, 256, 512]  # Example seeds
+    duration = 5
+
+    # request_queue, env, seeds, duration, **kwargs
+    aggregated_results = run_experiment_with_seeds(
+        request_queue,
+        env,
+        random_seeds,
+        duration,
+        adjust_service_rate = False,
+        num_episodes = 5,
+        save_to_file = "seed_results.csv"
+    )
+
+    ######### Compute confidence intervals for a metric (example: average_reward) #########
+    avg_reward_by_seed = aggregated_results.groupby('seed')['average_reward'].mean()
+    mean, stderr, CI = compute_confidence_interval(avg_reward_by_seed)
+    print(f"Mean: {mean}, SE: {stderr}, CI: {CI}")
+
+    # Hypothesis Testing Example
+    seed1 = aggregated_results[aggregated_results['seed'] == 42]['average_reward']
+    seed2 = aggregated_results[aggregated_results['seed'] == 84]['average_reward']
+    t_stat, p_value = test_hypothesis(seed1, seed2)
+    print(f"T-statistic: {t_stat}, P-value: {p_value}")
+
+    # Visualize results
+    visualize_results("seed_results.csv")
+    ######### - End here - ########
+
     # Let us visualize some results
     visualize_results(metrics_file="simu_results.csv") # has the rewards metrics, and figure 2 in the paper
     request_queue.plot_rates() # change me not to use dispatch_data but use self.subscribers variables    
     request_queue.compare_rates_by_information_source() # _with_graph
     # request_queue.plot_asymptotic_behavior_of_jockeying_and_reneging(max_queue_length=1000)
     request_queue.plot_reneging_and_jockeying_rates_vs_queue_size_by_type() # plot_reneging_and_jockeying_rates_vs_queue_size()
+
+    plot_asymptotic_decision_error(backlogs, errors)
     
     # request_queue.plot_decision_probability_vs_queue_length(bin_width=1)
     # request_queue.plot_diagnostics_error_and_misclassification() #max_queue_length=500)    
     # request_queue.plot_successful_jockey_probability_vs_queue_length() # T=None, bin_width=1)
     
-    request_queue.compute_success_table_with_max_local_utility()
+    # request_queue.compute_success_table_with_max_local_utility()
     
     #request_queue.plot_successful_jockey_probability_vs_queue_length(T=None, max_queue_length=500)
     
