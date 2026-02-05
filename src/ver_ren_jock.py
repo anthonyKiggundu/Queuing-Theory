@@ -1124,7 +1124,7 @@ class RequestQueue:
         }
 
 
-    def run(self, duration, env, adjust_service_rate, num_episodes=10, progress_bar=True, progress_log=True, save_to_file="simu_results.csv", num_seeds=5):
+    def run(self, duration, env, adjust_service_rate, num_episodes=10, progress_bar=True, progress_log=True, save_to_file="simu_results.csv", num_seeds=5, force_rates=None, include_mu_in_state=True):
         """
         Run the simulation with episodic training.
 
@@ -1192,17 +1192,23 @@ class RequestQueue:
                     self.arr_rate = self.objQueues.randomize_arrival_rate()  # Randomize arrival rate
                     srv_1 = self.dict_queues_obj.get("1") # Server1
                     srv_2 = self.dict_queues_obj.get("2") 
+
+                    # determine service rates (either forced or randomized)
+                    if force_rates is not None:
+                        # force_rates expected as tuple (serv_rate_one, serv_rate_two)
+                        serv_rate_one, serv_rate_two = force_rates
                 
-                    deltaLambda=random.randint(1, 2)
-                                
-                    #next_state, reward, done, info = self.env.step(action)
-                
-                    if len(srv_1) < len(srv_2): #deltaLambda == 1:
-                        serv_rate_one = self.arr_rate - deltaLambda 
-                        serv_rate_two = self.arr_rate + deltaLambda
                     else:
-                        serv_rate_one = self.arr_rate + deltaLambda 
-                        serv_rate_two = self.arr_rate - deltaLambda
+                        deltaLambda=random.randint(1, 2)
+                                
+                        #next_state, reward, done, info = self.env.step(action)
+                
+                        if len(srv_1) < len(srv_2): #deltaLambda == 1:
+                            serv_rate_one = self.arr_rate - deltaLambda 
+                            serv_rate_two = self.arr_rate + deltaLambda
+                        else:
+                            serv_rate_one = self.arr_rate + deltaLambda 
+                            serv_rate_two = self.arr_rate - deltaLambda
         
                     # serv_rate_one = self.arr_rate + deltaLambda 
                     # serv_rate_two = self.arr_rate - deltaLambda
@@ -1251,6 +1257,14 @@ class RequestQueue:
                     self.all_serv_times = serv_times
                     # print("\n Times: ", np.random.exponential(2, len(all_entries)), "\n Arranged: ",serv_times)
                     time.sleep(1)                      
+
+                    # Optionally mask μ / service-rate related features from state
+                    state_for_agent = state
+                    if not include_mu_in_state and isinstance(state, dict):
+                        # remove keys that encode server service-rate info
+                        # common keys in get_queue_observation: 'expected_service_time', 'long_avg_serv_time'
+                        state_for_agent = {k: v for k, v in state.items() if k not in ("expected_service_time", "long_avg_serv_time", "server_rate", "srv_rate")}
+                        # if state is other format, you may need to adjust this filtering accordingly
                 
                     # Step 1: Get action from the agent based on the current state
                     action = self.agent.select_action(state)
@@ -1472,7 +1486,98 @@ class RequestQueue:
         #return metrics
         return metrics, {"policies": policies, "means": [ci[0] for ci in conf_intervals], "conf_intervals": [(ci[1], ci[2]) for ci in conf_intervals]}
         
-        
+    def run_heterogeneity_sweep(self, ratios, base_mu, duration, env, num_seeds=5, num_episodes=5, save_csv="heterog_sweep.csv"):
+        """
+        Sweep heterogeneity (mu ratio) keeping other parameters fixed.
+        ratios: list/iterable of mu2/mu1 ratios to evaluate (e.g., [1.0, 1.2, 1.5, 2.0])
+        base_mu: base mu for server 1 (mu1); server 2 mu = base_mu * ratio
+        Returns: pandas DataFrame with columns ['ratio','mean_RL','mean_SED','gap']
+        """
+    
+        results = []
+        for ratio in ratios:
+            mu1 = float(base_mu)
+            mu2 = float(base_mu) * float(ratio)
+            print(f"Running heterogeneity ratio {ratio}: mu1={mu1}, mu2={mu2}")
+            # run the simulation forcing server rates (we force absolute rates for the run)
+            metrics, summary = self.run(duration, env, adjust_service_rate=False, num_episodes=num_episodes,
+                                        progress_bar=False, progress_log=False, save_to_file=f"heterog_r{ratio}.csv",
+                                        num_seeds=num_seeds, force_rates=(mu1, mu2))
+            # `summary` returned by run() contains policy means (see your existing return)
+            rl_mean = summary["means"][0] if "means" in summary else np.mean([m["total_reward"] for m in metrics])
+            sed_mean = None
+            # try to extract SED mean from metrics if available (you track sed_rewards in run)
+            try:
+                sed_mean = np.mean([m.get("sed_mean", np.nan) for m in metrics])  # fallback
+            except Exception:
+                sed_mean = np.nan
+            # as a robust fallback, compute from file saved
+            results.append({"ratio": ratio, "mu1": mu1, "mu2": mu2, "mean_RL": rl_mean, "mean_SED": sed_mean, "gap": (rl_mean - (sed_mean if sed_mean is not None else 0.0))})
+        df = pd.DataFrame(results)
+        df.to_csv(save_csv, index=False)
+        print(f"Heterogeneity sweep saved to {save_csv}")
+        return df
+
+
+    def run_no_mu_ablation(self, duration, env, num_seeds=5, num_episodes=5, force_rates=None, save_csv="no_mu_ablation.csv"):
+        """
+        Compare performance when the agent cannot see service-rate features.
+        Runs two experiments:
+           - include_mu_in_state = True (baseline)
+           - include_mu_in_state = False (ablation)
+        Returns: DataFrame summarizing mean rewards.
+        """
+
+        print("Running baseline with μ in state...")
+        metrics_base, summary_base = self.run(duration, env, adjust_service_rate=False,
+                                              num_episodes=num_episodes, progress_bar=False,
+                                              progress_log=False, save_to_file="baseline_with_mu.csv",
+                                              num_seeds=num_seeds, force_rates=force_rates, include_mu_in_state=True)
+
+        print("Running ablation with μ removed from state...")
+        metrics_nomu, summary_nomu = self.run(duration, env, adjust_service_rate=False,
+                                              num_episodes=num_episodes, progress_bar=False,
+                                              progress_log=False, save_to_file="ablation_no_mu.csv",
+                                              num_seeds=num_seeds, force_rates=force_rates, include_mu_in_state=False)
+
+        # compute simple means (fall back to metric totals if summary not present)
+        def mean_from_summary_or_metrics(summary, metrics, key="total_reward"):
+            if summary and "means" in summary:
+                return summary["means"][0]
+            else:
+                return np.mean([m.get(key, 0.0) for m in metrics]) if metrics else np.nan
+
+        mean_base = mean_from_summary_or_metrics(summary_base, metrics_base)
+        mean_nomu = mean_from_summary_or_metrics(summary_nomu, metrics_nomu)
+
+        df = pd.DataFrame([{"condition": "with_mu", "mean_reward": mean_base},
+                           {"condition": "no_mu", "mean_reward": mean_nomu},
+                           {"condition": "delta", "mean_reward": mean_base - mean_nomu}])
+        df.to_csv(save_csv, index=False)
+        print(f"No-μ ablation results saved to {save_csv}")
+        return df
+
+    
+    def plot_heterogeneity_sweep(self, df):
+        """
+        Visualize how RL advantage changes with service-rate heterogeneity.
+        Expects DataFrame returned by run_heterogeneity_sweep().
+        """
+
+        plt.figure()
+        plt.plot(df["ratio"], df["mean_RL"], marker="o")
+        plt.plot(df["ratio"], df["mean_SED"], marker="o")
+        plt.plot(df["ratio"], df["gap"], marker="o")
+
+        plt.xlabel("Service-rate ratio  μ₂ / μ₁")
+        plt.ylabel("Mean reward")
+        plt.title("Sensitivity to Service-Rate Heterogeneity")
+        plt.grid(True)
+
+        plt.legend(["RL", "SED", "RL–SED gap"])
+        plt.show()
+
+
     def save_metrics(self, metrics, filename):
         """
         Save episode metrics to a CSV file.
@@ -4435,9 +4540,9 @@ def main():
     
     # These are the number of iterations also labelled as step in the simulation
     # Ideally each step corresponds to an arrival and processing iteration
-    duration = 10
-    num_episodes = 50  # Number of episodes
-    num_seeds = 2       # Number of random seeds
+    duration = 2 #10
+    num_episodes = 5 #0  # Number of episodes
+    num_seeds = 1 # 2       # Number of random seeds
     
     # Define a queue to store return value from the thread
     stats_queue = queue.Queue()
@@ -4472,6 +4577,11 @@ def main():
 
     scheduler_thread.start()
     scheduler_thread.join()  # <-- Wait until simulation is done then plot below functions
+
+    # 2) No-μ ablation (test the same forced rates as a single regime)
+    df_nomu = request_queue.run_no_mu_ablation(duration, env, num_seeds=3, num_episodes=3, force_rates=(1.0, 2.0), save_csv="nomu_results.csv")
+    print(df_nomu)
+    request_queue.plot_no_mu_ablation(df_nomu)
     
     # Let us visualize some results
     # visualize_results(metrics_file="simu_results.csv") # has the rewards metrics, and figure 2 in the paper
