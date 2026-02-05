@@ -1124,7 +1124,7 @@ class RequestQueue:
         }
 
 
-    def run(self, duration, env, adjust_service_rate, num_episodes=10, progress_bar=True, progress_log=True, save_to_file="simu_results.csv"):
+    def run(self, duration, env, adjust_service_rate, num_episodes=10, progress_bar=True, progress_log=True, save_to_file="simu_results.csv", num_seeds=5):
         """
         Run the simulation with episodic training.
 
@@ -1141,6 +1141,8 @@ class RequestQueue:
         self.env = env
         steps_per_episode = int(duration / self.time_res)
         metrics = []  # List to store metrics for all episodes
+        all_rewards = []
+        rl_rewards, sed_rewards, sq_rewards = [], [], []  # Store rewards for each policy
         save_to_file = "simu_results.csv"
         
         actor_losses = []
@@ -1151,261 +1153,324 @@ class RequestQueue:
             step_loop = tqdm(range(steps_per_episode), leave=False, desc='     Current run')
         else:
             step_loop = range(steps_per_episode)                             
+       
+        # Keep track of episode rewards grouped by seeds
+        episode_rewards_per_seed = []
         
-        
-        # srv_1 = self.dict_queues_obj.get("1") # Server1
-        # srv_2 = self.dict_queues_obj.get("2") # Server2               
-        
-        for episode in range(num_episodes):
-            # Reset baseline counters for this episode
-            self._baseline_counters = {"threshold_wrong": 0, "threshold_total": 0, "perfect_wrong": 0, "perfect_total": 0}
-            print(f"Starting Episode {episode + 1}/{num_episodes}")            
-            
-            unique_k_i_values = set()
-            episodes_with_backlog = defaultdict(list)
+        for seed in range(num_seeds):
+            np.random.seed(seed)
+ 
+            seed_rewards = []
 
-            # Reset environment for the new episode
-            state, info = self.env.reset(seed=42)
-            total_reward = 0
-            done = False  # Flag to track episode termination
-            episode_start_time = time.time()
-            i = 0
-            episode_policy_entropy = 0  # Track total policy entropy for the episode
-            #losses = {"actor_loss": 0, "critic_loss": 0, "total_loss": 0}
-            srv1_jockeying_rates = []
-            srv2_reneging_rates = []
+            for episode in range(num_episodes):
+                # Reset baseline counters for this episode
+                self._baseline_counters = {"threshold_wrong": 0, "threshold_total": 0, "perfect_wrong": 0, "perfect_total": 0}
+                print(f"Starting Episode {episode + 1}/{num_episodes}")            
             
-            step_rewards = 0
+                unique_k_i_values = set()
+                episodes_with_backlog = defaultdict(list)
+
+                # Reset environment for the new episode
+                state, info = self.env.reset(seed=seed)
+
+                total_rl_reward, total_sed_reward, total_sq_reward = 0, 0, 0  # Track rewards for each policy
+                rl_correct, sed_correct, sq_correct = 0, 0, 0  # Baseline agreement
+                rl_wrong, sed_wrong, sq_wrong = 0, 0, 0  # Baseline errors
+
+                total_reward = 0
+                done = False  # Flag to track episode termination
+                episode_start_time = time.time()
+                i = 0
+                episode_policy_entropy = 0  # Track total policy entropy for the episode
+                #losses = {"actor_loss": 0, "critic_loss": 0, "total_loss": 0}
+                srv1_jockeying_rates = []
+                srv2_reneging_rates = []
+            
+                step_rewards = 0
         
-            for i in step_loop: 
-                self.arr_rate = self.objQueues.randomize_arrival_rate()  # Randomize arrival rate
-                srv_1 = self.dict_queues_obj.get("1") # Server1
-                srv_2 = self.dict_queues_obj.get("2") 
+                for i in step_loop: 
+                    self.arr_rate = self.objQueues.randomize_arrival_rate()  # Randomize arrival rate
+                    srv_1 = self.dict_queues_obj.get("1") # Server1
+                    srv_2 = self.dict_queues_obj.get("2") 
                 
-                deltaLambda=random.randint(1, 2)
+                    deltaLambda=random.randint(1, 2)
                                 
-                #next_state, reward, done, info = self.env.step(action)
+                    #next_state, reward, done, info = self.env.step(action)
                 
-                if len(srv_1) < len(srv_2): #deltaLambda == 1:
-                    serv_rate_one = self.arr_rate - deltaLambda 
-                    serv_rate_two = self.arr_rate + deltaLambda
-                else:
-                    serv_rate_one = self.arr_rate + deltaLambda 
-                    serv_rate_two = self.arr_rate - deltaLambda
+                    if len(srv_1) < len(srv_2): #deltaLambda == 1:
+                        serv_rate_one = self.arr_rate - deltaLambda 
+                        serv_rate_two = self.arr_rate + deltaLambda
+                    else:
+                        serv_rate_one = self.arr_rate + deltaLambda 
+                        serv_rate_two = self.arr_rate - deltaLambda
         
-                # serv_rate_one = self.arr_rate + deltaLambda 
-                # serv_rate_two = self.arr_rate - deltaLambda
+                    # serv_rate_one = self.arr_rate + deltaLambda 
+                    # serv_rate_two = self.arr_rate - deltaLambda
 
-                self.srvrates_1 = serv_rate_one / 2                
-                self.srvrates_2 = serv_rate_two / 2                                         
+                    self.srvrates_1 = serv_rate_one / 2                
+                    self.srvrates_2 = serv_rate_two / 2                                         
                 
-                print("\n Arrival rate: ", self.arr_rate, "Rates 1: ----", self.srvrates_1,  "Rates 2: ----", self.srvrates_2)  
-                #if done:  # Break the loop if the episode ends
-                #    break         
+                    print("\n Arrival rate: ", self.arr_rate, "Rates 1: ----", self.srvrates_1,  "Rates 2: ----", self.srvrates_2)  
+                    #if done:  # Break the loop if the episode ends
+                    #    break         
 			
-                if progress_log:
-                    print("Step", i + 1, "/", steps_per_episode) # print("Step",i,"/",steps)
+                    if progress_log:
+                        print("Step", i + 1, "/", steps_per_episode) # print("Step",i,"/",steps)
                         
-                self.markov_model.updateState()
+                    self.markov_model.updateState()
                 
-                if len(srv_1) < len(srv_2):
-                    self.queue = srv_2
-                    self.srv_rate = self.srvrates_1                   
+                    if len(srv_1) < len(srv_2):
+                        self.queue = srv_2
+                        self.srv_rate = self.srvrates_1                   
 
-                else:            
-                    self.queue = srv_1
-                    self.srv_rate = self.srvrates_2                                
+                    else:            
+                        self.queue = srv_1
+                        self.srv_rate = self.srvrates_2                                
                   
-                service_intervals=np.random.exponential(1/self.srv_rate,max(int(self.srv_rate*self.time_res*5),2)) # to ensure they exceed one sampling interval
-                service_intervals=service_intervals[np.where(np.add.accumulate(service_intervals)<=self.time_res)[0]]
-                service_intervals=service_intervals[0:np.min([len(service_intervals),len(self.queue)])]
-                arrival_intervals=np.random.exponential(1/self.arr_rate, max(int(self.arr_rate*self.time_res*5),2))
+                    service_intervals=np.random.exponential(1/self.srv_rate,max(int(self.srv_rate*self.time_res*5),2)) # to ensure they exceed one sampling interval
+                    service_intervals=service_intervals[np.where(np.add.accumulate(service_intervals)<=self.time_res)[0]]
+                    service_intervals=service_intervals[0:np.min([len(service_intervals),len(self.queue)])]
+                    arrival_intervals=np.random.exponential(1/self.arr_rate, max(int(self.arr_rate*self.time_res*5),2))
 
-                arrival_intervals=arrival_intervals[np.where(np.add.accumulate(arrival_intervals)<=self.time_res)[0]]
-                service_entries=np.array([[self.time+i,False] for i in service_intervals]) # False for service
-                service_entries=service_entries.reshape(int(service_entries.size/2),2)
-                time.sleep(1)
-                arrival_entries=np.array([[self.time+i,True] for i in arrival_intervals]) # True for request
-                # print("\n Arrived: ",arrival_entries) ####
-                # time.sleep(1)
-                arrival_entries=arrival_entries.reshape(int(arrival_entries.size/2),2)
-                # print(arrival_entries)
-                time.sleep(1)
-                all_entries=np.append(service_entries,arrival_entries,axis=0)
-                all_entries=all_entries[np.argsort(all_entries[:,0])]
-                self.all_times = all_entries
-                # print("\n All Entered After: ",all_entries) ####
-                serv_times = np.random.exponential(2, len(all_entries))
-                serv_times = np.sort(serv_times)
-                self.all_serv_times = serv_times
-                # print("\n Times: ", np.random.exponential(2, len(all_entries)), "\n Arranged: ",serv_times)
-                time.sleep(1)                      
+                    arrival_intervals=arrival_intervals[np.where(np.add.accumulate(arrival_intervals)<=self.time_res)[0]]
+                    service_entries=np.array([[self.time+i,False] for i in service_intervals]) # False for service
+                    service_entries=service_entries.reshape(int(service_entries.size/2),2)
+                    time.sleep(1)
+                    arrival_entries=np.array([[self.time+i,True] for i in arrival_intervals]) # True for request
+                    # print("\n Arrived: ",arrival_entries) ####
+                    # time.sleep(1)
+                    arrival_entries=arrival_entries.reshape(int(arrival_entries.size/2),2)
+                    # print(arrival_entries)
+                    time.sleep(1)
+                    all_entries=np.append(service_entries,arrival_entries,axis=0)
+                    all_entries=all_entries[np.argsort(all_entries[:,0])]
+                    self.all_times = all_entries
+                    # print("\n All Entered After: ",all_entries) ####
+                    serv_times = np.random.exponential(2, len(all_entries))
+                    serv_times = np.sort(serv_times)
+                    self.all_serv_times = serv_times
+                    # print("\n Times: ", np.random.exponential(2, len(all_entries)), "\n Arranged: ",serv_times)
+                    time.sleep(1)                      
                 
-                # Step 1: Get action from the agent based on the current state
-                action = self.agent.select_action(state)
+                    # Step 1: Get action from the agent based on the current state
+                    action = self.agent.select_action(state)
 
-                # --- Baseline evaluation code ---
-                # Obtain current queue sizes and service rates (exact values)
-                k1, k2 = self.get_queue_sizes()      # returns (q1_size, q2_size)
-                mu1 = getattr(self, "srvrates_1", None)
-                mu2 = getattr(self, "srvrates_2", None)
+                    # Get queue lengths and service rates
+                    k_i, k_j = self.get_queue_sizes()
+                    mu_i, mu_j = getattr(self, "srvrates_1", None), getattr(self, "srvrates_2", None)
 
-                # Determine which queue is the 'current' queue and which is 'alternative'
-                # queue_id variable already indicates the queue processed this step
-                if queue_id == "1":
-                    k_i = k1
-                    k_j = k2
-                    mu_i = mu1
-                    mu_j = mu2
-                else:
-                    k_i = k2
-                    k_j = k1
-                    mu_i = mu2
-                    mu_j = mu1
+                    # --- Baseline evaluation code ---
+                    # Obtain current queue sizes and service rates (exact values)
+                    k1, k2 = self.get_queue_sizes()      # returns (q1_size, q2_size)
+                    mu1 = getattr(self, "srvrates_1", None)
+                    mu2 = getattr(self, "srvrates_2", None)
 
-                # Compute baseline decisions
-                a_threshold = self.threshold_policy(k_i, k_j, mu_i, mu_j, Delta=self.threshold_Delta)
-                a_perfect = self.perfect_sed_policy(k_i, k_j, mu_i, mu_j)
+                    # Determine which queue is the 'current' queue and which is 'alternative'
+                    # queue_id variable already indicates the queue processed this step
+                    #if queue_id == "1":
+                    if "1" in self.queueID:
+                        k_i = k1
+                        k_j = k2
+                        mu_i = mu1
+                        mu_j = mu2
+                    else:
+                        k_i = k2
+                        k_j = k1
+                        mu_i = mu2
+                        mu_j = mu1
 
-                # Update per-step baseline counters (for episode-level aggregation)
-                self._baseline_counters["threshold_total"] += 1
-                self._baseline_counters["perfect_total"] += 1
-                if a_learned != a_threshold:
-                    self._baseline_counters["threshold_wrong"] += 1
-                if a_learned != a_perfect:
-                    self._baseline_counters["perfect_wrong"] += 1
+                    # Compute baseline decisions
+                    a_threshold = self.threshold_policy(k_i, k_j, mu_i, mu_j, Delta=self.threshold_Delta)
+                    a_perfect = self.perfect_sed_policy(k_i, k_j, mu_i, mu_j)
 
-                # Record the decision for backlog-conditioned analysis
-                # Ensure episodes_with_backlog and unique_k_i_values were initialized at episode start
-                # Use k_i as the conditioning key (backlog)
-                episodes_with_backlog[k_i].append({
-                    "state": {"k_i": k_i, "k_j": k_j, "mu_i": mu_i, "mu_j": mu_j, "T": self.max_local_delay},
-                    "action": a_learned,
-                    "baseline_threshold": a_threshold,
-                    "baseline_perfect": a_perfect
-                })
-                unique_k_i_values.add(k_i)
-                # --- end baseline evaluation ---
+                    # Update per-step baseline counters (for episode-level aggregation)
+                    self._baseline_counters["threshold_total"] += 1
+                    self._baseline_counters["perfect_total"] += 1
+                    if action != a_threshold:
+                        self._baseline_counters["threshold_wrong"] += 1
+                    if action != a_perfect:
+                        self._baseline_counters["perfect_wrong"] += 1
+
+                    # Record the decision for backlog-conditioned analysis
+                    # Ensure episodes_with_backlog and unique_k_i_values were initialized at episode start
+                    # Use k_i as the conditioning key (backlog)
+                    episodes_with_backlog[k_i].append({
+                        "state": {"k_i": k_i, "k_j": k_j, "mu_i": mu_i, "mu_j": mu_j, "T": self.max_local_delay},
+                        "action": action,
+                        "baseline_threshold": a_threshold,
+                        "baseline_perfect": a_perfect
+                    })
+                    unique_k_i_values.add(k_i)
+                    # --- end baseline evaluation ---
                 
-                # Step 1: Get action from the agent based on the current state
-                #action, policy_entropy = self.agent.select_action_with_entropy(state)
-                #episode_policy_entropy += policy_entropy
+                    # Step 1: Get action from the agent based on the current state
+                    #action, policy_entropy = self.agent.select_action_with_entropy(state)
+                    #episode_policy_entropy += policy_entropy
                 
-                # Step 2: Apply the action to the environment and get feedback
-                next_state, reward, done, info = self.env.step(action)                
+                    # Step 2: Apply the action to the environment and get feedback
+                    next_state, reward, done, info = self.env.step(action)                
                 
-                # Update queue state in the environment
-                self.env.update_queue_state(next_state)                               
+                    # Update queue state in the environment
+                    self.env.update_queue_state(next_state)                               
 
-                # Step 3: Store the reward for training
-                self.agent.store_reward(reward)
-                step_rewards += reward
-                #total_reward += reward
+                    # Step 3: Store the reward for training
+                    self.agent.store_reward(reward)
+                    #step_rewards += reward
+                    total_reward += reward
 
-                # Step 4: Update the state for the next step
-                state = next_state
-                i += 1            
+                    # Baseline decisions
+                    action_sed = sed_policy(k_i, k_j, mu_i, mu_j)
+                    action_sq = sq_policy(k_i, k_j)
+
+                    # Evaluate against RL decision
+                    if action == action_sed:
+                        sed_correct += 1
+                    else:
+                        sed_wrong += 1
+
+                    if action == action_sq:
+                        sq_correct += 1
+                    else:
+                        sq_wrong += 1
+
+                    # Get transition and rewards
+                    next_state, reward, done, _ = self.env.step(action)
+                    self.agent.store_reward(reward)
+                    total_rl_reward += reward
+                    total_sed_reward += reward if action == action_sed else 0  # Approximate SED performance
+                    total_sq_reward += reward if action == action_sq else 0  # Approximate SQ performance
+
+                    # Step 4: Update the state for the next step
+                    state = next_state
+                    i += 1            
+
+                    #if done:  # Exit loop if the environment terminates
+                    #   break
                               
-                self.processEntries(all_entries, i) #, self.uses_nn)
-                self.time+=self.time_res
+                    self.processEntries(all_entries, i) #, self.uses_nn)
+                    self.time+=self.time_res
             
-                # Step 4 (Optional): Adjust service rates if enabled
-                if adjust_service_rate:
-                    self.adjust_service_rates()
+                    # Step 4 (Optional): Adjust service rates if enabled
+                    if adjust_service_rate:
+                        self.adjust_service_rates()
                  
-                
-                # Ensure dispatch data is updated at each step
-                self.dispatch_all_queues() #dispatch_all_queues()
-                #self.run_scheduler(duration)
-                
-                # Optional: Log step-level progress (can be verbose)
-                if progress_log:
-                    print(f"Step {i + 1}: Action={action}, Reward={reward}, Total Reward={total_reward}")
+                 
+                    # Ensure dispatch data is updated at each step
+                    self.dispatch_all_queues() #dispatch_all_queues()
+                    #self.run_scheduler(duration)
+                 
+                    # Optional: Log step-level progress (can be verbose)
+                    if progress_log:
+                        print(f"Step {i + 1}: Action={action}, Reward={reward}, Total Reward={total_reward}")
             
-                self.set_batch_id(i)
+                    self.set_batch_id(i)
                 
-                total_reward += step_rewards
+                    total_reward += step_rewards
                 
-                print(f"Step {i + 1}: Action={action}, Reward={reward}, Step Total Reward={step_rewards}, Total Reward={total_reward}")
+                    print(f"Step {i + 1}: Action={action}, Reward={reward}, Step Total Reward={step_rewards}, Total Reward={total_reward}")
                 
-            # Update the RL agent at the end of each episode
-            actor_loss, critic_loss, total_loss = self.agent.update()
+                # Update the RL agent at the end of each episode
+                actor_loss, critic_loss, total_loss = self.agent.update()
                         
-            actor_losses.append(actor_loss)
-            critic_losses.append(critic_loss)
-            total_losses.append(total_loss)
+                actor_losses.append(actor_loss)
+                critic_losses.append(critic_loss)
+                total_losses.append(total_loss)
             
-            #print("\n ****** ", actor_losses, " **** ", critic_losses, " **** ", total_losses)
-            # Calculate episode duration
-            episode_duration = time.time() - episode_start_time
+                # Calculate episode duration
+                episode_duration = time.time() - episode_start_time
             
-            # For Markov/raw subscribers
-            srv1_reneging_rate_markov = self.compute_reneging_rate_per_server(self.state_subscribers, "1")
-            srv2_reneging_rate_markov = self.compute_reneging_rate_per_server(self.state_subscribers, "2")
-            srv1_jockeying_rate_markov = self.compute_jockeying_rate_per_server(self.state_subscribers, "1")
-            srv2_jockeying_rate_markov = self.compute_jockeying_rate_per_server(self.state_subscribers, "2")
+                # For Markov/raw subscribers
+                srv1_reneging_rate_markov = self.compute_reneging_rate_per_server(self.state_subscribers, "1")
+                srv2_reneging_rate_markov = self.compute_reneging_rate_per_server(self.state_subscribers, "2")
+                srv1_jockeying_rate_markov = self.compute_jockeying_rate_per_server(self.state_subscribers, "1")
+                srv2_jockeying_rate_markov = self.compute_jockeying_rate_per_server(self.state_subscribers, "2")
 
-            # For NN subscribers
-            srv1_reneging_rate_nn = self.compute_reneging_rate_per_server(self.nn_subscribers, "1")
-            srv2_reneging_rate_nn = self.compute_reneging_rate_per_server(self.nn_subscribers, "2")
-            srv1_jockeying_rate_nn = self.compute_jockeying_rate_per_server(self.nn_subscribers, "1")
-            srv2_jockeying_rate_nn = self.compute_jockeying_rate_per_server(self.nn_subscribers, "2")
+                # For NN subscribers
+                srv1_reneging_rate_nn = self.compute_reneging_rate_per_server(self.nn_subscribers, "1")
+                srv2_reneging_rate_nn = self.compute_reneging_rate_per_server(self.nn_subscribers, "2")
+                srv1_jockeying_rate_nn = self.compute_jockeying_rate_per_server(self.nn_subscribers, "1")
+                srv2_jockeying_rate_nn = self.compute_jockeying_rate_per_server(self.nn_subscribers, "2")
 
-            # Log metrics for the episode
-            episode_metrics = {
-                "episode": episode + 1,
-                "total_reward": total_reward,
-                "average_reward": total_reward / i if i > 0 else 0,
-                "steps": i,
-                "duration": episode_duration,
-                #"policy_entropy": episode_policy_entropy / i if i > 0 else 0,
-                "actor_loss": np.mean(actor_losses), #sum(actor_losses) / len(actor_losses) if actor_losses else 0,
-                "critic_loss": np.mean(critic_losses), # sum(critic_losses) / len(critic_losses) if critic_losses else 0,
-                "total_loss": np.mean(total_losses), # sum(total_losses) / len(total_losses) if total_losses else 0,
-                "srv1_reneging_rate_markov":srv1_reneging_rate_markov,
-                "srv2_reneging_rate_markov": srv2_reneging_rate_markov,
-                "srv1_jockeying_rate_markov": srv1_jockeying_rate_markov,
-                "srv2_jockeying_rate_markov": srv2_jockeying_rate_markov,
-                "srv1_reneging_rate_nn": srv1_reneging_rate_nn,
-                "srv2_reneging_rate_nn": srv2_reneging_rate_nn,
-                "srv1_jockeying_rate_nn": srv1_jockeying_rate_nn,
-                "srv2_jockeying_rate_nn": srv2_jockeying_rate_nn
-                #"srv1_average_jockeying_rate": sum(srv1_jockeying_rates) / len(srv1_jockeying_rates) if srv1_jockeying_rates else 0,
-                #"srv1_average_reneging_rate": sum(srv1_reneging_rates) / len(srv1_reneging_rates) if srv1_reneging_rates else 0,
-                #"srv2_average_jockeying_rate": sum(srv2_jockeying_rates) / len(srv2_jockeying_rates) if srv2_jockeying_rates else 0,
-                #"srv2_average_reneging_rate": sum(srv2_reneging_rates) / len(srv2_reneging_rates) if srv2_reneging_rates else 0
-            }
+                # Log metrics for the episode
+                episode_metrics = {
+                    "seed": seed,
+                    "episode": episode + 1,
+                    "total_reward": total_reward,
+                    "average_reward": total_reward / i if i > 0 else 0,
+                    "steps": i,
+                    "duration": episode_duration,                    
+                    "actor_loss": np.mean(actor_losses), #sum(actor_losses) / len(actor_losses) if actor_losses else 0,
+                    "critic_loss": np.mean(critic_losses), # sum(critic_losses) / len(critic_losses) if critic_losses else 0,
+                    "total_loss": np.mean(total_losses), # sum(total_losses) / len(total_losses) if total_losses else 0,
+                    "srv1_reneging_rate_markov":srv1_reneging_rate_markov,
+                    "srv2_reneging_rate_markov": srv2_reneging_rate_markov,
+                    "srv1_jockeying_rate_markov": srv1_jockeying_rate_markov,
+                    "srv2_jockeying_rate_markov": srv2_jockeying_rate_markov,
+                    "srv1_reneging_rate_nn": srv1_reneging_rate_nn,
+                    "srv2_reneging_rate_nn": srv2_reneging_rate_nn,
+                    "srv1_jockeying_rate_nn": srv1_jockeying_rate_nn,
+                    "srv2_jockeying_rate_nn": srv2_jockeying_rate_nn
+                 }
             
-            # Baseline error rates (avoid division by zero)
-            th_total = max(1, self._baseline_counters["threshold_total"])
-            pf_total = max(1, self._baseline_counters["perfect_total"])
-            episode_metrics["threshold_error_rate"] = self._baseline_counters["threshold_wrong"] / th_total
-            episode_metrics["perfect_error_rate"] = self._baseline_counters["perfect_wrong"] / pf_total
+                # Baseline error rates (avoid division by zero)
+                th_total = max(1, self._baseline_counters["threshold_total"])
+                pf_total = max(1, self._baseline_counters["perfect_total"])
+                episode_metrics["threshold_error_rate"] = self._baseline_counters["threshold_wrong"] / th_total
+                episode_metrics["perfect_error_rate"] = self._baseline_counters["perfect_wrong"] / pf_total
 
-            metrics.append(episode_metrics)            
+                metrics.append(episode_metrics)            
             
-            # Print episode summary
-            print(f"Episode {episode + 1} Summary: Total Reward={episode_metrics['total_reward']}, "
-                f"Avg Reward={episode_metrics['average_reward']:.2f}, Steps={episode_metrics['steps']}, "      
-                f"Actor Loss={episode_metrics['actor_loss']:.4f}, Critic Loss={episode_metrics['critic_loss']:.4f}, "
-                f"Total Loss={episode_metrics['total_loss']:.4f}, "
-                f"Duration={episode_metrics['duration']:.2f}s")
+                # Print episode summary
+                rl_rewards.append(total_rl_reward)
+                sed_rewards.append(total_sed_reward)
+                sq_rewards.append(total_sq_reward)
 
-            print(f"Episode {episode + 1} finished with a total reward of {episode_metrics['total_reward']}")
+                # Episode summary
+                print(f"Episode {episode + 1}/{num_episodes} (Seed {seed}):")
+                print(f"  RL Reward: {total_rl_reward:.2f} | SED Reward: {total_sed_reward:.2f} | SQ Reward: {total_sq_reward:.2f}")
+                print(f"  RL vs SED Agreement: {sed_correct / steps_per_episode:.2%}")
+                print(f"  RL vs SQ Agreement: {sq_correct / steps_per_episode:.2%}"
+                    f"Avg Reward={episode_metrics['average_reward']:.2f}, Steps={episode_metrics['steps']}, "
+                    f"Actor Loss={episode_metrics['actor_loss']:.4f}, Critic Loss={episode_metrics['critic_loss']:.4f}, "
+                    f"Total Loss={episode_metrics['total_loss']:.4f}, "
+                    f"Duration={episode_metrics['duration']:.2f}s")
+                #)
+
+                #print(f"Episode {episode + 1} Summary: Total Reward={episode_metrics['total_reward']}, "
+                #    f"Avg Reward={episode_metrics['average_reward']:.2f}, Steps={episode_metrics['steps']}, "      
+                #    f"Actor Loss={episode_metrics['actor_loss']:.4f}, Critic Loss={episode_metrics['critic_loss']:.4f}, "
+                #    f"Total Loss={episode_metrics['total_loss']:.4f}, "
+                #    f"Duration={episode_metrics['duration']:.2f}s")
+
+                print(f"Episode {episode + 1} finished with a total reward of {episode_metrics['total_reward']}")
             
-            # Optional: Introduce a small delay between episodes for better monitoring
-            time.sleep(0.1)
-        
+                # Optional: Introduce a small delay between episodes for better monitoring
+                time.sleep(0.1)
+                
+            episode_rewards_per_seed.append(seed_rewards)
+
+
+        # --- Results Analysis ---
+        print("\n=== Final Statistics ===")
+        policies = ["RL", "SED", "SQ"]
+        rewards = [rl_rewards, sed_rewards, sq_rewards]
+        conf_intervals = [compute_ci(reward_list) for reward_list in rewards]
+
+        for policy, reward_list in zip(policies, rewards):
+            mean, lower_ci, upper_ci = compute_ci(reward_list)
+            print(f"{policy}: Mean Reward = {mean:.2f}, 95% CI = ({lower_ci:.2f}, {upper_ci:.2f})")
+
         # Save metrics to file
         # At the end of the simulation, save metrics to file
         save_adjusted_to_file = "adjusted_metrics.csv" if adjust_service_rate else "non_adjusted_metrics.csv"
         self.save_metrics(metrics, save_adjusted_to_file)
         self.save_metrics(metrics, save_to_file)
         print(f"Metrics saved to {save_to_file}")
-        
+
         print("Training completed.")
            
-        return
+        #return metrics
+        return metrics, {"policies": policies, "means": [ci[0] for ci in conf_intervals], "conf_intervals": [(ci[1], ci[2]) for ci in conf_intervals]}
         
         
     def save_metrics(self, metrics, filename):
@@ -2011,7 +2076,7 @@ class RequestQueue:
         plt.show()
         
         
-    def plot_rates(self):
+    def prev_plot_rates(self):
         """
         Plot the comparison of jockeying and reneging rates
         for each queue for each individual information source subscribed to.
@@ -2065,7 +2130,109 @@ class RequestQueue:
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()    
-    
+
+    def plot_rates(self):
+        """
+        Plot the comparison of jockeying and reneging rates
+        for each queue for each individual information source subscribed to,
+        including jockeying threshold-driven impatience rates.
+        """
+        sources = ["Markov-Based", "NN-Based", "Jockeying Threshold"]  # Information sources
+        queues = ["Server 1", "Server 2"]
+
+        # Helper function to collect rates for each queue and info source
+        def collect_rates(subscribers, server_id, threshold_model=False):
+            jockeying_rates, reneging_rates, queue_sizes = [], [], []
+            for i in range(1, len(subscribers) + 1):
+                current = subscribers[:i]
+                queue_sizes.append(i)
+
+                # For threshold model, use specific logic
+                if threshold_model:
+                    # Simulate jockeying/reneging rates based on jockeying-threshold-driven impatience
+                    num_jockeyed = sum(self.threshold_policy(req.pos_in_queue, len(current) - req.pos_in_queue,
+                                            req.serv_rate, req.serv_rate) for req in current)
+                    num_reneged = sum(self.threshold_policy(req.pos_in_queue, len(current),
+                                            req.serv_rate, req.serv_rate) == 0 for req in current)
+                    jockeying_rates.append(num_jockeyed / i)
+                    reneging_rates.append(num_reneged / i)
+                else:
+                    # Normal logic
+                    num_jockeyed = sum(getattr(req, 'jockeyed', False) for req in current)
+                    num_reneged = sum(getattr(req, 'reneged', False) for req in current)
+                    jockeying_rates.append(num_jockeyed / i)
+                    reneging_rates.append(num_reneged / i)
+
+            return queue_sizes, jockeying_rates, reneging_rates
+
+
+        # Determine the maximum queue size across all systems
+        max_queue_length = max(len(self.state_subscribers), len(self.nn_subscribers), len(self.all_requests) )
+        complete_range = range(1, max_queue_length + 1)  # Full x-axis range
+
+        # Helper function to normalize data rates
+        #def normalize(queue_sizes, rates, complete_range):
+        #    normalized = []
+        #    for x in complete_range:
+        #        if x in queue_sizes:
+        #            index = queue_sizes.index(x)
+        #            normalized.append(rates[index])
+        #        else:
+        #            normalized.append(float('nan'))  # Fill missing values with None
+        #    return normalized        
+
+        def normalize_forward_fill(queue_sizes, rates, full_range):
+            normalized = []
+            last_val = 0 # Default if list is empty
+            for x in full_range:
+                if x in queue_sizes:
+                    last_val = rates[queue_sizes.index(x)]
+                    normalized.append(last_val)
+                else:
+                    normalized.append(last_val) # This pushes the line to the right border
+            return normalized
+
+        fig, axes = plt.subplots(len(queues), 2, figsize=(14, 10))
+
+        for i, server_id in enumerate(["1", "2"]):
+            # Collect raw data
+            qs_m, j_m, r_m = collect_rates(self.state_subscribers, server_id)
+            qs_nn, j_nn, r_nn = collect_rates(self.nn_subscribers, server_id)
+            qs_t, j_t, r_t = collect_rates(self.all_requests, server_id, threshold_model=True)
+
+            # 3. APPLY NORMALIZATION so all Y-arrays are the same length as complete_range
+            j_m_norm = normalize_forward_fill(qs_m, j_m, complete_range)
+            j_nn_norm = normalize_forward_fill(qs_nn, j_nn, complete_range)
+            j_t_norm = normalize_forward_fill(qs_t, j_t, complete_range)
+
+            r_m_norm = normalize_forward_fill(qs_m, r_m, complete_range)
+            r_nn_norm = normalize_forward_fill(qs_nn, r_nn, complete_range)
+            r_t_norm = normalize_forward_fill(qs_t, r_t, complete_range)
+
+            ## Plot jockeying rates using the complete_range for X
+            axes[i, 0].plot(complete_range, j_m_norm, '-', label=sources[0], color='blue')
+            axes[i, 0].plot(complete_range, j_nn_norm, '-', label=sources[1], color='orange')
+            axes[i, 0].plot(complete_range, j_t_norm, '-', label=sources[2], color='green')
+
+            ## Plot reneging rates using the complete_range for X
+            axes[i, 1].plot(complete_range, r_m_norm, '-', label=sources[0], color='black')
+            axes[i, 1].plot(complete_range, r_nn_norm, '-', label=sources[1], color='brown')
+            axes[i, 1].plot(complete_range, r_t_norm, '-', label=sources[2], color='red')
+
+            # Critical: Set x-limits explicitly
+            axes[i, 0].set_xlim(0, max_queue_length)
+            axes[i, 1].set_xlim(0, max_queue_length)
+
+            # Formatting
+            for j in range(2):
+                #axes[i, j].set_xlim(1, max_queue_length) # Forces x-axis to be the same size
+                axes[i, j].set_xlabel("Queue Size")
+                axes[i, j].grid(True, linestyle='--', alpha=0.7)
+                axes[i, j].legend()
+
+        plt.tight_layout()
+        plt.show()
+
         
     def adjust_service_rates(self):
         """
@@ -2767,15 +2934,25 @@ class RequestQueue:
                     
     
     def compute_reneging_rate_by_info_source(self, info_src_requests):
-        """Compute the reneging rate for a specific info source."""
-        renegs = len(info_src_requests)  
-        return renegs / len(self.get_current_renege_count()) 
-        
+        """
+        Compute the reneging rate for a specific info source.
+
+        Parameters:
+            info_src_requests (list): The list of requests for a specific information source.
+
+        Returns:
+            float: Reneging rate for the specified information source.
+        """
+        total_reneges = len(info_src_requests)  # Total number of reneging requests for the info source
+        total_count = len(self.get_current_renege_count())  # Total number of current reneging counts
+
+        # Handle division by zero
+        if total_count == 0:
+            logging.warning("No reneging requests available for the selected information source. Returning rate as 0.0.")
+            return 0.0
+
+        return total_reneges / total_count 
       
-    def compute_jockeying_rate_by_info_source(self, info_src_requests):
-        """Compute the reneging rate for a specific info source."""
-        jockeys = len(info_src_requests) 
-        return jockeys / len(self.get_current_jockey_observations())
     
         
     def plot_reneging_time_vs_queue_length(self):
@@ -2962,7 +3139,62 @@ class RequestQueue:
 
         # Show the plot
         plt.show()
+    
+
+    def compare_rates_by_information_source(self):
+        """
+        Compare jockeying and reneging rates across Markov-based, NN-based,
+        and Jockeying-Threshold methods.
+        """
+        sources = ["Markov-Based", "NN-Based", "Jockeying Threshold"]
+
+        # Collect rates for Markov-based
+        reneging_rate_markov = self.compute_reneging_rate(self.state_subscribers)
+        jockeying_rate_markov = self.compute_jockeying_rate(self.state_subscribers)
+
+        # Collect rates for NN-based
+        reneging_rate_nn = self.compute_reneging_rate(self.nn_subscribers)
+        jockeying_rate_nn = self.compute_jockeying_rate(self.nn_subscribers)
+
+        # Collect rates for Jockeying-Threshold-based
+        reneging_rate_threshold = self.compute_reneging_rate_by_info_source(self.all_requests)
+        jockeying_rate_threshold = self.compute_jockeying_rate_by_info_source(self.all_requests)
+
+        # Print comparison
+        comparison = {
+            sources[0]: {
+                "reneging_rate": reneging_rate_markov,
+                "jockeying_rate": jockeying_rate_markov,
+            },
+            sources[1]: {
+                "reneging_rate": reneging_rate_nn,
+                "jockeying_rate": jockeying_rate_nn,
+            },
+            sources[2]: {
+                "reneging_rate": reneging_rate_threshold,
+                "jockeying_rate": jockeying_rate_threshold,
+            },
+        }
+
+        # Print results
+        for model, rates in comparison.items():
+            print(f"{model} Rates:")
+            print(f"  Reneging Rate: {rates['reneging_rate']:.2f}")
+            print(f"  Jockeying Rate: {rates['jockeying_rate']:.2f}")
+        return comparison
+
+
+    def compute_reneging_rate_by_info_source(self, info_src_requests):
+        """Compute the reneging rate for a specific info source."""
+        renegs = len(info_src_requests)  
+        return renegs / len(self.get_current_renege_count()) 
         
+      
+    def compute_jockeying_rate_by_info_source(self, info_src_requests):
+        """Compute the reneging rate for a specific info source."""
+        jockeys = len(info_src_requests) 
+        return jockeys / len(self.get_current_jockey_observations())
+    
         
     def set_equal_service_rates(self, rate):
         self.dict_servers_info["1"] = rate
@@ -2971,128 +3203,171 @@ class RequestQueue:
         
     def plot_reneging_and_jockeying_rates_vs_queue_size_by_type(self):
         """
-        Plots the reneging and jockeying rates as queue sizes grow for raw-state and NN-based subscribers.
+        Plots the reneging and jockeying rates as queue sizes grow for Markov, NN-based,
+        and Jockeying Threshold models with a unified x-axis.
         """
-   
 
-        types = [("Raw Markov", self.state_subscribers), ("Actor-Critic (NN)", self.nn_subscribers)]
+        types = [
+            ("Markov-Based", self.state_subscribers),
+            ("NN-Based", self.nn_subscribers),
+            ("Jockeying Threshold", self.all_requests)
+        ]
+
+        # Colors for plot lines
+        colors = {
+            "Markov-Based": {"reneging": "steelblue", "jockeying": "royalblue"},
+            "NN-Based": {"reneging": "forestgreen", "jockeying": "orange"},
+            "Jockeying Threshold": {"reneging": "purple", "jockeying": "brown"}
+        }
+
+        # 1. Establish the global maximum to synchronize all lines
+        max_queue_length = max(len(self.state_subscribers), len(self.nn_subscribers), len(self.all_requests))
+        complete_range = np.arange(1, max_queue_length + 1)
+
         rate_results = {}
 
         for label, subscribers in types:
-            reneging_counts = []
             jockeying_counts = []
+            reneging_counts = []
             queue_sizes = []
 
-            # Step through time (or just end state if you don't track queue size progression)
-            # If you want to plot vs. queue size, use range(len(subscribers)), or store sizes as requests are added
+            # Calculate raw rates
             for i in range(1, len(subscribers) + 1):
                 current_subs = subscribers[:i]
                 queue_sizes.append(i)
-                # Reneging and jockeying up to this point
-                num_reneged = sum(1 for req in current_subs if getattr(req, 'reneged', False))
-                num_jockeyed = sum(1 for req in current_subs if getattr(req, 'jockeyed', False))
-                reneging_counts.append(num_reneged / i)
+                num_jockeyed = sum(getattr(req, 'jockeyed', False) for req in current_subs)
+                num_reneged = sum(getattr(req, 'reneged', False) for req in current_subs)
                 jockeying_counts.append(num_jockeyed / i)
+                reneging_counts.append(num_reneged / i)
 
-            rate_results[label] = (queue_sizes, reneging_counts, jockeying_counts)
+            # 2. Fix: Ensure the results match the complete_range length
+            # We use np.nan for areas beyond the specific model's data so the x-axis matches but lines stop.
+            # If you want the lines to "flat-line" to the end, change np.nan to jockeying_counts[-1]
+            def synchronize(q_sizes, counts, target_range):
+                sync_rates = np.full(len(target_range), np.nan)
+                for idx, val in enumerate(q_sizes):
+                    if val <= len(target_range):
+                        sync_rates[val-1] = counts[idx]
+                return sync_rates
 
+            #j_sync = synchronize(queue_sizes, jockeying_counts, complete_range)
+            #r_sync = synchronize(queue_sizes, reneging_counts, complete_range)
+
+            #rate_results[label] = (j_sync, r_sync)
+
+            # Fix: Use interpolation with 'right' set to the last known value
+            # This ensures the line extends horizontally to the end of the plot
+            j_sync = np.interp(complete_range, queue_sizes, jockeying_counts, right=jockeying_counts[-1])
+            r_sync = np.interp(complete_range, queue_sizes, reneging_counts, right=reneging_counts[-1])
+
+            rate_results[label] = (j_sync, r_sync)
+
+        # Plotting
+        # plt.figure(figsize=(12, 6))
+
+        # 3. Increase right margin slightly to make room for the legend
+        fig, ax = plt.subplots(figsize=(14, 7))
+        plt.subplots_adjust(right=0.82)
+        
+        #for label, (x_axis, j_rates, r_rates) in rate_results.items():
+        #    plt.plot(x_axis, r_rates, '-', color=colors[label]["reneging"], label=f'{label} Reneging')
+        #    plt.plot(x_axis, j_rates, '--', color=colors[label]["jockeying"], label=f'{label} Jockeying')
+
+        #for label, (jockeying_rates, reneging_rates) in rate_results.items():
+        #    # Plot using the unified complete_range for X
+        #    plt.plot(complete_range, reneging_rates, '-', label=f'{label} Reneging',
+        #             color=colors[label]["reneging"], linewidth=2, alpha=0.8)
+        #    plt.plot(complete_range, jockeying_rates, '--', label=f'{label} Jockeying',
+        #             color=colors[label]["jockeying"], linewidth=2, alpha=0.8)
+
+        # Forces the viewport to stay consistent
+        #plt.xlim(0, max_queue_length)
+        
+        # Logarithmic scale on y-axis
+        #plt.yscale('log')
+
+        #plt.xlabel("Queue Size (Number of Requests Entered)")
+        #plt.ylabel("Rate")
+        #plt.title("Reneging and Jockeying Rates vs Queue Size (Unified X-Axis)")
+        #plt.legend(loc='upper right', fontsize='small', ncol=2)
+        #plt.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.5)
+
+        for label, (j_rates, r_rates) in rate_results.items():
+            ax.plot(complete_range, r_rates, '-', label=f'{label} Reneging',
+                     color=colors[label]["reneging"], linewidth=1, alpha=0.8)
+            ax.plot(complete_range, j_rates, '-', label=f'{label} Jockeying',
+                     color=colors[label]["jockeying"], linewidth=1, alpha=0.8)
+
+        ax.set_xlim(0, max_queue_length)
+        ax.set_yscale('log')
+        ax.set_xlabel("Queue Size (Number of Requests Entered)")
+        ax.set_ylabel("Rate")
+        ax.set_title("Reneging and Jockeying Rates vs Queue Size")
+
+        # 4. Move Legend to the middle-right outside the plot area
+        ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize='small', frameon=True)
+        ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.5)
+        plt.tight_layout()
+        plt.show()
+ 
+
+    def old_plot_reneging_and_jockeying_rates_vs_queue_size_by_type(self):
+        """
+        Plots the reneging and jockeying rates as queue sizes grow for Markov, NN-based,
+        and Jockeying Threshold models, with improved colors and gridlines.
+        """
+        types = [
+            ("Markov-Based", self.state_subscribers),
+            ("NN-Based", self.nn_subscribers),
+            ("Jockeying Threshold", self.all_requests)
+        ]
+
+        rate_results = {}
+
+        # Define non-saturating colors
+        colors = {
+            "Markov-Based": {"reneging": "steelblue", "jockeying": "royalblue"},
+            "NN-Based": {"reneging": "forestgreen", "jockeying": "darkorange"},
+            "Jockeying Threshold": {"reneging": "purple", "jockeying": "brown"}
+        }
+
+        # Compute rates
+        for label, subscribers in types:
+            jockeying_counts = []
+            reneging_counts = []
+            queue_sizes = []
+
+            for i in range(1, len(subscribers) + 1):
+                current_subs = subscribers[:i]
+                queue_sizes.append(i)
+                num_jockeyed = sum(getattr(req, 'jockeyed', False) for req in current_subs)
+                num_reneged = sum(getattr(req, 'reneged', False) for req in current_subs)
+                jockeying_counts.append(num_jockeyed / i)
+                reneging_counts.append(num_reneged / i)
+
+            rate_results[label] = (queue_sizes, jockeying_counts, reneging_counts)
+
+        # Create the plot
         plt.figure(figsize=(12, 6))
-        for label, (queue_sizes, reneging_rates, jockeying_rates) in rate_results.items():
-            plt.plot(queue_sizes, reneging_rates, '-o', label=f'{label} Reneging Rate', markersize=1)
-            plt.plot(queue_sizes, jockeying_rates, '-x', label=f'{label} Jockeying Rate', markersize=1)
+        for label, (queue_sizes, jockeying_rates, reneging_rates) in rate_results.items():
+            # Use non-saturating colors for better visibility
+            plt.plot(queue_sizes, reneging_rates, '-o', label=f'{label} Reneging Rate', 
+                     color=colors[label]["reneging"], markersize=2, alpha=0.8)
+            plt.plot(queue_sizes, jockeying_rates, '-x', label=f'{label} Jockeying Rate', 
+                     color=colors[label]["jockeying"], markersize=2, alpha=0.8)
 
+        # Set logarithmic scale for y-axis if appropriate
+        plt.yscale('log')
+
+        # Add title, labels, gridlines, and legend
         plt.xlabel("Queue Size (Number of Requests Entered)")
         plt.ylabel("Rate")
         plt.title("Reneging and Jockeying Rates vs Queue Size by Information Type")
+        plt.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.7)
         plt.legend()
-        plt.grid(True)
         plt.tight_layout()
         plt.show()
 
-
-    def plot_jockeying_reneging_rates_vs_waiting_time_difference(self, bin_width=0.2):
-        # Convert lists to dicts using id(Request) as unique key
-        jockey_events = {}
-        for obs in self.objObserv.get_jockey_obs():
-            req = obs.get("Request")
-            if req is not None:
-                jockey_events[id(req)] = obs
-
-        renege_events = {}
-        for obs in self.objObserv.get_renege_obs():
-            req = obs.get("Request")
-            if req is not None:
-                renege_events[id(req)] = obs
-
-        jockey_x, jockey_y = [], []
-        renege_x, renege_y = [], []
-
-        # Jockeying events
-        for obs in jockey_events.values():
-            req = obs.get("Request")
-            #time_entrance = getattr(req, 'time_entrance', None)
-            #time_exit = getattr(req, 'time_exit', None)
-            #expected_service_time = obs.get("expected_service_time")
-            diff_wait = obs.get("waiting_time_diff")
-            jockeying_rate = obs.get("rate_jockeyed")
-            if None not in (diff_wait, jockeying_rate): # time_entrance, time_exit, expected_service_time,
-                #waiting_time = time_exit - time_entrance
-                #diff = waiting_time - expected_service_time
-                jockey_x.append(diff_wait)
-                jockey_y.append(jockeying_rate)
-
-        # Reneging events
-        for obs in renege_events.values():
-            req = obs.get("Request")
-            #time_entrance = getattr(req, 'time_entrance', None)
-            #time_exit = getattr(req, 'time_exit', None)
-            #expected_service_time = obs.get("expected_service_time")
-            diff_wait = obs.get("waiting_time_diff")
-            reneging_rate = obs.get("rate_reneged")
-            if None not in (diff_wait, reneging_rate): # time_entrance, time_exit, expected_service_time,
-                #waiting_time = time_exit - time_entrance
-                #diff = waiting_time - expected_service_time
-                renege_x.append(diff_wait)
-                renege_y.append(reneging_rate)
-
-        # Bin and average to remove zigzagging
-        def bin_and_average(x, y, bin_width):
-            if not x:
-                return [], []
-            bins = np.arange(min(x), max(x) + bin_width, bin_width)
-            bin_indices = np.digitize(x, bins)
-            bin_sums = defaultdict(float)
-            bin_counts = defaultdict(int)
-            for xi, yi, bi in zip(x, y, bin_indices):
-                bin_sums[bi] += yi
-                bin_counts[bi] += 1
-            bin_means_x = []
-            bin_means_y = []
-            for bi in sorted(bin_sums):
-                bin_center = bins[bi-1] if bi-1 < len(bins) else bins[-1]
-                bin_means_x.append(bin_center)
-                bin_means_y.append(bin_sums[bi] / bin_counts[bi])
-            return bin_means_x, bin_means_y
-
-        jockey_x_smooth, jockey_y_smooth = bin_and_average(jockey_x, jockey_y, bin_width)
-        renege_x_smooth, renege_y_smooth = bin_and_average(renege_x, renege_y, bin_width)
-
-        plt.figure(figsize=(10, 6))
-        if jockey_x_smooth and jockey_y_smooth:
-            plt.plot(jockey_x_smooth, jockey_y_smooth, color='orange', label='Jockeying Rate', marker='o')
-        if renege_x_smooth and renege_y_smooth:
-            plt.plot(renege_x_smooth, renege_y_smooth, color='blue', label='Reneging Rate', marker='x')
-
-        plt.xlabel('Waiting Time - Expected Service Time (at event)')
-        plt.ylabel('Event Rate (Jockeying/Reneging)')
-        plt.title('Jockeying and Reneging Rates vs Waiting Time Difference')
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.show()
-
-    
-    
     def plot_asymptotic_behavior_of_jockeying_and_reneging(self, max_queue_length=100, bin_width=2):
         """
         Plot the probability of beneficial jockeying and reneging as queue length increases,
@@ -3988,7 +4263,155 @@ def visualize_comparison(adjusted_file="adjusted_metrics.csv", non_adjusted_file
     plt.grid()
     plt.show()
 
+
+# --- Baseline Policies ---
+def sq_policy(k_i, k_j):
+    """Shortest Queue Baseline (ignores service rates)."""
+    return 1 if k_i > k_j else 0
+
+def sed_policy(k_i, k_j, mu_i, mu_j):
+    """
+    Shortest Expected Delay (SED) Baseline (uses queue sizes and service rates).
+    Args:
+        k_i, k_j: Queue lengths for servers i and j.
+        mu_i, mu_j: Service rates for servers i and j.
+    Returns:
+        int: Decision (1: switch to server j, 0: stay at server i).
+    """
+    eps = 1e-8  # To avoid division by zero
+    delay_i = k_i / max(mu_i, eps)  # Expected delay for server i
+    delay_j = k_j / max(mu_j, eps)  # Expected delay for server j
+    return 1 if delay_i > delay_j else 0
+
+
+# --- Utility Functions ---
+def compute_ci(data, confidence=0.95):
+    """Compute confidence intervals."""
+    n = len(data)
+    mean = np.mean(data)
+    stderr = sem(data)
+    h = stderr * t.ppf((1 + confidence) / 2., n - 1)
+    return mean, mean - h, mean + h
+
+
+def plot_with_error_bars(policies, means, conf_intervals):
+    """
+    Plot mean rewards with confidence intervals for various policies.
+
+    Args:
+        policies: List of policy names (str).
+        means: List of mean rewards for each policy.
+        conf_intervals: List of tuples containing (lower_bound, upper_bound) for each policy.
     
+    Returns:
+        None
+    """
+    x = range(len(policies))  # Indices for the policies
+    lower_errors = [mean - ci[0] for mean, ci in zip(means, conf_intervals)]
+    upper_errors = [ci[1] - mean for mean, ci in zip(means, conf_intervals)]
+    y_err = [lower_errors, upper_errors]
+
+    plt.figure(figsize=(8, 5))
+    plt.errorbar(
+        x, means, yerr=y_err, fmt='o', capsize=5, markersize=8,
+        color='blue', ecolor='lightblue', elinewidth=2, markerfacecolor='darkblue', label="95% CI"
+    )
+    plt.xticks(x, policies)  # Correctly formatting the policy names on x-axis
+    plt.xlabel("Policy Types")
+    plt.ylabel("Mean Reward")
+    plt.title("Mean Reward Comparisons with 95% CI")
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def oirg_plot_with_error_bars(results, conf_intervals):
+    """
+    Plots the results with error bars based on confidence intervals.
+    
+    Parameters:
+        results (list): List of mean values for each point.
+        conf_intervals (list): List of tuples containing confidence intervals (lower_bound, upper_bound).
+    """
+    x = range(len(results))
+    
+    # Ensure the confidence intervals are valid
+    valid_data = [
+        (mean, lower, upper)
+        for mean, ci in zip(results, conf_intervals)
+        if ci is not None and ci[0] is not None and ci[1] is not None
+        for lower, upper in [ci]
+    ]
+
+    if not valid_data:
+        logging.warning("No valid data to plot with error bars.")
+        return
+    
+    # Unpack the filtered valid data
+    x_valid = range(len(valid_data))
+    y_means = [mean for mean, _, _ in valid_data]
+    y_err = [(mean - lower, upper - mean) for mean, lower, upper in valid_data]
+
+    # Separate upper and lower bounds
+    lower_err, upper_err = zip(*y_err)
+    
+    # Plot results with error bars
+    plt.errorbar(x_valid, y_means, yerr=[lower_err, upper_err], fmt='o', capsize=5, label='Results with CI')
+    plt.xlabel('Data Index')
+    plt.ylabel('Mean Value')
+    plt.title('Results with Confidence Intervals')
+    plt.legend()
+    plt.grid(True, linestyle='--', linewidth=0.5, which='both')
+    plt.tight_layout()
+    plt.show()
+
+
+from scipy.stats import sem, t
+
+def old_compute_ci(data, confidence=0.95):
+    """
+    Computes the confidence interval (CI) for a given dataset and confidence level.
+    
+    Parameters:
+        data (list or array): Array or list of numerical values.
+        confidence (float): Confidence level for the CI.
+    
+    Returns:
+        tuple: (mean, lower_bound, upper_bound) of the confidence interval.
+    """
+    # Check if there are enough data points
+    if len(data) < 2:  # Minimum of 2 data points required for CI calculations
+        logging.warning("Not enough data points to calculate CI. Returning None for CI bounds.")
+        return None, None, None
+
+    mean = np.mean(data)
+    sem = stats.sem(data)  # Compute the standard error of the mean
+
+    if len(data) > 1 and sem > 0:
+        margin_of_error = sem * stats.t.ppf((1 + confidence) / 2, len(data) - 1)
+        lower_bound = mean - margin_of_error
+        upper_bound = mean + margin_of_error
+    else:
+        logging.warning("Standard error is zero or insufficient data. Returning None for CI bounds.")
+        return mean, None, None
+
+    return mean, lower_bound, upper_bound
+
+def compute_se(data):
+    """
+    Compute the Standard Error (SE) of the mean for given data.
+    
+    Args:
+        data (list or numpy array): The data for which SE is calculated.
+    
+    Returns:
+        float: The standard error of the mean.
+    """
+    return np.std(data, ddof=1) / np.sqrt(len(data))
+
+
+import queue
 
 def main():       
 	
@@ -4012,20 +4435,41 @@ def main():
     
     # These are the number of iterations also labelled as step in the simulation
     # Ideally each step corresponds to an arrival and processing iteration
-    duration = 2     
+    duration = 10
+    num_episodes = 50  # Number of episodes
+    num_seeds = 2       # Number of random seeds
     
+    # Define a queue to store return value from the thread
+    stats_queue = queue.Queue()
+
     # Start the scheduler
-    #scheduler_thread = threading.Thread(target=request_queue.run(duration, env, adjust_service_rate=False, save_to_file="non_adjusted_metrics.csv")) # requestObj.run_scheduler) #
+    #scheduler_thread = threading.Thread(
+    #    target=request_queue.run,
+    #    args=(duration, env),
+    #    kwargs={
+    #        'adjust_service_rate': False,
+    #        'num_episodes': 120, #   <-- set to 120 episodes, or any number > 100
+    #        'save_to_file': "non_adjusted_metrics.csv"
+    #        # "arrival_rates": env.arrival_rates
+    #    }
+    #) 
+
+    # Wrap the run method to push stats into the Queue
+    def threaded_run():
+        _, stats = request_queue.run(
+            duration,
+            env,
+            adjust_service_rate=False,
+            num_episodes=num_episodes,
+            save_to_file="non_adjusted_metrics.csv"
+        )
+        stats_queue.put(stats)  # Push the stats to the queue
+
+    # Start thread for running the scheduler
     scheduler_thread = threading.Thread(
-        target=request_queue.run,
-        args=(duration, env),
-        kwargs={
-            'adjust_service_rate': False,
-            'num_episodes': 5, #   <-- set to 120 episodes, or any number > 100
-            'save_to_file': "non_adjusted_metrics.csv"
-            # "arrival_rates": env.arrival_rates
-        }
-    ) 
+        target=threaded_run
+    )
+
     scheduler_thread.start()
     scheduler_thread.join()  # <-- Wait until simulation is done then plot below functions
     
@@ -4034,27 +4478,22 @@ def main():
     request_queue.plot_rates() # change me not to use dispatch_data but use self.subscribers variables    
     request_queue.compare_rates_by_information_source() # _with_graph
     # request_queue.plot_asymptotic_behavior_of_jockeying_and_reneging(max_queue_length=1000)
-    request_queue.plot_reneging_and_jockeying_rates_vs_queue_size_by_type() # plot_reneging_and_jockeying_rates_vs_queue_size()
+    request_queue.plot_reneging_and_jockeying_rates_vs_queue_size_by_type() 
+
+    # Retrieve stats from the Queue
+    stats = stats_queue.get()
+
+    # Plot final statistics
+    policies = stats["policies"]
+    means = stats["means"]
+    conf_intervals = stats["conf_intervals"]
+
+    # Create the plot using the returned statistics
+    plot_with_error_bars(policies, means, conf_intervals)
     
-    request_queue.plot_decision_probability_vs_queue_length(bin_width=1)
-    request_queue.plot_diagnostics_error_and_misclassification() #max_queue_length=500)    
-    request_queue.plot_successful_jockey_probability_vs_queue_length() # T=None, bin_width=1)
-    
-    #request_queue.plot_successful_jockey_probability_vs_queue_length(T=None, max_queue_length=500)
-    
-    # request_queue.compare_behavior_rates_by_information_how_often()
-    # request_queue.plot_jockeying_reneging_rates_vs_waiting_time_difference()
-    
-    # request_queue.plot_reneging_time_vs_queue_length()
-    # request_queue.plot_jockeying_time_vs_queue_length()
-    # request_queue.plot_waiting_time_vs_queue_length_with_fit()
-    
-    # visualize_comparison("adjusted_metrics.csv", "non-adjusted_metrics.csv")
-    
-    # Run equal service rate experiment
-    #arrival_rates_even = [2,4,6,8,10,12,14,16]
-    # equal_rate = 5.0  # <-- Set your desired equal service rate
-    #request_queue.run_equal_service_rate_experiment(arrival_rates_even, duration, env, num_episodes=20)        
+    #request_queue.plot_decision_probability_vs_queue_length(bin_width=1)
+    #request_queue.plot_diagnostics_error_and_misclassification() #max_queue_length=500)    
+    #request_queue.plot_successful_jockey_probability_vs_queue_length() # T=None, bin_width=1)
           
 
 if __name__ == "__main__":
