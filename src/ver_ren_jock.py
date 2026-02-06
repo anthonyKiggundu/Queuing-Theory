@@ -166,6 +166,7 @@ class Queues(object):
         rand_idx = random.randrange(len(self.arrival_rates))
         self.sampled_arr_rate = self.randomize_arrival_rate() #self.arrival_rates[rand_idx] 
         self.queueID = ""             
+        self.target_heterogeneity_ratio = None
         
         self.dict_queues = self.generate_queues()
         #self.dict_servers = self.queue_setup_manager()
@@ -177,16 +178,39 @@ class Queues(object):
         return random.choice(self.arrival_rates)
         
         
-    def queue_setup_manager(self):
+    def queue_setup_manager(self, target_ratio=None):
                 
         # deltalambda controls the difference between the service rate of either queues    
-        deltaLambda=random.randint(1, 2)
+        #deltaLambda=random.randint(1, 2)
         
-        serv_rate_one=self.sampled_arr_rate + deltaLambda 
-        serv_rate_two=self.sampled_arr_rate - deltaLambda
+        #serv_rate_one=self.sampled_arr_rate + deltaLambda 
+        #serv_rate_two=self.sampled_arr_rate - deltaLambda
 
-        _serv_rate_one=serv_rate_one / 2
-        _serv_rate_two=serv_rate_two / 2
+        #_serv_rate_one=serv_rate_one / 2
+        #_serv_rate_two=serv_rate_two / 2
+
+        """
+        Setup queue service rates.
+
+        Args:
+            target_ratio: If provided, use this μ₂/μ₁ ratio instead of random deltaLambda
+        """
+        if target_ratio is not None and target_ratio != 1.0:
+            # Use target heterogeneity ratio
+            mu1 = self.sampled_arr_rate / 1.5  # Slightly underloaded
+            mu2 = mu1 * target_ratio
+
+            _serv_rate_one = mu1
+            _serv_rate_two = mu2
+        else:
+            # Original random behavior
+            deltaLambda = random.randint(1, 2)
+
+            serv_rate_one = self.sampled_arr_rate + deltaLambda
+            serv_rate_two = self.sampled_arr_rate - deltaLambda
+
+            _serv_rate_one = serv_rate_one / 2
+            _serv_rate_two = serv_rate_two / 2
                 
         self.dict_servers["1"] = _serv_rate_one 
         self.dict_servers["2"] = _serv_rate_two
@@ -194,9 +218,9 @@ class Queues(object):
         #print("\n Current Arrival Rate:", self.sampled_arr_rate, "Server1:", _serv_rate_one, "Server2:", _serv_rate_two) 
 
 
-    def get_dict_servers(self):
+    def get_dict_servers(self, target_ratio=None):
 
-        self.queue_setup_manager()
+        self.queue_setup_manager(target_ratio)
         
         return self.dict_servers        
 
@@ -414,7 +438,7 @@ class Request:
             #if (not self.optimal_learning_achieved):
                 self.min_amount_observations=self.observations.size+1
                 # print(self.min_amount_observations)
-        return decision
+        #return decision
         
     
     # Extensions for the Actor-Critic modeling
@@ -447,7 +471,7 @@ class Request:
             obs_entry = self.objObserve(False,False,self.time-req.time_entrance, self.end_utility, len(curr_queue)) # reward, req.min_amount_observations)
             self.min_amount_observations=self.observations.size+1
         
-        return decision
+        # return decision
         
 
     def get_time_entrance(self):
@@ -1124,7 +1148,7 @@ class RequestQueue:
         }
 
 
-    def run(self, duration, env, adjust_service_rate, num_episodes=10, progress_bar=True, progress_log=True, save_to_file="simu_results.csv", num_seeds=5, force_rates=None, include_mu_in_state=True):
+    def run(self, duration, env, adjust_service_rate, num_episodes=10, progress_bar=True, progress_log=True, save_to_file="simu_results.csv", num_seeds=5, force_rates=None, include_mu_in_state=True, use_dynamic_heterogeneity=False):
         """
         Run the simulation with episodic training.
 
@@ -1133,6 +1157,8 @@ class RequestQueue:
             num_episodes (int): Number of episodes for training.
             progress_bar (bool): Whether to show a progress bar for steps.
             progress_log (bool): Whether to log progress for each step.
+            use_dynamic_heterogeneity: If True, use target_heterogeneity_ratio with varying arrival rates
+                        If False and force_rates provided, use fixed rates
 
         Returns:
             None
@@ -1142,7 +1168,7 @@ class RequestQueue:
         steps_per_episode = int(duration / self.time_res)
         metrics = []  # List to store metrics for all episodes
         all_rewards = []
-        rl_rewards, sed_rewards, sq_rewards = [], [], []  # Store rewards for each policy
+        rl_rewards, sed_rewards, markov_rewards = [], [], []  # Store rewards for each policy
         save_to_file = "simu_results.csv"
         
         actor_losses = []
@@ -1173,8 +1199,8 @@ class RequestQueue:
                 # Reset environment for the new episode
                 state, info = self.env.reset(seed=seed)
 
-                total_rl_reward, total_sed_reward, total_sq_reward = 0, 0, 0  # Track rewards for each policy
-                rl_correct, sed_correct, sq_correct = 0, 0, 0  # Baseline agreement
+                total_rl_reward, total_sed_reward, total_markov_reward = 0, 0, 0  # Track rewards for each policy
+                rl_correct, sed_correct, markov_correct = 0, 0, 0  # Baseline agreement
                 rl_wrong, sed_wrong, sq_wrong = 0, 0, 0  # Baseline errors
 
                 total_reward = 0
@@ -1189,6 +1215,61 @@ class RequestQueue:
                 step_rewards = 0
         
                 for i in step_loop: 
+                        # Get current queue states FIRST (before any rate calculations)
+                    srv_1 = self.dict_queues_obj.get("1")  # Server1
+                    srv_2 = self.dict_queues_obj.get("2")  # Server2
+
+                    if use_dynamic_heterogeneity:
+                        # DYNAMIC MODE: Arrival rate changes each step, but μ₂/μ₁ ratio is controlled
+                        self.arr_rate = self.objQueues.randomize_arrival_rate()
+
+                        # Maintain the target heterogeneity ratio
+                        target_ratio = getattr(self, 'target_heterogeneity_ratio', None)
+                        if target_ratio is not None:
+                            srv_rates = self.objQueues.get_dict_servers(target_ratio=target_ratio)
+                            self.srvrates_1 = srv_rates["1"]
+                            self.srvrates_2 = srv_rates["2"]
+                        else:
+                            # Fallback to original behavior
+                            deltaLambda = random.randint(1, 2)
+                            if len(srv_1) < len(srv_2):
+                                serv_rate_one = self.arr_rate - deltaLambda
+                                serv_rate_two = self.arr_rate + deltaLambda
+                            else:
+                                serv_rate_one = self.arr_rate + deltaLambda
+                                serv_rate_two = self.arr_rate - deltaLambda
+                            self.srvrates_1 = serv_rate_one / 2
+                            self.srvrates_2 = serv_rate_two / 2
+
+                    elif force_rates is not None:
+                        # CONTROLLED EXPERIMENT: Fixed rates throughout
+                        self.srvrates_1, self.srvrates_2 = force_rates
+                        # Use fixed or current arrival rate
+                        if hasattr(self.objQueues, 'sampled_arr_rate'):
+                            self.arr_rate = self.objQueues.sampled_arr_rate
+                        else:
+                            self.arr_rate = self.objQueues.randomize_arrival_rate()
+
+                    else:
+                        # ORIGINAL RANDOM BEHAVIOR
+                        self.arr_rate = self.objQueues.randomize_arrival_rate()
+ 
+                        deltaLambda = random.randint(1, 2)
+
+                        if len(srv_1) < len(srv_2):
+                            serv_rate_one = self.arr_rate - deltaLambda
+                            serv_rate_two = self.arr_rate + deltaLambda
+                        else:
+                            serv_rate_one = self.arr_rate + deltaLambda
+                            serv_rate_two = self.arr_rate - deltaLambda
+
+                        self.srvrates_1 = serv_rate_one / 2
+                        self.srvrates_2 = serv_rate_two / 2
+ 
+                    print(f"\n[Step {i+1}] Arrival rate: {self.arr_rate}, " f"μ₁: {self.srvrates_1:.2f}, μ₂: {self.srvrates_2:.2f}, "
+                          f"Ratio: {self.srvrates_2/self.srvrates_1:.2f}")
+
+                    '''
                     self.arr_rate = self.objQueues.randomize_arrival_rate()  # Randomize arrival rate
                     srv_1 = self.dict_queues_obj.get("1") # Server1
                     srv_2 = self.dict_queues_obj.get("2") 
@@ -1217,9 +1298,8 @@ class RequestQueue:
                     self.srvrates_2 = serv_rate_two / 2                                         
                 
                     print("\n Arrival rate: ", self.arr_rate, "Rates 1: ----", self.srvrates_1,  "Rates 2: ----", self.srvrates_2)  
-                    #if done:  # Break the loop if the episode ends
-                    #    break         
-			
+		            '''
+
                     if progress_log:
                         print("Step", i + 1, "/", steps_per_episode) # print("Step",i,"/",steps)
                         
@@ -1334,25 +1414,22 @@ class RequestQueue:
 
                     # Baseline decisions
                     action_sed = sed_policy(k_i, k_j, mu_i, mu_j)
-                    action_sq = sq_policy(k_i, k_j)
 
-                    # Evaluate against RL decision
+                    # Markov state-based decision (from your analytical methods)
+                    # This would be the decision made by state_subscribers
+                    # You can implement this based on your makeJockeyingDecision logic
+                    #action_markov = self.get_markov_decision(k_i, k_j, mu_i, mu_j)
+
                     if action == action_sed:
                         sed_correct += 1
                     else:
                         sed_wrong += 1
-
-                    if action == action_sq:
-                        sq_correct += 1
-                    else:
-                        sq_wrong += 1
 
                     # Get transition and rewards
                     next_state, reward, done, _ = self.env.step(action)
                     self.agent.store_reward(reward)
                     total_rl_reward += reward
                     total_sed_reward += reward if action == action_sed else 0  # Approximate SED performance
-                    total_sq_reward += reward if action == action_sq else 0  # Approximate SQ performance
 
                     # Step 4: Update the state for the next step
                     state = next_state
@@ -1434,16 +1511,19 @@ class RequestQueue:
 
                 metrics.append(episode_metrics)            
             
-                # Print episode summary
+                # Calculate average reward for Markov state-based requests
+                markov_rewards_episode = [m.get("reward", 0) for m in self.objObserv.get_jockey_obs() + self.objObserv.get_renege_obs()]
+                total_markov_reward = np.mean(markov_rewards_episode) if markov_rewards_episode else 0
+
                 rl_rewards.append(total_rl_reward)
                 sed_rewards.append(total_sed_reward)
-                sq_rewards.append(total_sq_reward)
+                markov_rewards.append(total_markov_reward)
 
                 # Episode summary
                 print(f"Episode {episode + 1}/{num_episodes} (Seed {seed}):")
-                print(f"  RL Reward: {total_rl_reward:.2f} | SED Reward: {total_sed_reward:.2f} | SQ Reward: {total_sq_reward:.2f}")
+                print(f"  RL Reward: {total_rl_reward:.2f} | SED Reward: {total_sed_reward:.2f} | Markov Reward: {total_markov_reward:.2f}")
                 print(f"  RL vs SED Agreement: {sed_correct / steps_per_episode:.2%}")
-                print(f"  RL vs SQ Agreement: {sq_correct / steps_per_episode:.2%}"
+                print(f"  RL vs Markov Agreement: {markov_correct / steps_per_episode:.2%}"
                     f"Avg Reward={episode_metrics['average_reward']:.2f}, Steps={episode_metrics['steps']}, "
                     f"Actor Loss={episode_metrics['actor_loss']:.4f}, Critic Loss={episode_metrics['critic_loss']:.4f}, "
                     f"Total Loss={episode_metrics['total_loss']:.4f}, "
@@ -1466,8 +1546,8 @@ class RequestQueue:
 
         # --- Results Analysis ---
         print("\n=== Final Statistics ===")
-        policies = ["RL", "SED", "SQ"]
-        rewards = [rl_rewards, sed_rewards, sq_rewards]
+        policies = ["RL", "SED", "Markov"]
+        rewards = [rl_rewards, sed_rewards, markov_rewards]
         conf_intervals = [compute_ci(reward_list) for reward_list in rewards]
 
         for policy, reward_list in zip(policies, rewards):
@@ -1486,61 +1566,142 @@ class RequestQueue:
         #return metrics
         return metrics, {"policies": policies, "means": [ci[0] for ci in conf_intervals], "conf_intervals": [(ci[1], ci[2]) for ci in conf_intervals]}
         
-    def run_heterogeneity_sweep(self, ratios, base_mu, duration, env, num_seeds=5, num_episodes=5, save_csv="heterog_sweep.csv"):
+    def old_run_proper_heterogeneity_sweep(self, duration, env, num_seeds=3, num_episodes=5, fixed_arrival_rate=False):
         """
-        Sweep heterogeneity (mu ratio) keeping other parameters fixed.
-        ratios: list/iterable of mu2/mu1 ratios to evaluate (e.g., [1.0, 1.2, 1.5, 2.0])
-        base_mu: base mu for server 1 (mu1); server 2 mu = base_mu * ratio
-        Returns: pandas DataFrame with columns ['ratio','mean_RL','mean_SED','gap']
-        """
+        Proper heterogeneity sweep: vary μ₂/μ₁ ratio systematically.
     
+        Args:
+            fixed_arrival_rate: If False, arrival rates vary naturally during episodes (original behavior)
+                           If True, fixes arrival rate for controlled experiments
+        """
         results = []
-        for ratio in ratios:
-            mu1 = float(base_mu)
-            mu2 = float(base_mu) * float(ratio)
-            print(f"Running heterogeneity ratio {ratio}: mu1={mu1}, mu2={mu2}")
-            # run the simulation forcing server rates (we force absolute rates for the run)
-            metrics, summary = self.run(duration, env, adjust_service_rate=False, num_episodes=num_episodes,
-                                        progress_bar=False, progress_log=False, save_to_file=f"heterog_r{ratio}.csv",
-                                        num_seeds=num_seeds, force_rates=(mu1, mu2))
-            # `summary` returned by run() contains policy means (see your existing return)
-            rl_mean = summary["means"][0] if "means" in summary else np.mean([m["total_reward"] for m in metrics])
-            sed_mean = None
-            # try to extract SED mean from metrics if available (you track sed_rewards in run)
-            try:
-                sed_mean = np.mean([m.get("sed_mean", np.nan) for m in metrics])  # fallback
-            except Exception:
-                sed_mean = np.nan
-            # as a robust fallback, compute from file saved
-            results.append({"ratio": ratio, "mu1": mu1, "mu2": mu2, "mean_RL": rl_mean, "mean_SED": sed_mean, "gap": (rl_mean - (sed_mean if sed_mean is not None else 0.0))})
+        base_lambda = 10  # Base arrival rate (used only if fixed_arrival_rate=True)
+        heterogeneity_ratios = [1.0, 1.2, 1.5, 2.0, 3.0]  # μ₂/μ₁ ratios
+    
+        for ratio in heterogeneity_ratios:
+            print(f"\n{'='*60}")
+            print(f"Testing Heterogeneity Ratio μ₂/μ₁ = {ratio}")
+            print(f"{'='*60}")
+        
+            if fixed_arrival_rate:
+                # Controlled experiment: fix arrival rate
+                mu1 = base_lambda / 1.5
+                mu2 = mu1 * ratio
+                force_rates = (mu1, mu2)
+                self.objQueues.sampled_arr_rate = base_lambda  # Fix arrival rate
+                print(f"FIXED Configuration: λ={base_lambda}, μ₁={mu1:.2f}, μ₂={mu2:.2f}")
+            else:
+                # Natural behavior: let arrival rates vary, but control the heterogeneity
+                # Set the service rate ratio, but arrival rate will vary naturally
+                force_rates = None  # Don't force rates, use natural variation
+                # Store the desired ratio for use in queue_setup_manager
+                self.target_heterogeneity_ratio = ratio
+                print(f"DYNAMIC Configuration: λ varies naturally, μ₂/μ₁ target ratio = {ratio}")
+        
+            print(f"Arrival rate behavior: {'FIXED' if fixed_arrival_rate else 'DYNAMIC (varies each step)'}")
+        
+             # Reset environment
+            self.nn_subscribers = []
+            self.state_subscribers = []
+            self.all_requests = []
+        
+            stats_queue = queue.Queue()
+        
+            def threaded_run():
+                metrics, stats = self.run(
+                    duration,
+                    env,
+                    adjust_service_rate=False,
+                    num_episodes=num_episodes,
+                    save_to_file=f"heterog_ratio_{ratio:.1f}_{'fixed' if fixed_arrival_rate else 'dynamic'}.csv",
+                    num_seeds=num_seeds,
+                    force_rates=force_rates,
+                    use_dynamic_heterogeneity=(not fixed_arrival_rate)
+                )
+                stats_queue.put({"metrics": metrics, "stats": stats})
+        
+            scheduler_thread = threading.Thread(target=threaded_run)
+            scheduler_thread.start()
+            scheduler_thread.join()
+        
+            result = stats_queue.get()
+            metrics = result["metrics"]
+            stats = result["stats"]
+        
+            # Extract performance metrics
+            if "means" in stats:
+                rl_reward = stats["means"][0]
+                sed_reward = stats["means"][1] if len(stats["means"]) > 1 else np.nan
+                sq_reward = stats["means"][2] if len(stats["means"]) > 2 else np.nan
+            else:
+                rl_reward = np.mean([m["total_reward"] for m in metrics])
+                sed_reward = np.nan
+                sq_reward = np.nan
+        
+            # Calculate RL advantage
+            rl_advantage_over_sed = rl_reward - sed_reward if not np.isnan(sed_reward) else np.nan
+            rl_advantage_over_sq = rl_reward - sq_reward if not np.isnan(sq_reward) else np.nan
+        
+            # Calculate observed heterogeneity from metrics
+            observed_ratios = []
+            #for m in metrics:
+            #    # You can track actual μ ratios if you save them in metrics
+            #    pass
+        
+            results.append({
+                "ratio_target": ratio,
+                "arrival_mode": "fixed" if fixed_arrival_rate else "dynamic",
+                "rl_reward": rl_reward,
+                "sed_reward": sed_reward,
+                "sq_reward": sq_reward,
+                "rl_advantage_sed": rl_advantage_over_sed,
+                "rl_advantage_sq": rl_advantage_over_sq
+            })
+        
+            print(f"\nResults for ratio {ratio} ({'fixed' if fixed_arrival_rate else 'dynamic'} λ):")
+            print(f"  RL:  {rl_reward:.3f}")
+            print(f"  SED: {sed_reward:.3f} (RL advantage: {rl_advantage_over_sed:.3f})")
+            print(f"  SQ:  {sq_reward:.3f} (RL advantage: {rl_advantage_over_sq:.3f})")
+    
+        # Create DataFrame
         df = pd.DataFrame(results)
-        df.to_csv(save_csv, index=False)
-        print(f"Heterogeneity sweep saved to {save_csv}")
+        df.to_csv(f"heterogeneity_sweep_{'fixed' if fixed_arrival_rate else 'dynamic'}.csv", index=False)
+    
+        # Generate plots
+        self.plot_heterogeneity_analysis(df, fixed_arrival=fixed_arrival_rate)
+    
         return df
-
 
     def run_no_mu_ablation(self, duration, env, num_seeds=5, num_episodes=5, force_rates=None, save_csv="no_mu_ablation.csv"):
         """
         Compare performance when the agent cannot see service-rate features.
-        Runs two experiments:
-           - include_mu_in_state = True (baseline)
-           - include_mu_in_state = False (ablation)
-        Returns: DataFrame summarizing mean rewards.
         """
-
         print("Running baseline with μ in state...")
-        metrics_base, summary_base = self.run(duration, env, adjust_service_rate=False,
-                                              num_episodes=num_episodes, progress_bar=False,
-                                              progress_log=False, save_to_file="baseline_with_mu.csv",
-                                              num_seeds=num_seeds, force_rates=force_rates, include_mu_in_state=True)
+    
+        # Reset state before baseline run
+        self.nn_subscribers = []
+        self.state_subscribers = []
+    
+        metrics_base, summary_base = self.run(
+            duration, env, adjust_service_rate=False,
+            num_episodes=num_episodes, progress_bar=False,
+            progress_log=False, save_to_file="baseline_with_mu.csv",
+            num_seeds=num_seeds, force_rates=force_rates, include_mu_in_state=True
+        )
 
         print("Running ablation with μ removed from state...")
-        metrics_nomu, summary_nomu = self.run(duration, env, adjust_service_rate=False,
-                                              num_episodes=num_episodes, progress_bar=False,
-                                              progress_log=False, save_to_file="ablation_no_mu.csv",
-                                              num_seeds=num_seeds, force_rates=force_rates, include_mu_in_state=False)
+    
+        # Reset state before ablation run
+        self.nn_subscribers = []
+        self.state_subscribers = []
+    
+        metrics_nomu, summary_nomu = self.run(
+            duration, env, adjust_service_rate=False,
+            num_episodes=num_episodes, progress_bar=False,
+            progress_log=False, save_to_file="ablation_no_mu.csv",
+            num_seeds=num_seeds, force_rates=force_rates, include_mu_in_state=False
+        )
 
-        # compute simple means (fall back to metric totals if summary not present)
         def mean_from_summary_or_metrics(summary, metrics, key="total_reward"):
             if summary and "means" in summary:
                 return summary["means"][0]
@@ -1550,34 +1711,50 @@ class RequestQueue:
         mean_base = mean_from_summary_or_metrics(summary_base, metrics_base)
         mean_nomu = mean_from_summary_or_metrics(summary_nomu, metrics_nomu)
 
-        df = pd.DataFrame([{"condition": "with_mu", "mean_reward": mean_base},
-                           {"condition": "no_mu", "mean_reward": mean_nomu},
-                           {"condition": "delta", "mean_reward": mean_base - mean_nomu}])
+        df = pd.DataFrame([
+            {"condition": "with_mu", "mean_reward": mean_base},
+            {"condition": "no_mu", "mean_reward": mean_nomu},
+            {"condition": "delta", "mean_reward": mean_base - mean_nomu}
+        ])
+    
         df.to_csv(save_csv, index=False)
         print(f"No-μ ablation results saved to {save_csv}")
         return df
 
-    
-    def plot_heterogeneity_sweep(self, df):
+    def plot_no_mu_ablation(self, df):
         """
-        Visualize how RL advantage changes with service-rate heterogeneity.
-        Expects DataFrame returned by run_heterogeneity_sweep().
+        Visualize the no-mu ablation results comparing performance with and without service-rate features.
+        Expects DataFrame returned by run_no_mu_ablation().
         """
+        if df is None or df.empty:
+            print("No data to plot for no-mu ablation")
+            return
 
-        plt.figure()
-        plt.plot(df["ratio"], df["mean_RL"], marker="o")
-        plt.plot(df["ratio"], df["mean_SED"], marker="o")
-        plt.plot(df["ratio"], df["gap"], marker="o")
+        fig, ax = plt.subplots(figsize=(10, 6))
 
-        plt.xlabel("Service-rate ratio  μ₂ / μ₁")
-        plt.ylabel("Mean reward")
-        plt.title("Sensitivity to Service-Rate Heterogeneity")
-        plt.grid(True)
+        conditions = df['condition'].tolist()
+        mean_rewards = df['mean_reward'].tolist()
 
-        plt.legend(["RL", "SED", "RL–SED gap"])
+        # Create bar plot
+        colors = ['blue' if 'with_mu' in c else 'red' if 'no_mu' in c else 'green' for c in conditions]
+        bars = ax.bar(conditions, mean_rewards, color=colors, alpha=0.7)
+
+        # Add value labels on bars
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{height:.2f}',
+                    ha='center', va='bottom')
+
+        ax.set_xlabel('Condition')
+        ax.set_ylabel('Mean Reward')
+        ax.set_title('Ablation Study: Impact of Removing Service-Rate Features (μ)')
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
         plt.show()
 
-
+    
     def save_metrics(self, metrics, filename):
         """
         Save episode metrics to a CSV file.
@@ -2135,106 +2312,199 @@ class RequestQueue:
         schedule.every(30).seconds.do(self.dispatch_all_queues)
         #schedule.every(60).seconds.do(self.dispatch_all_queues)       
             
-            
-    def plot_rates_original(self):
+ 
+    def run_proper_heterogeneity_sweep(self, duration, env, num_seeds=3, num_episodes=5, 
+                                   fixed_arrival_rate=False):
         """
-        Plot the comparison of jockeying and reneging rates
-        for each queue for each individual information source subscribed to.
+        Proper heterogeneity sweep: vary μ₂/μ₁ ratio systematically.
+        Compares RL (Actor-Critic), SED baseline, and Markov state-based approaches.
         """
-        sources = ["Raw Markov State", "NN-based"]  # Example information sources
-        queues = ["Server 1", "Server 2"]
-
-        fig, axes = plt.subplots(len(queues), 2, figsize=(12, 10))
-        fig.suptitle("Comparison of Jockeying and Reneging Rates by Queue and Information Source", fontsize=16)
-
-        for i, queue in enumerate(queues):
-            jockeying_rates = [
-                # self.dispatch_data[f"server_{i + 1}"]["jockeying_rate"],
-                #self.dispatch_data[f"server_{i + 1}"]["nn_jockeying_rate"]
-                self.dispatch_data[f"server_{i + 1}"]["jockeying_rate_raw"],  # For raw state                
-                self.dispatch_data[f"server_{i + 1}"]["jockeying_rate_nn"]  # For NN-based
-            ]
-            reneging_rates = [
-                self.dispatch_data[f"server_{i + 1}"]["reneging_rate_raw"],
-                self.dispatch_data[f"server_{i + 1}"]["reneging_rate_nn"]
-            ]
-
-            x = range(len(jockeying_rates[0]))  # Assumes equal length for all sources
-
-            # Plot jockeying rates
-            axes[i, 0].plot(x, jockeying_rates[0], label=f'{sources[0]}', linestyle='dashed')
-            axes[i, 0].plot(x, jockeying_rates[1], label=f'{sources[1]}')
-            axes[i, 0].set_title(f"Jockeying Rates - {queue}")
-            axes[i, 0].set_xlabel("Number of Requests")
-            axes[i, 0].set_ylabel("Jockeying Rate")
-            axes[i, 0].legend()
-
-            # Plot reneging rates
-            axes[i, 1].plot(x, reneging_rates[0], label=f'{sources[0]}', linestyle='dashed')
-            axes[i, 1].plot(x, reneging_rates[1], label=f'{sources[1]}')
-            axes[i, 1].set_title(f"Reneging Rates - {queue}")
-            axes[i, 1].set_xlabel("Number of Requests")
-            axes[i, 1].set_ylabel("Reneging Rate")
-            axes[i, 1].legend()
-
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
-        plt.show()
-        
-        
-    def prev_plot_rates(self):
-        """
-        Plot the comparison of jockeying and reneging rates
-        for each queue for each individual information source subscribed to.
-        This version uses self.nn_subscribers and self.state_subscribers
-        instead of dispatch_data.
-        """
+        results = []
+        base_lambda = 10  # Base arrival rate
+        heterogeneity_ratios = [1.0, 1.2, 1.5, 2.0, 3.0]  # μ₂/μ₁ ratios
     
-        sources = ["Raw Markov State", "NN-based"]  # Information sources
-        queues = ["Server 1", "Server 2"]
+        for ratio in heterogeneity_ratios:
+            print(f"\n{'='*60}")
+            print(f"Testing Heterogeneity Ratio μ₂/μ₁ = {ratio}")
+            print(f"{'='*60}")
+        
+            if fixed_arrival_rate:
+                mu1 = base_lambda / 1.5
+                mu2 = mu1 * ratio
+                force_rates = (mu1, mu2)
+                self.objQueues.sampled_arr_rate = base_lambda
+                print(f"FIXED Configuration: λ={base_lambda}, μ₁={mu1:.2f}, μ₂={mu2:.2f}")
+            else:
+                force_rates = None
+                self.target_heterogeneity_ratio = ratio
+                avg_lambda = np.mean(self.objQueues.arrival_rates)
+                mu1 = avg_lambda / 1.5
+                mu2 = mu1 * ratio
+                print(f"DYNAMIC Configuration: λ varies naturally, μ₂/μ₁ target ratio = {ratio}")
+                print(f"  Representative rates: μ₁≈{mu1:.2f}, μ₂≈{mu2:.2f} (will vary with λ)")
+        
+            print(f"Arrival rate behavior: {'FIXED' if fixed_arrival_rate else 'DYNAMIC (varies each step)'}")
+        
+            # Reset environment
+            self.nn_subscribers = []
+            self.state_subscribers = []
+            self.all_requests = []
+        
+            stats_queue = queue.Queue()
+        
+            def threaded_run():
+                metrics, stats = self.run(
+                    duration,
+                    env,
+                    adjust_service_rate=False,
+                    num_episodes=num_episodes,
+                    save_to_file=f"heterog_ratio_{ratio:.1f}_{'fixed' if fixed_arrival_rate else 'dynamic'}.csv",
+                    num_seeds=num_seeds,
+                    force_rates=force_rates,
+                    use_dynamic_heterogeneity=(not fixed_arrival_rate)
+                )
+                stats_queue.put({"metrics": metrics, "stats": stats})
+        
+            scheduler_thread = threading.Thread(target=threaded_run)
+            scheduler_thread.start()
+            scheduler_thread.join()
+        
+            result = stats_queue.get()
+            metrics = result["metrics"]
+            stats = result["stats"]
+        
+            # Extract performance metrics for RL, SED, and Markov
+            if "means" in stats and len(stats["means"]) >= 3:
+                rl_reward = stats["means"][0]      # RL (Actor-Critic)
+                sed_reward = stats["means"][1]     # SED baseline
+                markov_reward = stats["means"][2]  # Markov state-based
+            else:
+                # Fallback: calculate from metrics
+                rl_reward = np.mean([m["total_reward"] for m in metrics])
+            
+                # Calculate SED performance (approximate from state_subscribers)
+                sed_rewards = []
+                markov_rewards = []
+                for m in metrics:
+                    # You'll need to track these separately in your metrics
+                    sed_rewards.append(m.get("sed_total_reward", np.nan))
+                    markov_rewards.append(m.get("markov_total_reward", np.nan))
+            
+                sed_reward = np.nanmean(sed_rewards) if sed_rewards else np.nan
+                markov_reward = np.nanmean(markov_rewards) if markov_rewards else np.nan
+        
+            # Calculate RL advantages
+            rl_advantage_over_sed = rl_reward - sed_reward if not np.isnan(sed_reward) else np.nan
+            rl_advantage_over_markov = rl_reward - markov_reward if not np.isnan(markov_reward) else np.nan
+        
+            # Calculate load balance
+            load_balance = abs((base_lambda / mu1) - (base_lambda / mu2))
+        
+            results.append({
+                "ratio_target": ratio,
+                "mu1": mu1,
+                "mu2": mu2,
+                "load_balance": load_balance,
+                "arrival_mode": "fixed" if fixed_arrival_rate else "dynamic",
+                "rl_reward": rl_reward,
+                "sed_reward": sed_reward,
+                "markov_reward": markov_reward,
+                "rl_advantage_sed": rl_advantage_over_sed,
+                "rl_advantage_markov": rl_advantage_over_markov
+            })
+        
+            print(f"\nResults for ratio {ratio} ({'fixed' if fixed_arrival_rate else 'dynamic'} λ):")
+            print(f"  RL (Actor-Critic): {rl_reward:.3f}")
+            if not np.isnan(sed_reward):
+                print(f"  SED Baseline:      {sed_reward:.3f} (RL advantage: {rl_advantage_over_sed:.3f})")
+            if not np.isnan(markov_reward):
+                print(f"  Markov State:      {markov_reward:.3f} (RL advantage: {rl_advantage_over_markov:.3f})")
+    
+        # Create DataFrame
+        df = pd.DataFrame(results)
+        csv_filename = f"heterogeneity_sweep_{'fixed' if fixed_arrival_rate else 'dynamic'}.csv"
+        df.to_csv(csv_filename, index=False)
+        print(f"\n✓ Results saved to {csv_filename}")
+    
+        # Generate plots
+        self.plot_heterogeneity_analysis(df, fixed_arrival=fixed_arrival_rate)
+     
+        return df
 
-        # Helper function to collect rates for each queue and info source
-        def collect_rates(subscribers, server_id):
-            jockeying_rates = []
-            reneging_rates = []
-            queue_sizes = []
-            # Get requests for this server
-            reqs = [req for req in subscribers if getattr(req, "server_id", None) == server_id]
-            for i in range(1, len(reqs)+1):
-                current = reqs[:i]
-                queue_sizes.append(i)
-                num_jockeyed = sum(getattr(req, 'jockeyed', False) for req in current)
-                num_reneged = sum(getattr(req, 'reneged', False) for req in current)
-                jockeying_rates.append(num_jockeyed / i)
-                reneging_rates.append(num_reneged / i)
-            return queue_sizes, jockeying_rates, reneging_rates
 
-        fig, axes = plt.subplots(len(queues), 2, figsize=(12, 10))
-        # fig.suptitle("Comparison of Jockeying and Reneging Rates by Queue and Information Source", fontsize=16)
+    def plot_heterogeneity_analysis(self, df, fixed_arrival=False):
+        """
+        Create comprehensive visualization of heterogeneity sweep results.
+        Compares RL, SED baseline, and Markov state-based policy.
+    
+        Args:
+            df: DataFrame with heterogeneity sweep results
+            fixed_arrival: Whether this was a fixed or dynamic arrival rate experiment
+        """
+        mode_str = "Fixed λ" if fixed_arrival else "Dynamic λ"
+    
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+        # Plot 1: Absolute Performance
+        ax1 = axes[0, 0]
+        ax1.plot(df["ratio_target"], df["rl_reward"], 'o-', label='RL (Actor-Critic)', 
+                 linewidth=2, markersize=8, color='blue')
+        if not df["sed_reward"].isna().all():
+            ax1.plot(df["ratio_target"], df["sed_reward"], 's--', label='SED Baseline', 
+                     linewidth=2, markersize=8, color='orange')
+        if not df["markov_reward"].isna().all():
+            ax1.plot(df["ratio_target"], df["markov_reward"], '^--', label='Markov State-Based', 
+                     linewidth=2, markersize=8, color='green')
+        ax1.set_xlabel("Service Rate Ratio (μ₂/μ₁)")
+        ax1.set_ylabel("Mean Reward")
+        ax1.set_title(f"Absolute Performance vs Heterogeneity ({mode_str})")
+        ax1.legend(loc='best')
+        ax1.grid(True, alpha=0.3)
+    
+        # Plot 2: RL Advantage over Baselines
+        ax2 = axes[0, 1]
+        if "rl_advantage_sed" in df.columns and not df["rl_advantage_sed"].isna().all():
+            ax2.plot(df["ratio_target"], df["rl_advantage_sed"], 'o-', 
+                     label='RL - SED', linewidth=2, markersize=8, color='green')
+        ax2.axhline(y=0, color='r', linestyle='--', alpha=0.5, label='Zero advantage')
+        ax2.set_xlabel("Service Rate Ratio (μ₂/μ₁)")
+        ax2.set_ylabel("Reward Advantage")
+        ax2.set_title(f"RL Advantage vs Heterogeneity ({mode_str})")
+        ax2.legend(loc='best')  # ← ADD THIS
+        ax2.grid(True, alpha=0.3)
+    
+        # Plot 3: Load Imbalance (bottom-left) - ADD LEGEND
+        ax3 = axes[1, 0]
+        if "load_balance" in df.columns:
+            ax3.plot(df["ratio_target"], df["load_balance"], 'o-', 
+                     linewidth=2, markersize=8, color='purple', label='Load Imbalance')
+        ax3.set_xlabel("Service Rate Ratio (μ₂/μ₁)")
+        ax3.set_ylabel("Load Imbalance |ρ₁ - ρ₂|")
+        ax3.set_title(f"System Load Imbalance ({mode_str})")
+        ax3.legend(loc='best')  # ← ADD THIS
+        ax3.grid(True, alpha=0.3)
+    
+        # Plot 4: Relative Improvement (bottom-right) - ADD LEGEND
+        ax4 = axes[1, 1]
+        if "sed_reward" in df.columns and not df["sed_reward"].isna().all() and (df["sed_reward"] != 0).all():
+            rel_improvement = ((df["rl_reward"] - df["sed_reward"]) / df["sed_reward"] * 100)
+            ax4.bar(df["ratio_target"], rel_improvement, color='steelblue', alpha=0.7, label='RL vs SED')
+            ax4.set_xlabel("Service Rate Ratio (μ₂/μ₁)")
+            ax4.set_ylabel("Relative Improvement (%)")
+            ax4.set_title(f"RL % Improvement over SED ({mode_str})")
+            ax4.legend(loc='best')  # ← ADD THIS
+            ax4.grid(True, alpha=0.3, axis='y')
+            ax4.axhline(y=0, color='r', linestyle='--', alpha=0.3)
+        else:
+            ax4.text(0.5, 0.5, 'Insufficient baseline data', 
+                    ha='center', va='center', transform=ax4.transAxes)
+            ax4.set_title(f"RL % Improvement over SED ({mode_str})") 
+        plt.tight_layout()
+        filename = f"heterogeneity_analysis_{'fixed' if fixed_arrival else 'dynamic'}.png"
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        print(f"✓ Plot saved to {filename}")
+        plt.show()
 
-        for i, server_id in enumerate(["1", "2"]):
-            # Markov (raw state)
-            queue_sizes_state, jockeying_state, reneging_state = collect_rates(self.state_subscribers, server_id)
-            # NN-based
-            queue_sizes_nn, jockeying_nn, reneging_nn = collect_rates(self.nn_subscribers, server_id)
-
-            # Plot jockeying rates
-            axes[i, 0].plot(queue_sizes_state, jockeying_state, label=f'{sources[0]}', linestyle='dashed', color='blue')
-            axes[i, 0].plot(queue_sizes_nn, jockeying_nn, label=f'{sources[1]}', color='orange')
-            axes[i, 0].set_title(f"Jockeying Rates - {queues[i]}")
-            axes[i, 0].set_xlabel("Number of Requests")
-            axes[i, 0].set_ylabel("Jockeying Rate")
-            axes[i, 0].legend()
-
-            # Plot reneging rates
-            axes[i, 1].plot(queue_sizes_state, reneging_state, label=f'{sources[0]}', linestyle='dashed', color='blue')
-            axes[i, 1].plot(queue_sizes_nn, reneging_nn, label=f'{sources[1]}', color='orange')
-            axes[i, 1].set_title(f"Reneging Rates - {queues[i]}")
-            axes[i, 1].set_xlabel("Number of Requests")
-            axes[i, 1].set_ylabel("Reneging Rate")
-            axes[i, 1].legend()
-
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
-        plt.show()    
 
     def plot_rates(self):
         """
@@ -2483,8 +2753,43 @@ class RequestQueue:
 
         # Compute reward based on actual waiting time vs. expected time
         time_in_queue = req.time_exit-req.time_entrance 
-        reward = 1.0 if time_in_queue < req.service_time else 0.0
+
+        # Store the experience for RL training        
+        state = self.get_queue_state(queueID)
+
+        # Convert state dictionary to array for the agent
+        if state is not None and isinstance(state, dict):
+            # Extract numeric values from state dict in consistent order
+            state_array = np.array([
+                float(state.get("ServerID", 0)),
+                float(state.get("at_pose", 0)),
+                float(state.get("rate_jockeyed", 0.0)),
+                float(state.get("rate_reneged", 0.0)),
+                float(state.get("this_busy", 0.0)),
+                float(state.get("expected_service_time", 0.0)),
+                float(state.get("time_service_took", 0.0)),
+                float(state.get("reward", 0.0)),
+                float(state.get("long_avg_serv_time", 0.0)),
+                1.0 if state.get("action") == "served" else 0.0,  # Encode action
+                1.0 if state.get("intensity_based_info", False) else 0.0
+            ], dtype=np.float32)
         
+            # Select action using the array
+            action = self.agent.select_action(state_array)
+        else:
+            # Default action if state is None
+            action = 0  # Default to "stay/served"
+
+        # Inside serveOneRequest loop:
+        if not req.uses_nn:
+            # Ensure Markov-based requests get the 'Served' reward status
+            reward = self.calculate_reward(time_in_queue, req.service_time, action=Actions.SERVED.value) 
+            self.markov_rewards.append(reward)
+
+        # Better (continuous):
+        # reward = max(0,  req.service_time - time_in_queue) / req.service_time #expected_time  # Normalized delay reduction       
+        reward = self.calculate_reward( time_in_queue, req.service_time, action)
+
         len_queue_1, len_queue_2 = self.get_queue_sizes()
                               
         
@@ -2520,7 +2825,7 @@ class RequestQueue:
             self.dispatch_queue_state(queue, queueID, self.uses_intensity_based)                                        
         
         # Store the experience for RL training        
-        state = self.get_queue_state(queueID) 
+        #state = self.get_queue_state(queueID) 
         
         
         '''
@@ -2530,7 +2835,7 @@ class RequestQueue:
         '''               
         
         if not isinstance(None, type(state)):
-            action = self.agent.select_action(state)
+            # action = self.agent.select_action(state)
             self.agent.store_reward(reward)
 
             # Train RL model after each request is processed Observed:
@@ -2766,7 +3071,7 @@ class RequestQueue:
     def makeRenegingDecision(self, req, queueid, next_state, curr_queue_state): # req, curr_queue_id, next_state, 
         
         decision=False                  
-        
+
         if "1" in queueid:
             serv_rate = self.dict_servers_info["1"]
             queue =  self.dict_queues_obj["1"]  
@@ -2775,6 +3080,9 @@ class RequestQueue:
             serv_rate = self.dict_servers_info["2"] 
             queue =  self.dict_queues_obj["2"]
             dest_queue = self.dict_queues_obj["1"] 
+
+        # Temporary: Replace complex Erlang logic with simple comparison
+        current_wait_estimate = req.pos_in_queue / serv_rate
         
         if self.learning_mode=='transparent':
             self.max_cloud_delay=stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=1/serv_rate) #(self.certainty,a=self.pos_in_queue,loc=0,scale=1/serv_rate) #self.serv_rate)
@@ -2797,12 +3105,12 @@ class RequestQueue:
                 queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate
                 self. max_cloud_delay = self.calculate_max_cloud_delay(curr_pose, queue_intensity, req) #self.calculate_max_cloud_delay(curr_pose, serv_rate)                                                           
             
-            if "1" in queueid:
-                self.queue = self.dict_queues_obj["1"] 
-                serv_rate = self.srvrates_1           
-            else:
-                self.queue = self.dict_queues_obj["2"] 
-                serv_rate = self.srvrates_2
+            #if "1" in queueid:
+            #    self.queue = self.dict_queues_obj["1"] 
+            #    serv_rate = self.srvrates_1           
+            #else:
+            ##    self.queue = self.dict_queues_obj["2"] 
+            #    serv_rate = self.srvrates_2
              
             self.avg_delay = self.calculate_max_cloud_delay(len(dest_queue)+1, queue_intensity, req)    
             # Get the relevant queue
@@ -2816,7 +3124,8 @@ class RequestQueue:
             #if customer_id in req.customerid: # _in_queue
                 
             remaining_wait_time = self.get_remaining_time(queueid, curr_pose)  # pos) #               
-            renege = (remaining_wait_time > self.max_local_delay) #T_local)
+            # renege = (remaining_wait_time > self.max_local_delay) #T_local)
+            renege = (current_wait_estimate > self.max_local_delay)
                                     
             if renege:
                 decision = True
@@ -2832,6 +3141,8 @@ class RequestQueue:
                     return # False    
                        
         self.curr_req = req                
+
+        return decision
 
 
     def reqRenege(self, req, queueid, curr_pose, serv_rate, queue_intensity, time_local_service, customerid, time_to_service_end, decision, curr_queue, uses_nn, diff_wait):
@@ -3036,6 +3347,8 @@ class RequestQueue:
                 if not found:
                     print(f"Request ID {req.customerid} not found in queue {curr_queue_id}. Continuing with processing...")
                     return False
+
+        return decision
                     
     
     def compute_reneging_rate_by_info_source(self, info_src_requests):
@@ -3287,6 +3600,77 @@ class RequestQueue:
             print(f"  Reneging Rate: {rates['reneging_rate']:.2f}")
             print(f"  Jockeying Rate: {rates['jockeying_rate']:.2f}")
         return comparison
+
+ 
+    def old_calculate_reward(self, time_in_queue, expected_time, action):
+        if action == "reneged":
+            # Reward for saving time
+            time_saved = max(0, expected_time - time_in_queue)
+            return time_saved / expected_time
+        elif action == "jockeyed":
+            # Reward for improvement
+            improvement = max(0, old_expected_time - new_expected_time)
+            return improvement / old_expected_time
+        else:  # served
+            # Reward for efficiency
+            efficiency = expected_time / max(time_in_queue, 1e-6)
+            return min(efficiency, 2.0)  # Cap at 2.0 but allow variation
+
+
+    def calculate_reward(self, waiting_time, expected_time, action):
+        """
+        Calculate continuous reward based on waiting time, expected time, and action taken.
+
+        Args:
+            waiting_time: Actual time spent in queue
+            expected_time: Expected service time
+            action: Action taken (0=renege, 1=jockey, -1 or other=served)
+
+        Returns:
+            float: Reward value scaled to approximately [0, 2.0] range
+        """
+        # Avoid division by zero
+        expected_time = max(expected_time, 0.001)
+        waiting_time = max(waiting_time, 0.0)
+
+        if action == -1 or action == 2:  # Served (your Actions.SERVED = -1)
+            # Reward efficiency: better if served faster than expected
+            if waiting_time <= expected_time:
+                # Good: served faster or on time
+                efficiency = expected_time / max(waiting_time, 0.001)
+                reward = min(efficiency, 2.0)
+            else:
+                # Okay but not great: took longer than expected
+                delay_ratio = waiting_time / expected_time
+                reward = max(2.0 / delay_ratio, 0.5)  # Scale down but keep positive
+
+        elif action == 0:  # Reneged (Actions.RENEGE = 0)
+            # Reward time saved by reneging
+            time_saved = max(0, expected_time - waiting_time)
+            if time_saved > 0:
+                reward = (time_saved / expected_time) * 2.0
+            else:
+                # Penalize reneging when would have been served faster
+                reward = -0.5
+
+        elif action == 1:  # Jockeyed (Actions.JOCKEY = 1)
+            # Reward improvement from jockeying
+            # This is an approximation since we don't have old_wait here
+            # Give moderate reward for jockeying decision
+            if waiting_time < expected_time:
+                reward = 1.0  # Jockeying helped
+            else:
+                reward = 0.3  # Jockeying didn't help much but tried
+
+        else:
+            # Unknown action, default reward
+            reward = 1.0 if waiting_time <= expected_time else 0.5
+
+        # In calculate_reward(), add logging:
+        print(f"Markov request: action={action}, waiting={waiting_time}, "
+            f"expected={expected_time}, reward={reward}")
+
+        return float(reward)
 
 
     def compute_reneging_rate_by_info_source(self, info_src_requests):
@@ -4518,7 +4902,503 @@ def compute_se(data):
 
 import queue
 
-def main():       
+
+def main():
+    utility_basic = 1.0
+    discount_coef = 0.1
+    state_dim = 11
+    action_dim = 2
+
+    # Initialize Actor-Critic model and A2C agent
+    actor_critic = ActorCritic(state_dim, action_dim)
+    agent = A2CAgent(state_dim, action_dim)
+
+    # Initialize RequestQueue with all required arguments
+    request_queue = RequestQueue(state_dim, action_dim, utility_basic, discount_coef, actor_critic, agent)
+
+    # Initialize ImpatientTenantEnv with the RequestQueue instance
+    env = ImpatientTenantEnv()
+    env.requestObj = request_queue
+
+    print("=" * 80)
+    print("IMPATIENT TENANT QUEUEING SIMULATION WITH RL")
+    print("=" * 80)
+    print("Environment and RequestQueue initialized successfully!")
+
+    # Simulation parameters
+    duration = 7  # Time steps per episode
+    num_episodes = 30  # Number of training episodes
+    num_seeds = 2  # Number of random seeds for averaging
+
+    # ===================================================================
+    # PART 1: BASELINE SIMULATION RUN
+    # ===================================================================
+    print("\n" + "=" * 80)
+    print("PART 1: BASELINE SIMULATION RUN")
+    print("=" * 80)
+    print("Running standard simulation with naturally varying service rates...")
+
+    stats_queue = queue.Queue()
+
+    def threaded_baseline_run():
+        metrics, stats = request_queue.run(
+            duration,
+            env,
+            adjust_service_rate=False,
+            num_episodes=num_episodes,
+            save_to_file="baseline_metrics.csv",
+            num_seeds=num_seeds
+        )
+        stats_queue.put({"metrics": metrics, "stats": stats})
+
+    # Run baseline simulation
+    scheduler_thread = threading.Thread(target=threaded_baseline_run)
+    scheduler_thread.start()
+    scheduler_thread.join()
+
+    # Retrieve baseline results
+    baseline_result = stats_queue.get()
+    baseline_metrics = baseline_result["metrics"]
+    baseline_stats = baseline_result["stats"]
+
+    print("\n✓ Baseline simulation completed")
+    print(f"  Total episodes: {len(baseline_metrics)}")
+    print(f"  Mean reward: {baseline_stats['means'][0]:.3f}" if "means" in baseline_stats else "")
+
+    # ===================================================================
+    # PART 2A: HETEROGENEITY SWEEP (DYNAMIC - ORIGINAL BEHAVIOR)
+    # ===================================================================
+    print("\n" + "=" * 80)
+    print("PART 2A: HETEROGENEITY SWEEP (DYNAMIC ARRIVAL RATES)")
+    print("=" * 80)
+    print("Testing with naturally varying arrival rates (original behavior)...")
+    print("Arrival rate changes every step, but μ₂/μ₁ ratio is controlled\n")
+    
+    try:
+        df_heterog_dynamic = request_queue.run_proper_heterogeneity_sweep(
+            duration=duration,
+            env=env,
+            num_seeds=1, #num_seeds,
+            num_episodes=20, #num_episodes,
+            fixed_arrival_rate=False  # ← DYNAMIC MODE
+        )
+        
+        print("\n✓ Dynamic heterogeneity sweep completed")
+        print("\nSummary Table:")
+        print(df_heterog_dynamic.to_string(index=False))
+        
+    except Exception as e:
+        print(f"❌ Error in dynamic heterogeneity sweep: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    
+    # ===================================================================
+    # PART 4: STANDARD VISUALIZATIONS
+    # ===================================================================
+    print("\n" + "=" * 80)
+    print("PART 4: GENERATING STANDARD VISUALIZATIONS")
+    print("=" * 80)
+
+    try:
+        print("\n1. Plotting jockeying/reneging rates by information source...")
+        request_queue.plot_rates()
+
+        print("2. Comparing rates by information source...")
+        comparison = request_queue.compare_rates_by_information_source()
+        print("\nRate Comparison:")
+        for model, rates in comparison.items():
+            print(f"  {model}:")
+            print(f"    Reneging: {rates['reneging_rate']:.3f}")
+            print(f"    Jockeying: {rates['jockeying_rate']:.3f}")
+
+        print("\n3. Plotting rates vs queue size by type...")
+        request_queue.plot_reneging_and_jockeying_rates_vs_queue_size_by_type()
+
+        #print("\n4. Plotting waiting time vs queue length...")
+        #request_queue.plot_reneging_time_vs_queue_length()
+        #request_queue.plot_jockeying_time_vs_queue_length()
+
+        #print("\n5. Comparing behavior rates by information source...")
+        #request_queue.compare_behavior_rates_by_information_how_often()
+
+        #print("\n✓ All standard visualizations completed")
+
+    except Exception as e:
+        print(f"❌ Error in standard visualizations: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+    # ===================================================================
+    # PART 2B: HETEROGENEITY SWEEP (FIXED - CONTROLLED EXPERIMENT)
+    # ===================================================================
+    #print("\n" + "=" * 80)
+    #print("PART 2B: HETEROGENEITY SWEEP (FIXED ARRIVAL RATE)")
+    #print("=" * 80)
+    #print("Testing with fixed arrival rate (controlled experiment)...")
+    #print("Arrival rate fixed at λ=10 throughout entire episode\n")
+    
+    # Reset environment
+    #request_queue.nn_subscribers = []
+    #request_queue.state_subscribers = []
+    #request_queue.all_requests = []
+    
+    #try:
+    #    df_heterog_fixed = request_queue.run_proper_heterogeneity_sweep(
+    #        duration=duration,
+    #        env=env,
+    #        num_seeds=1, #num_seeds,
+    #        num_episodes=20, #num_episodes,
+    #        fixed_arrival_rate=True  # ← FIXED MODE
+    #    )
+        
+    #    print("\n✓ Fixed heterogeneity sweep completed")
+    #    print("\nSummary Table:")
+    #    print(df_heterog_fixed.to_string(index=False))
+    #    
+    #    # Compare dynamic vs fixed
+    #    print("\n" + "-" * 80)
+    #    print("COMPARISON: Dynamic vs Fixed Arrival Rates")
+    #    print("-" * 80)
+    #    for ratio in [1.0, 1.2, 1.5, 2.0, 3.0]:
+    #        dyn_reward = df_heterog_dynamic[df_heterog_dynamic['ratio_target'] == ratio]['rl_reward'].values[0]
+    #        fix_reward = df_heterog_fixed[df_heterog_fixed['ratio_target'] == ratio]['rl_reward'].values[0]
+    #        print(f"μ₂/μ₁={ratio:.1f}: Dynamic={dyn_reward:.3f}, Fixed={fix_reward:.3f}, "
+    #              f"Difference={abs(dyn_reward - fix_reward):.3f}")
+    #   
+    # except Exception as e:
+    #    print(f"❌ Error in fixed heterogeneity sweep: {e}")
+    #    import traceback
+    #    traceback.print_exc()
+    
+    # ===================================================================
+    # PART 3: NO-μ ABLATION TEST
+    # ===================================================================
+    print("\n" + "=" * 80)
+    print("PART 3: NO-μ ABLATION TEST")
+    print("=" * 80)
+    print("Testing impact of removing service rate features from state...")
+    print("This tests: Can the agent learn without explicit μ information?\n")
+
+    # Reset for clean ablation test
+    request_queue.nn_subscribers = []
+    request_queue.state_subscribers = []
+    request_queue.all_requests = []
+
+    try:
+        df_nomu = request_queue.run_no_mu_ablation(
+            duration=duration,
+            env=env,
+            num_seeds=1, #num_seeds,
+            num_episodes=20, #num_episodes,
+            force_rates=(5.0, 7.5),  # Moderate heterogeneity
+            save_csv="nomu_ablation.csv"
+        )
+
+        print("\n✓ No-μ ablation completed")
+        print("\nResults:")
+        print(df_nomu.to_string(index=False))
+
+        # Calculate performance degradation
+        if not df_nomu.empty:
+            with_mu = df_nomu[df_nomu['condition'] == 'with_mu']['mean_reward'].values[0]
+            no_mu = df_nomu[df_nomu['condition'] == 'no_mu']['mean_reward'].values[0]
+            degradation = ((with_mu - no_mu) / with_mu * 100) if with_mu != 0 else 0
+
+            print(f"\n📊 Key Finding:")
+            print(f"   Performance degradation without μ: {degradation:.1f}%")
+            print(f"   With μ:    {with_mu:.3f}")
+            print(f"   Without μ: {no_mu:.3f}")
+
+        request_queue.plot_no_mu_ablation(df_nomu)
+
+    except Exception as e:
+        print(f"❌ Error in no-μ ablation: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # ===================================================================
+    # PART 4: STANDARD VISUALIZATIONS
+    # ===================================================================
+    #print("\n" + "=" * 80)
+    #print("PART 4: GENERATING STANDARD VISUALIZATIONS")
+    #print("=" * 80)
+
+    #try:
+    #    print("\n1. Plotting jockeying/reneging rates by information source...")
+    #    request_queue.plot_rates()
+    #
+    #    print("2. Comparing rates by information source...")
+    #    comparison = request_queue.compare_rates_by_information_source()
+    #    print("\nRate Comparison:")
+    #    for model, rates in comparison.items():
+    #        print(f"  {model}:")
+    #        print(f"    Reneging: {rates['reneging_rate']:.3f}")
+    #        print(f"    Jockeying: {rates['jockeying_rate']:.3f}")
+
+    #    print("\n3. Plotting rates vs queue size by type...")
+    #    request_queue.plot_reneging_and_jockeying_rates_vs_queue_size_by_type()
+
+    #    #print("\n4. Plotting waiting time vs queue length...")
+    #    #request_queue.plot_reneging_time_vs_queue_length()
+    #    #request_queue.plot_jockeying_time_vs_queue_length()
+
+    #    #print("\n5. Comparing behavior rates by information source...")
+    #    #request_queue.compare_behavior_rates_by_information_how_often()
+
+    #    #print("\n✓ All standard visualizations completed")
+
+    #except Exception as e:
+    #    print(f"❌ Error in standard visualizations: {e}")
+    #    import traceback
+    #    traceback.print_exc()
+
+    # ===================================================================
+    # PART 5: ADVANCED DIAGNOSTIC PLOTS
+    # ===================================================================
+    print("\n" + "=" * 80)
+    print("PART 5: ADVANCED DIAGNOSTIC PLOTS")
+    print("=" * 80)
+
+    try:
+        print("\n1. Plotting asymptotic behavior...")
+        #request_queue.plot_asymptotic_behavior_of_jockeying_and_reneging(max_queue_length=100)
+
+        print("2. Plotting decision probability vs queue length...")
+        #request_queue.plot_decision_probability_vs_queue_length(min_count_per_n=1)
+
+        print("3. Plotting estimation error and misclassification...")
+        #request_queue.plot_diagnostics_error_and_misclassification(min_count_per_n=1)
+
+        print("4. Plotting successful jockey probability...")
+        #request_queue.plot_successful_jockey_probability_vs_queue_length(min_count_per_n=1)
+
+        print("\n✓ All advanced diagnostics completed")
+
+    except Exception as e:
+        print(f"❌ Error in advanced diagnostics: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # ===================================================================
+    # PART 6: FINAL STATISTICS AND SUMMARY
+    # ===================================================================
+    print("\n" + "=" * 80)
+    print("PART 6: FINAL SUMMARY")
+    print("=" * 80)
+
+    try:
+        # Plot baseline statistics with confidence intervals
+        if baseline_stats and "policies" in baseline_stats:
+            policies = baseline_stats["policies"]
+            means = baseline_stats["means"]
+            conf_intervals = baseline_stats["conf_intervals"]
+
+            print("\nBaseline Policy Comparison:")
+            for policy, mean, ci in zip(policies, means, conf_intervals):
+                print(f"  {policy:20s}: {mean:.3f} (95% CI: [{ci[0]:.3f}, {ci[1]:.3f}])")
+
+            plot_with_error_bars(policies, means, conf_intervals)
+
+        # Summary statistics
+        print("\n" + "-" * 80)
+        print("SIMULATION SUMMARY")
+        print("-" * 80)
+        print(f"Total requests processed: {len(request_queue.all_requests)}")
+        print(f"  NN-based subscribers:     {len(request_queue.nn_subscribers)}")
+        print(f"  Markov-based subscribers: {len(request_queue.state_subscribers)}")
+
+        print(f"\nServer 1 requests served: {request_queue.total_served_requests_srv1}")
+        print(f"Server 2 requests served: {request_queue.total_served_requests_srv2}")
+
+        # Overall rates
+        overall_jockey = request_queue.compute_jockeying_rate(request_queue.all_requests)
+        overall_renege = request_queue.compute_reneging_rate(request_queue.all_requests)
+        print(f"\nOverall jockeying rate: {overall_jockey:.3f}")
+        print(f"Overall reneging rate:  {overall_renege:.3f}")
+
+        # Dispatch statistics
+        print(f"\nDispatch events:")
+        print(f"  Intensity-based dispatches: {request_queue.intensity_dispatch_count}")
+        print(f"  Departure-based dispatches: {request_queue.departure_dispatch_count}")
+
+        print("\n" + "=" * 80)
+        print("SIMULATION COMPLETE")
+        print("=" * 80)
+
+    except Exception as e:
+        print(f"❌ Error in final summary: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # Optional: Save final summary to file
+    try:
+        with open("simulation_summary.txt", "w") as f:
+            f.write("=" * 80 + "\n")
+            f.write("IMPATIENT TENANT QUEUEING SIMULATION SUMMARY\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(f"Total requests processed: {len(request_queue.all_requests)}\n")
+            f.write(f"NN-based subscribers: {len(request_queue.nn_subscribers)}\n")
+            f.write(f"Markov-based subscribers: {len(request_queue.state_subscribers)}\n")
+            f.write(f"Overall jockeying rate: {overall_jockey:.3f}\n")
+            f.write(f"Overall reneging rate: {overall_renege:.3f}\n")
+        print("\n✓ Summary saved to simulation_summary.txt")
+    except Exception as e:
+        print(f"⚠ Could not save summary file: {e}")
+
+
+def new_main():
+    utility_basic = 1.0
+    discount_coef = 0.1
+    state_dim = 11
+    action_dim = 2
+
+    actor_critic = ActorCritic(state_dim, action_dim)
+    agent = A2CAgent(state_dim, action_dim)
+    request_queue = RequestQueue(state_dim, action_dim, utility_basic, discount_coef, actor_critic, agent)
+    env = ImpatientTenantEnv()
+    env.requestObj = request_queue
+
+    print("Environment and RequestQueue initialized successfully!")
+
+    duration = 10
+    num_episodes = 30
+    num_seeds = 2
+
+    # ===== HETEROGENEITY SWEEP =====
+    # This is where your existing threaded_run naturally creates heterogeneity
+    # by varying service rates between queues
+    print("\n=== Running Heterogeneity Sweep (Natural Service Rate Variation) ===\n")
+
+    # Track results across different ratio configurations
+    heterogeneity_results = []
+
+    # Define different arrival rates to test (which indirectly creates different μ ratios)
+    arrival_rates_to_test = [3, 5, 7, 9, 11]  # From your existing self.arrival_rates
+
+    for test_arrival_rate in arrival_rates_to_test:
+        print(f"\n--- Testing with arrival rate: {test_arrival_rate} ---")
+
+        # Set the arrival rate for this test
+        request_queue.objQueues.sampled_arr_rate = test_arrival_rate
+
+        stats_queue = queue.Queue()
+
+        def threaded_run():
+            metrics, stats = request_queue.run(
+                duration,
+                env,
+                adjust_service_rate=False,
+                num_episodes=num_episodes,
+                save_to_file=f"heterog_lambda_{test_arrival_rate}.csv",
+                num_seeds=num_seeds
+            )
+            stats_queue.put({"metrics": metrics, "stats": stats})
+
+        # Start thread for running the scheduler
+        scheduler_thread = threading.Thread(target=threaded_run)
+        scheduler_thread.start()
+        scheduler_thread.join()  # Wait for completion
+
+        # Retrieve results
+        result = stats_queue.get()
+        metrics = result["metrics"]
+        stats = result["stats"]
+
+        # Calculate the actual heterogeneity ratio from the metrics
+        # Based on your queue_setup_manager logic
+        avg_mu_ratio = []
+        for m in metrics:
+            # Extract service rates from saved data if available
+            # Or compute from the deltaLambda logic in your code
+            pass  # We'll extract this from metrics
+
+        heterogeneity_results.append({
+            "arrival_rate": test_arrival_rate,
+            "mean_reward": stats["means"][0] if "means" in stats else np.mean([m["total_reward"] for m in metrics]),
+            "metrics": metrics,
+            "stats": stats
+        })
+
+        # Reset environment for next test
+        request_queue.nn_subscribers = []
+        request_queue.state_subscribers = []
+        request_queue.all_requests = []
+
+    # Plot heterogeneity sweep results
+    plot_heterogeneity_results(heterogeneity_results)
+
+    # ===== NO-MU ABLATION TEST =====
+    print("\n=== Running No-μ Ablation Test ===\n")
+
+    # Reset for ablation test
+    request_queue.nn_subscribers = []
+    request_queue.state_subscribers = []
+    request_queue.all_requests = []
+
+    try:
+        df_nomu = request_queue.run_no_mu_ablation(
+            duration=duration,
+            env=env,
+            num_seeds=1, #num_seeds,
+            num_episodes=10, # num_episodes,
+            force_rates=(5.0, 5.0),  # Equal service rates
+            save_csv="nomu_ablation.csv"
+        )
+        print("No-μ ablation completed.")
+        print(df_nomu)
+        request_queue.plot_no_mu_ablation(df_nomu)
+    except Exception as e:
+        print(f"Error in no-mu ablation: {e}")
+
+    # ===== REGULAR VISUALIZATIONS =====
+    print("\n=== Generating Regular Visualizations ===\n")
+
+    try:
+        request_queue.plot_rates()
+        request_queue.compare_rates_by_information_source()
+        request_queue.plot_reneging_and_jockeying_rates_vs_queue_size_by_type()
+    except Exception as e:
+        print(f"Error in regular visualizations: {e}")
+
+    # Plot final statistics from last run
+    try:
+        last_result = heterogeneity_results[-1]
+        stats = last_result["stats"]
+        policies = stats["policies"]
+        means = stats["means"]
+        conf_intervals = stats["conf_intervals"]
+        plot_with_error_bars(policies, means, conf_intervals)
+    except Exception as e:
+        print(f"Error plotting final statistics: {e}")
+
+
+def plot_heterogeneity_results(results):
+    """
+    Plot the heterogeneity sweep results showing how performance varies
+    with different arrival rates (which create different μ ratios).
+    """
+    arrival_rates = [r["arrival_rate"] for r in results]
+    mean_rewards = [r["mean_reward"] for r in results]
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(arrival_rates, mean_rewards, marker='o', linewidth=2, markersize=8)
+    plt.xlabel("Arrival Rate (λ)")
+    plt.ylabel("Mean Reward")
+    plt.title("Heterogeneity Sweep: Performance vs Arrival Rate\n(Service rates vary as μ₁ = λ+Δ/2, μ₂ = λ-Δ/2)")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    # Also plot the actual μ ratios if we can extract them
+    print("\nHeterogeneity Sweep Summary:")
+    for r in results:
+        print(f"  λ={r['arrival_rate']}: Mean Reward = {r['mean_reward']:.3f}")
+
+
+ # -------------------------------------------------- older stuf -----------------------
+def old_main():       
 	
     utility_basic = 1.0
     discount_coef = 0.1
@@ -4541,7 +5421,7 @@ def main():
     # These are the number of iterations also labelled as step in the simulation
     # Ideally each step corresponds to an arrival and processing iteration
     duration = 2 #10
-    num_episodes = 5 #0  # Number of episodes
+    num_episodes = 2 #50  # Number of episodes
     num_seeds = 1 # 2       # Number of random seeds
     
     # Define a queue to store return value from the thread
@@ -4578,10 +5458,52 @@ def main():
     scheduler_thread.start()
     scheduler_thread.join()  # <-- Wait until simulation is done then plot below functions
 
+    # ===== ABLATION TESTS =====
+    print("\n=== Running Ablation Tests ===\n")
+
+    # 1) Heterogeneity sweep
+    print("1. Running heterogeneity sweep...")
+    try:
+        ratios = [1.0, 1.2, 1.5, 2.0]  # Different mu2/mu1 ratios
+        base_mu = 5.0  # Base service rate
+        df_heterog = request_queue.run_heterogeneity_sweep(
+            ratios=ratios,
+            base_mu=base_mu,
+            duration=duration,
+            env=env,
+            num_seeds=num_seeds, #2,
+            num_episodes=num_episodes, #3,
+            save_csv="heterog_sweep.csv"
+        )
+        print("Heterogeneity sweep completed.")
+        print(df_heterog)
+        request_queue.plot_heterogeneity_sweep(df_heterog)
+    except Exception as e:
+        print(f"Error in heterogeneity sweep: {e}")
+
+    # 2) No-μ ablation
+    print("\n2. Running no-μ ablation test...")
+    try:
+        df_nomu = request_queue.run_no_mu_ablation(
+            duration=duration,
+            env=env,
+            num_seeds=num_seeds, #2,
+            num_episodes=num_episodes, #3,
+            force_rates=(5.0, 5.0),  # Equal service rates
+            save_csv="nomu_ablation.csv"
+        )
+        print("No-μ ablation completed.")
+        print(df_nomu)
+        request_queue.plot_no_mu_ablation(df_nomu)
+    except Exception as e:
+        print(f"Error in no-mu ablation: {e}")
+
+    # ===== REGULAR VISUALIZATIONS =====
+
     # 2) No-μ ablation (test the same forced rates as a single regime)
-    df_nomu = request_queue.run_no_mu_ablation(duration, env, num_seeds=3, num_episodes=3, force_rates=(1.0, 2.0), save_csv="nomu_results.csv")
-    print(df_nomu)
-    request_queue.plot_no_mu_ablation(df_nomu)
+    #df_nomu = request_queue.run_no_mu_ablation(duration, env, num_seeds=3, num_episodes=3, force_rates=(1.0, 2.0), save_csv="nomu_results.csv")
+    #print(df_nomu)
+    #request_queue.plot_no_mu_ablation(df_nomu)
     
     # Let us visualize some results
     # visualize_results(metrics_file="simu_results.csv") # has the rewards metrics, and figure 2 in the paper
