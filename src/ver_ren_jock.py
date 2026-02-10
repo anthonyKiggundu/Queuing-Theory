@@ -876,6 +876,7 @@ class RequestQueue:
         self.departure_dispatch_count = 0
         self.intensity_dispatch_count = 0 
         self.all_requests = []  # Stores all requests throughout the simulation
+        self.markov_rewards = []
         
         BROADCAST_INTERVAL = 5
         
@@ -1168,7 +1169,7 @@ class RequestQueue:
         steps_per_episode = int(duration / self.time_res)
         metrics = []  # List to store metrics for all episodes
         all_rewards = []
-        rl_rewards, sed_rewards, markov_rewards = [], [], []  # Store rewards for each policy
+        rl_rewards, sed_rewards = [], []  # Store rewards for each policy
         save_to_file = "simu_results.csv"
         
         actor_losses = []
@@ -1189,6 +1190,9 @@ class RequestQueue:
             seed_rewards = []
 
             for episode in range(num_episodes):
+                # Reset markov rewards for this episode
+                self.markov_rewards = []  
+
                 # Reset baseline counters for this episode
                 self._baseline_counters = {"threshold_wrong": 0, "threshold_total": 0, "perfect_wrong": 0, "perfect_total": 0}
                 print(f"Starting Episode {episode + 1}/{num_episodes}")            
@@ -1512,12 +1516,18 @@ class RequestQueue:
                 metrics.append(episode_metrics)            
             
                 # Calculate average reward for Markov state-based requests
-                markov_rewards_episode = [m.get("reward", 0) for m in self.objObserv.get_jockey_obs() + self.objObserv.get_renege_obs()]
-                total_markov_reward = np.mean(markov_rewards_episode) if markov_rewards_episode else 0
+                #markov_rewards_episode = [m.get("reward", 0) for m in self.objObserv.get_jockey_obs() + self.objObserv.get_renege_obs()]
+                #total_markov_reward = np.mean(markov_rewards_episode) if markov_rewards_episode else 0
+
+                # Calculate average reward for Markov state-based requests
+                if self.markov_rewards:
+                    total_markov_reward = np.mean(self.markov_rewards)
+                else:
+                    total_markov_reward = 0
 
                 rl_rewards.append(total_rl_reward)
                 sed_rewards.append(total_sed_reward)
-                markov_rewards.append(total_markov_reward)
+               # markov_rewards.append(total_markov_reward)
 
                 # Episode summary
                 print(f"Episode {episode + 1}/{num_episodes} (Seed {seed}):")
@@ -1547,7 +1557,7 @@ class RequestQueue:
         # --- Results Analysis ---
         print("\n=== Final Statistics ===")
         policies = ["RL", "SED", "Markov"]
-        rewards = [rl_rewards, sed_rewards, markov_rewards]
+        rewards = [rl_rewards, sed_rewards, self.markov_rewards]
         conf_intervals = [compute_ci(reward_list) for reward_list in rewards]
 
         for policy, reward_list in zip(policies, rewards):
@@ -2377,25 +2387,25 @@ class RequestQueue:
             if "means" in stats and len(stats["means"]) >= 3:
                 rl_reward = stats["means"][0]      # RL (Actor-Critic)
                 sed_reward = stats["means"][1]     # SED baseline
-                markov_reward = stats["means"][2]  # Markov state-based
+                self.markov_reward = stats["means"][2]  # Markov state-based
             else:
                 # Fallback: calculate from metrics
                 rl_reward = np.mean([m["total_reward"] for m in metrics])
             
                 # Calculate SED performance (approximate from state_subscribers)
                 sed_rewards = []
-                markov_rewards = []
+                self.markov_rewards = []
                 for m in metrics:
                     # You'll need to track these separately in your metrics
                     sed_rewards.append(m.get("sed_total_reward", np.nan))
-                    markov_rewards.append(m.get("markov_total_reward", np.nan))
+                    self.markov_rewards.append(m.get("markov_total_reward", np.nan))
             
                 sed_reward = np.nanmean(sed_rewards) if sed_rewards else np.nan
-                markov_reward = np.nanmean(markov_rewards) if markov_rewards else np.nan
+                self.markov_reward = np.nanmean(self.markov_rewards) if self.markov_rewards else np.nan
         
             # Calculate RL advantages
             rl_advantage_over_sed = rl_reward - sed_reward if not np.isnan(sed_reward) else np.nan
-            rl_advantage_over_markov = rl_reward - markov_reward if not np.isnan(markov_reward) else np.nan
+            rl_advantage_over_markov = rl_reward - self.markov_reward if not np.isnan(self.markov_reward) else np.nan
         
             # Calculate load balance
             load_balance = abs((base_lambda / mu1) - (base_lambda / mu2))
@@ -2408,7 +2418,7 @@ class RequestQueue:
                 "arrival_mode": "fixed" if fixed_arrival_rate else "dynamic",
                 "rl_reward": rl_reward,
                 "sed_reward": sed_reward,
-                "markov_reward": markov_reward,
+                "markov_reward": self.markov_reward,
                 "rl_advantage_sed": rl_advantage_over_sed,
                 "rl_advantage_markov": rl_advantage_over_markov
             })
@@ -2417,8 +2427,8 @@ class RequestQueue:
             print(f"  RL (Actor-Critic): {rl_reward:.3f}")
             if not np.isnan(sed_reward):
                 print(f"  SED Baseline:      {sed_reward:.3f} (RL advantage: {rl_advantage_over_sed:.3f})")
-            if not np.isnan(markov_reward):
-                print(f"  Markov State:      {markov_reward:.3f} (RL advantage: {rl_advantage_over_markov:.3f})")
+            if not np.isnan(self.markov_reward):
+                print(f"  Markov State:      {self.markov_reward:.3f} (RL advantage: {rl_advantage_over_markov:.3f})")
     
         # Create DataFrame
         df = pd.DataFrame(results)
@@ -2844,20 +2854,6 @@ class RequestQueue:
         return 	    
         
 			
-    def get_jockey_reward_old(self, req):
-		
-        reward = 0.0
-        if not isinstance(req.customerid, type(None)):	
-            # print("\n Current Request: ", req)
-            if '_jockeyed' in req.customerid:
-                if self.avg_delay+req.time_entrance < req.service_time: #exp_time_service_end: That ACTION
-                    reward = 1.0
-                else:
-                    reward = 0.0
-                    
-        return reward
-        
-    
     def get_jockey_reward(self, req, prev_remaining_time):
         """
         Compute reward for a jockeyed event.
@@ -2987,6 +2983,22 @@ class RequestQueue:
         
         return remaining_time
         
+
+    def old_calculate_max_cloud_delay(self, position, queue_intensity, req):
+        # Parameters for decreasing patience
+        alpha = 10.0  # Maximum patience for an empty queue
+        eta = 0.05    # Frustration coefficient
+        gamma = 1.0   # Minimum baseline patience
+    
+        # Inverse relationship: higher position = lower cloud delay (patience)
+        # This uses an exponential decay model
+        max_cloud_delay = alpha * np.exp(-eta * position) + gamma
+    
+        # Optionally further reduce patience if intensity is high
+        max_cloud_delay *= (1 / (1 + queue_intensity))
+    
+        return max_cloud_delay
+
         
     def calculate_max_cloud_delay(self, position, queue_intensity, req):
         """
@@ -3023,44 +3035,6 @@ class RequestQueue:
         return max_cloud_delay
         
         
-    def calculate_max_cloud_delay_erring(self, position, mu):
-        import scipy.linalg as la
-        from scipy.integrate import quad
-        
-        def build_q_matrix(k: int, mu: float) -> np.ndarray:
-            """
-            Build the (k+2)x(k+2) generator Q for states i=0,...,k+1,
-            where state i->i-1 at rate 2*mu for i>=2, and at rate mu for i==1.
-            State 0 is absorbing.            
-            """
-            
-            if k is None:
-                # Option 1: Return a default value (e.g., 0 or some defined constant)
-                return 0
-                
-            size = k+2
-            Q = np.zeros((size, size))
-            for i in range(1, size):
-                rate = 2*mu if i >= 2 else mu
-                Q[i, i-1] = rate
-                Q[i, i]   = -rate
-            
-            return Q
-
-        """
-        Solve for E[T] starting from state k+1 by using fundamental matrix.
-          E = -Q^{-1} * 1  restricted to non-absorbing states.
-        """
-        Q = build_q_matrix(position, mu)
-        # Extract transient states 1..k+1
-        Q_tt = Q[1:, 1:]
-        # Fundamental matrix N = -inv(Q_tt)
-        N = -la.inv(Q_tt)
-        # Expected absorption time vector: t = N @ 1
-        t_vec = N.dot(np.ones(position+1))
-        # We start in state k+1 => index k  in t_vec
-        return t_vec[position]
-    
 		        
     def log_action(self, action, req, queueid):
         """Logs the request action to the file."""
@@ -3190,6 +3164,7 @@ class RequestQueue:
             else:
                 self.reneging_rate = self.compute_reneging_rate_per_server(self.nn_subscribers, queueid) # self.compute_reneging_rate(self.nn_subscribers)
                 self.jockeying_rate = self.compute_jockeying_rate_per_server(self.nn_subscribers, queueid) # self.compute_jockeying_rate(self.nn_subscribers)
+                self.markov_rewards.append(reward)
                 self.objObserv.set_renege_obs(queueid, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, time_local_service, req, reward, decision, self.long_avg_serv_time, uses_nn, diff_wait) 
                 #self.curr_obs_renege.append(self.objObserv.get_renege_obs())            
             
@@ -3280,18 +3255,8 @@ class RequestQueue:
             else:
                 self.reneging_rate = self.compute_reneging_rate_per_server(self.nn_subscribers, curr_queue_id) # self.compute_reneging_rate(self.nn_subscribers)
                 self.jockeying_rate = self.compute_jockeying_rate_per_server(self.nn_subscribers, curr_queue_id) # self.compute_jockeying_rate(self.nn_subscribers)
+                self.markov_rewards.append(reward)  # ADD THIS LINE
                 self.objObserv.set_jockey_obs(curr_queue_id, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, exp_delay, req, reward, decision, self.long_avg_serv_time , uses_nn, diff_wait) #req.exp_time_service_end
-                #self.curr_obs_jockey.append(self.objObserv.get_jockey_obs())
-            #if not uses_nn:
-	        #	self.reneging_rate = self.compute_reneging_rate(self.state_subscribers)
-            #    self.jockeying_rate = self.compute_jockeying_rate(self.state_subscribers)                   
-            #    self.objObserv.set_renege_obs(queueid, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, time_local_service, time_to_service_end, reward, decision, self.long_avg_serv_time, uses_nn)
-            #else:
-            #	self.reneging_rate = self.compute_reneging_rate(self.nn_subscribers)
-			#	self.jockeying_rate = self.compute_jockeying_rate(self.nn_subscribers)
-			#	self.objObserv.set_renege_obs(queueid, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, time_local_service, time_to_service_end, reward, decision, self.long_avg_serv_time, uses_nn)                         
-            
-            #self.objObserv.set_jockey_obs(curr_queue_id, curr_pose, self.queue_intensity, self.jockeying_rate, self.reneging_rate, exp_delay, req.exp_time_service_end, reward, decision, self.long_avg_serv_time, uses_intensity_based) # time_alt_queue                                
                                                
             self.curr_req = req                    
         
@@ -3704,8 +3669,8 @@ class RequestQueue:
 
         # Colors for plot lines
         colors = {
-            "Markov-Based": {"reneging": "steelblue", "jockeying": "royalblue"},
-            "NN-Based": {"reneging": "forestgreen", "jockeying": "orange"},
+            "Markov-Based": {"reneging": "steelblue", "jockeying": "blue"},
+            "NN-Based": {"reneging": "forestgreen", "jockeying": "green"},
             "Jockeying Threshold": {"reneging": "purple", "jockeying": "brown"}
         }
 
@@ -4926,9 +4891,9 @@ def main():
     print("Environment and RequestQueue initialized successfully!")
 
     # Simulation parameters
-    duration = 7  # Time steps per episode
-    num_episodes = 30  # Number of training episodes
-    num_seeds = 2  # Number of random seeds for averaging
+    duration = 10 # 7  # Time steps per episode
+    num_episodes = 40  # Number of training episodes
+    num_seeds = 4  # Number of random seeds for averaging
 
     # ===================================================================
     # PART 1: BASELINE SIMULATION RUN
@@ -4978,7 +4943,7 @@ def main():
         df_heterog_dynamic = request_queue.run_proper_heterogeneity_sweep(
             duration=duration,
             env=env,
-            num_seeds=1, #num_seeds,
+            num_seeds=2, #num_seeds,
             num_episodes=20, #num_episodes,
             fixed_arrival_rate=False  # ← DYNAMIC MODE
         )
@@ -5090,7 +5055,7 @@ def main():
         df_nomu = request_queue.run_no_mu_ablation(
             duration=duration,
             env=env,
-            num_seeds=1, #num_seeds,
+            num_seeds=2, #num_seeds,
             num_episodes=20, #num_episodes,
             force_rates=(5.0, 7.5),  # Moderate heterogeneity
             save_csv="nomu_ablation.csv"
@@ -5121,38 +5086,36 @@ def main():
     # ===================================================================
     # PART 4: STANDARD VISUALIZATIONS
     # ===================================================================
-    #print("\n" + "=" * 80)
-    #print("PART 4: GENERATING STANDARD VISUALIZATIONS")
-    #print("=" * 80)
+    print("\n" + "=" * 80)
+    print("PART 4: GENERATING STANDARD VISUALIZATIONS")
+    print("=" * 80)
 
-    #try:
-    #    print("\n1. Plotting jockeying/reneging rates by information source...")
-    #    request_queue.plot_rates()
-    #
-    #    print("2. Comparing rates by information source...")
-    #    comparison = request_queue.compare_rates_by_information_source()
-    #    print("\nRate Comparison:")
-    #    for model, rates in comparison.items():
-    #        print(f"  {model}:")
-    #        print(f"    Reneging: {rates['reneging_rate']:.3f}")
-    #        print(f"    Jockeying: {rates['jockeying_rate']:.3f}")
-
-    #    print("\n3. Plotting rates vs queue size by type...")
-    #    request_queue.plot_reneging_and_jockeying_rates_vs_queue_size_by_type()
-
-    #    #print("\n4. Plotting waiting time vs queue length...")
-    #    #request_queue.plot_reneging_time_vs_queue_length()
-    #    #request_queue.plot_jockeying_time_vs_queue_length()
+    try:
+        print("\n1. Plotting jockeying/reneging rates by information source...")
+        request_queue.plot_rates()
+    
+        #print("2. Comparing rates by information source...")
+        comparison = request_queue.compare_rates_by_information_source()
+        print("\nRate Comparison:")
+        #for model, rates in comparison.items():
+        #    print(f"  {model}:")
+        #    print(f"    Reneging: {rates['reneging_rate']:.3f}")
+        #    print(f"    Jockeying: {rates['jockeying_rate']:.3f}")
+        print("\n2. Plotting rates vs queue size by type...")
+        request_queue.plot_reneging_and_jockeying_rates_vs_queue_size_by_type()
+        #print("\n4. Plotting waiting time vs queue length...")
+        #request_queue.plot_reneging_time_vs_queue_length()
+        #request_queue.plot_jockeying_time_vs_queue_length()
 
     #    #print("\n5. Comparing behavior rates by information source...")
     #    #request_queue.compare_behavior_rates_by_information_how_often()
 
-    #    #print("\n✓ All standard visualizations completed")
+        #print("\n✓ All standard visualizations completed")
 
-    #except Exception as e:
-    #    print(f"❌ Error in standard visualizations: {e}")
-    #    import traceback
-    #    traceback.print_exc()
+    except Exception as e:
+        print(f"❌ Error in standard visualizations: {e}")
+        import traceback
+        traceback.print_exc()
 
     # ===================================================================
     # PART 5: ADVANCED DIAGNOSTIC PLOTS
@@ -5421,8 +5384,8 @@ def old_main():
     # These are the number of iterations also labelled as step in the simulation
     # Ideally each step corresponds to an arrival and processing iteration
     duration = 2 #10
-    num_episodes = 2 #50  # Number of episodes
-    num_seeds = 1 # 2       # Number of random seeds
+    num_episodes = 20 #50  # Number of episodes
+    num_seeds =  2       # Number of random seeds
     
     # Define a queue to store return value from the thread
     stats_queue = queue.Queue()
