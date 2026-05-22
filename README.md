@@ -1,4 +1,4 @@
-***Behavioral Modeling in Communication Systems Queues***
+**Behavioral Modeling in Communication Systems Queues**
 
 ` ******************************************`  
 `         The Jockeying Simulator`  
