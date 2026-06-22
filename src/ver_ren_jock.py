@@ -2552,19 +2552,109 @@ class RequestQueue:
 
 
         # Determine the maximum queue size across all systems
+        max_queue_length = max(len(self.state_subscribers), len(self.nn_subscribers), len(self.all_requests))
+        complete_range = range(1, max_queue_length + 1)  # Full x-axis range
+
+        def normalize_forward_fill(queue_sizes, rates, full_range):
+            normalized = []
+            last_val = 1e-10  # Use small value instead of 0 for log scale
+            for x in full_range:
+                if x in queue_sizes:
+                    last_val = max(rates[queue_sizes.index(x)], 1e-10)  # Ensure positive values
+                    normalized.append(last_val)
+                else:
+                    normalized.append(last_val)
+            return normalized
+
+        fig, axes = plt.subplots(len(queues), 2, figsize=(14, 10))
+
+        for i, server_id in enumerate(["1", "2"]):
+            # Collect raw data
+            qs_m, j_m, r_m = collect_rates(self.state_subscribers, server_id)
+            qs_nn, j_nn, r_nn = collect_rates(self.nn_subscribers, server_id)
+            qs_t, j_t, r_t = collect_rates(self.all_requests, server_id, threshold_model=True)
+
+            # Apply normalization
+            j_m_norm = normalize_forward_fill(qs_m, j_m, complete_range)
+            j_nn_norm = normalize_forward_fill(qs_nn, j_nn, complete_range)
+            j_t_norm = normalize_forward_fill(qs_t, j_t, complete_range)
+
+            r_m_norm = normalize_forward_fill(qs_m, r_m, complete_range)
+            r_nn_norm = normalize_forward_fill(qs_nn, r_nn, complete_range)
+            r_t_norm = normalize_forward_fill(qs_t, r_t, complete_range)
+
+            # Plot jockeying rates with log scale
+            axes[i, 0].plot(complete_range, j_m_norm, '-', label=sources[0], color='blue', linewidth=1.5)
+            axes[i, 0].plot(complete_range, j_nn_norm, '-', label=sources[1], color='orange', linewidth=1.5)
+            axes[i, 0].plot(complete_range, j_t_norm, '-', label=sources[2], color='green', linewidth=1.5)
+            axes[i, 0].set_yscale('log')  # Set logarithmic scale
+            axes[i, 0].set_ylabel('Jockeying Rate (log scale)')
+            axes[i, 0].set_title(f'{queues[i]} - Jockeying Rates')
+
+            # Plot reneging rates with log scale
+            axes[i, 1].plot(complete_range, r_m_norm, '-', label=sources[0], color='black', linewidth=1.5)
+            axes[i, 1].plot(complete_range, r_nn_norm, '-', label=sources[1], color='purple', linewidth=1.5)
+            axes[i, 1].plot(complete_range, r_t_norm, '-', label=sources[2], color='red', linewidth=1.5)
+            axes[i, 1].set_yscale('log')  # Set logarithmic scale
+            axes[i, 1].set_ylabel('Reneging Rate (log scale)')
+            axes[i, 1].set_title(f'{queues[i]} - Reneging Rates')
+
+            # Set x-limits explicitly
+            axes[i, 0].set_xlim(0, max_queue_length)
+            axes[i, 1].set_xlim(0, max_queue_length)
+
+            # Formatting
+            for j in range(2):
+                axes[i, j].set_xlabel("Queue Size")
+                axes[i, j].grid(True, linestyle='--', alpha=0.5, which='both')  # Grid for both major and minor ticks
+                axes[i, j].legend(loc='best', fontsize='small')
+            
+                # Add minor grid lines for log scale
+                axes[i, j].grid(True, which='minor', linestyle=':', alpha=0.3)
+
+        plt.tight_layout()
+        plt.show()
+    
+
+    def non_log_plot_rates(self):
+        """
+        Plot the comparison of jockeying and reneging rates
+        for each queue for each individual information source subscribed to,
+        including jockeying threshold-driven impatience rates.
+        """
+        sources = ["Markov-Based", "NN-Based", "Jockeying Threshold"]  # Information sources
+        queues = ["Server 1", "Server 2"]
+
+        # Helper function to collect rates for each queue and info source
+        def collect_rates(subscribers, server_id, threshold_model=False):
+            jockeying_rates, reneging_rates, queue_sizes = [], [], []
+            for i in range(1, len(subscribers) + 1):
+                current = subscribers[:i]
+                queue_sizes.append(i)
+
+                # For threshold model, use specific logic
+                if threshold_model:
+                    # Simulate jockeying/reneging rates based on jockeying-threshold-driven impatience
+                    num_jockeyed = sum(self.threshold_policy(req.pos_in_queue, len(current) - req.pos_in_queue,
+                                            req.serv_rate, req.serv_rate) for req in current)
+                    num_reneged = sum(self.threshold_policy(req.pos_in_queue, len(current),
+                                            req.serv_rate, req.serv_rate) == 0 for req in current)
+                    jockeying_rates.append(num_jockeyed / i)
+                    reneging_rates.append(num_reneged / i)
+                else:
+                    # Normal logic
+                    num_jockeyed = sum(getattr(req, 'jockeyed', False) for req in current)
+                    num_reneged = sum(getattr(req, 'reneged', False) for req in current)
+                    jockeying_rates.append(num_jockeyed / i)
+                    reneging_rates.append(num_reneged / i)
+
+            return queue_sizes, jockeying_rates, reneging_rates
+
+
+        # Determine the maximum queue size across all systems
         max_queue_length = max(len(self.state_subscribers), len(self.nn_subscribers), len(self.all_requests) )
         complete_range = range(1, max_queue_length + 1)  # Full x-axis range
 
-        # Helper function to normalize data rates
-        #def normalize(queue_sizes, rates, complete_range):
-        #    normalized = []
-        #    for x in complete_range:
-        #        if x in queue_sizes:
-        #            index = queue_sizes.index(x)
-        #            normalized.append(rates[index])
-        #        else:
-        #            normalized.append(float('nan'))  # Fill missing values with None
-        #    return normalized        
 
         def normalize_forward_fill(queue_sizes, rates, full_range):
             normalized = []
@@ -3751,6 +3841,12 @@ class RequestQueue:
                      color=colors[label]["reneging"], linewidth=1, alpha=0.8)
             ax.plot(complete_range, j_rates, '-', label=f'{label} Jockeying',
                      color=colors[label]["jockeying"], linewidth=1, alpha=0.8)
+        
+        # 1. Use a symmetric log scale if you want to see values near zero
+        ax.set_yscale('symlog', linthresh=0.01) 
+    
+        # 2. Alternatively, explicitly set y-limits to show the floor
+        ax.set_ylim(-0.5, 1.0)
 
         ax.set_xlim(0, max_queue_length)
         ax.set_yscale('log')
@@ -4891,7 +4987,7 @@ def main():
     print("Environment and RequestQueue initialized successfully!")
 
     # Simulation parameters
-    duration = 10 # 7  # Time steps per episode
+    duration = 7  # Time steps per episode
     num_episodes = 40  # Number of training episodes
     num_seeds = 4  # Number of random seeds for averaging
 
@@ -4933,6 +5029,7 @@ def main():
     # ===================================================================
     # PART 2A: HETEROGENEITY SWEEP (DYNAMIC - ORIGINAL BEHAVIOR)
     # ===================================================================
+    '''
     print("\n" + "=" * 80)
     print("PART 2A: HETEROGENEITY SWEEP (DYNAMIC ARRIVAL RATES)")
     print("=" * 80)
@@ -4943,9 +5040,9 @@ def main():
         df_heterog_dynamic = request_queue.run_proper_heterogeneity_sweep(
             duration=duration,
             env=env,
-            num_seeds=2, #num_seeds,
-            num_episodes=20, #num_episodes,
-            fixed_arrival_rate=False  # ← DYNAMIC MODE
+            num_seeds=1, #2, #num_seeds,
+            num_episodes=5, #20, #num_episodes,
+            fixed_arrival_ate=False  # ← DYNAMIC MODE
         )
         
         print("\n✓ Dynamic heterogeneity sweep completed")
@@ -4956,6 +5053,7 @@ def main():
         print(f"❌ Error in dynamic heterogeneity sweep: {e}")
         import traceback
         traceback.print_exc()
+    '''
     
     
     # ===================================================================
@@ -5040,6 +5138,7 @@ def main():
     # ===================================================================
     # PART 3: NO-μ ABLATION TEST
     # ===================================================================
+    '''
     print("\n" + "=" * 80)
     print("PART 3: NO-μ ABLATION TEST")
     print("=" * 80)
@@ -5055,8 +5154,8 @@ def main():
         df_nomu = request_queue.run_no_mu_ablation(
             duration=duration,
             env=env,
-            num_seeds=2, #num_seeds,
-            num_episodes=20, #num_episodes,
+            num_seeds=1, #2, #num_seeds,
+            num_episodes=5, #20, #num_episodes,
             force_rates=(5.0, 7.5),  # Moderate heterogeneity
             save_csv="nomu_ablation.csv"
         )
@@ -5082,6 +5181,7 @@ def main():
         print(f"❌ Error in no-μ ablation: {e}")
         import traceback
         traceback.print_exc()
+    
 
     # ===================================================================
     # PART 4: STANDARD VISUALIZATIONS
@@ -5116,6 +5216,7 @@ def main():
         print(f"❌ Error in standard visualizations: {e}")
         import traceback
         traceback.print_exc()
+    '''
 
     # ===================================================================
     # PART 5: ADVANCED DIAGNOSTIC PLOTS
@@ -5225,9 +5326,9 @@ def new_main():
 
     print("Environment and RequestQueue initialized successfully!")
 
-    duration = 10
-    num_episodes = 30
-    num_seeds = 2
+    duration = 2 #10
+    num_episodes = 5 #30
+    num_seeds = 1 #2
 
     # ===== HETEROGENEITY SWEEP =====
     # This is where your existing threaded_run naturally creates heterogeneity
