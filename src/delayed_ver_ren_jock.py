@@ -34,9 +34,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from queue import Queue
 from scipy.stats import sem, t
+from collections import deque
 ###############################################################################
-
-#from RenegeJockey import RequestQueue, Queues, Observations
 
 # Configure logging
 #logging.basicConfig(
@@ -48,6 +47,7 @@ from scipy.stats import sem, t
 
 ################################## Globals ####################################
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 class Actions(Enum):
     RENEGE = 0
@@ -182,15 +182,6 @@ class Queues(object):
         
     def queue_setup_manager(self, target_ratio=None):
                 
-        # deltalambda controls the difference between the service rate of either queues    
-        #deltaLambda=random.randint(1, 2)
-        
-        #serv_rate_one=self.sampled_arr_rate + deltaLambda 
-        #serv_rate_two=self.sampled_arr_rate - deltaLambda
-
-        #_serv_rate_one=serv_rate_one / 2
-        #_serv_rate_two=serv_rate_two / 2
-
         """
         Setup queue service rates.
 
@@ -997,6 +988,10 @@ class RequestQueue:
         self.arrival_rate_history = []
         self.state_history = []
 
+        self.global_queue_length_history = []
+        self.global_service_rate_history = []
+        self.global_arrival_rate_history = []
+
         return               
 		
 	
@@ -1619,6 +1614,10 @@ class RequestQueue:
                 
                     print(f"Step {i + 1}: Action={action}, Reward={reward}, Step Total Reward={step_rewards}, Total Reward={total_reward}")
                 
+                    self.global_queue_length_history.append(curr_q.copy())
+                    self.global_service_rate_history.append(curr_mu.copy())
+                    self.global_arrival_rate_history.append(curr_lam)
+
                 # Update the RL agent at the end of each episode
                 actor_loss, critic_loss, total_loss = self.agent.update()
                         
@@ -4738,19 +4737,26 @@ class MFEResult:
     history: Dict[str, List[np.ndarray]]
     mean_sojourn: float
     oscillation_amp: float
+    equilibrium_residual: float = np.nan
+    stability_eigs: Optional[np.ndarray] = None
 
 
 class MeanFieldQueueGame:
     """
-    Fluid / mean-field queueing game with delayed telemetry.
+    Reduced behavioural mean-field queue model.
 
-    State:
-        jobs[i] = fluid queue occupancy at queue i
+    IMPORTANT MODELING CHANGE
+    --------------------------
+    The information model does NOT allocate exogenous arrivals.  Arrival rates
+    are fixed (or supplied through ``arrival_split``).  Delayed information
+    affects only behavioural flows: reneging and jockeying.
 
-    Interpretation:
-        - agents observe delayed queue occupancy
-        - routing probabilities are softmax(-crowding)
-        - the mean field is the normalized queue-occupancy vector
+    Continuous state q_i(t): queue occupancy at facility i.
+
+        qdot = lambda - service(q) + B(q, I),   I(t) = q(t-tau)
+
+    where B contains reneging and jockeying.  This is the reduced fluid MFG/MFE
+    used for the theorem/numerical checks; it is not a PDE HJB--FPK solver.
     """
 
     def __init__(
@@ -4758,14 +4764,20 @@ class MeanFieldQueueGame:
         c_list: List[int],
         mu_list: List[float],
         total_arrival_rate: float,
+        telemetry_delay: Optional[float],
         dt: float = 0.01,
         choice_sharpness: float = 1.0,
         initial_jobs: Optional[List[float]] = None,
+        arrival_split: Optional[List[float]] = None,
+        renege_scale: float = 0.10,
+        renege_sensitivity: float = 4.0,
+        renege_threshold: float = 1.0,
+        jockey_scale: float = 0.20,
+        jockey_sensitivity: float = 4.0,
+        jockey_threshold: float = 0.0,
     ):
-        if len(c_list) != len(mu_list):
-            raise ValueError("c_list and mu_list must have the same length")
-        if len(c_list) == 0:
-            raise ValueError("At least one queue is required")
+        if len(c_list) != len(mu_list) or len(c_list) == 0:
+            raise ValueError("c_list and mu_list must have the same non-zero length")
         if dt <= 0:
             raise ValueError("dt must be positive")
 
@@ -4773,269 +4785,263 @@ class MeanFieldQueueGame:
         self.c_list = np.asarray(c_list, dtype=float)
         self.mu_list = np.asarray(mu_list, dtype=float)
         self.total_arrival_rate = float(total_arrival_rate)
-        #self.telemetry_delay = float(telemetry_delay)
         self.dt = float(dt)
         self.choice_sharpness = float(choice_sharpness)
 
-        #self.delay_steps = max(1, int(round(self.telemetry_delay / self.dt)))
-        #self.telemetry_buffer = deque(maxlen=self.delay_steps + 1)
+        if arrival_split is None:
+            self.arrival_split = np.ones(self.N, dtype=float) / self.N
+        else:
+            a = np.asarray(arrival_split, dtype=float)
+            if a.shape != (self.N,) or np.any(a < 0) or np.sum(a) <= 0:
+                raise ValueError("arrival_split must be a non-negative vector of length N")
+            self.arrival_split = a / np.sum(a)
+
+        self.arrival_rates = self.total_arrival_rate * self.arrival_split
+
+        if telemetry_delay is None:
+            avg_mu = float(np.mean(self.mu_list))
+            telemetry_delay = 1.0 / avg_mu if avg_mu > 0 else 1.0
+        self.telemetry_delay = max(0.0, float(telemetry_delay))
+        self.delay_steps = max(0, int(round(self.telemetry_delay / self.dt)))
+        self.telemetry_buffer = deque(maxlen=max(1, self.delay_steps + 1))
+
+        # Behavioural-response parameters.  These are the reduced-form hazards
+        # to be calibrated from the reneging/jockeying observations in the
+        # simulator; they are deliberately separate from arrival allocation.
+        self.renege_scale = float(renege_scale)
+        self.renege_sensitivity = float(renege_sensitivity)
+        self.renege_threshold = float(renege_threshold)
+        self.jockey_scale = float(jockey_scale)
+        self.jockey_sensitivity = float(jockey_sensitivity)
+        self.jockey_threshold = float(jockey_threshold)
 
         if initial_jobs is None:
             self.jobs = np.zeros(self.N, dtype=float)
         else:
-            self.jobs = np.asarray(initial_jobs, dtype=float)
-            if self.jobs.shape[0] != self.N:
-                raise ValueError("initial_jobs must have the same length as c_list")
+            self.jobs = np.asarray(initial_jobs, dtype=float).reshape(-1)
+            if self.jobs.size == 1 and self.N > 1:
+                self.jobs = np.repeat(self.jobs.item(), self.N)
+            if self.jobs.size != self.N:
+                raise ValueError(f"initial_jobs must have length {self.N}")
+            self.jobs = np.maximum(self.jobs, 0.0)
 
-        for _ in range(self.delay_steps + 1):
-            self.telemetry_buffer.append(init.copy())
+        self.reset(self.jobs)
 
-    def reset(self, initial_jobs: Optional[List[float]] = None) -> np.ndarray:
-        if initial_jobs is None:
-            self.jobs = np.zeros(self.N, dtype=float)
-        else:
-            self.jobs = np.asarray(initial_jobs, dtype=float)
-            if self.jobs.shape[0] != self.N:
-                raise ValueError("initial_jobs must have the same length as c_list")
-
-        return self.jobs.copy()
-
-    def current_jobs(self) -> np.ndarray:
-        return self.jobs.copy()
-
-    def delayed_jobs(self) -> np.ndarray:
-        return self.jobs.copy()
-
-    def service_capacity(self) -> np.ndarray:
-        return self.c_list * self.mu_list
-
-    def mean_field(self) -> np.ndarray:
-        jobs = self.current_jobs()
-        total = float(np.sum(jobs))
-        if total <= 1e-12:
-            return np.ones(self.N, dtype=float) / self.N
-        return jobs / total
+    @staticmethod
+    def _sigmoid(x: np.ndarray) -> np.ndarray:
+        x = np.clip(np.asarray(x, dtype=float), -60.0, 60.0)
+        return 1.0 / (1.0 + np.exp(-x))
 
     @staticmethod
     def _softmax(logits: np.ndarray) -> np.ndarray:
         logits = np.asarray(logits, dtype=float)
         if logits.size == 0:
             return logits
-        shift = np.max(logits)
-        exps = np.exp(logits - shift)
-        denom = np.sum(exps)
-        if not np.isfinite(denom) or denom <= 0.0:
-            return np.ones_like(logits) / len(logits)
-        return exps / denom
+        x = logits - np.max(logits)
+        exps = np.exp(x)
+        return exps / max(float(np.sum(exps)), 1e-15)
 
-    def crowding_scores(
-        self,
-        perceived_jobs: np.ndarray,
-        mean_field: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
-        cap = np.maximum(self.service_capacity(), 1e-12)
-        crowd = perceived_jobs / cap
-        if mean_field is not None:
-            mf = np.asarray(mean_field, dtype=float)
-            if mf.shape[0] == crowd.shape[0]:
-                crowd = crowd + 0.25 * mf
-        return crowd
-
-    def routing_probs(
-        self,
-        perceived_jobs: np.ndarray,
-        mean_field: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
-        crowd = self.crowding_scores(perceived_jobs, mean_field=mean_field)
-        logits = -self.choice_sharpness * crowd
-        return self._softmax(logits)
-
-    def _queue_step_from_arrivals(self, jobs: np.ndarray, arrivals: np.ndarray) -> np.ndarray:
-        """
-        One fluid step under a fixed arrival split.
-        """
-        jobs = np.asarray(jobs, dtype=float).copy()
-        arrivals = np.asarray(arrivals, dtype=float).copy()
-
-        new_jobs = jobs + arrivals
-        service_potential = self.mu_list * np.minimum(self.c_list, new_jobs) * self.dt
-        departures = np.minimum(new_jobs, service_potential)
-        next_jobs = np.maximum(0.0, new_jobs - departures)
-        return next_jobs
-
-    def step(self, joint_actions: np.ndarray) -> Dict[str, np.ndarray]:
-        """
-        Advance the mean-field state by one step.
-
-        joint_actions is interpreted as the routing split over queues.
-        """
-        joint_actions = np.asarray(joint_actions, dtype=float)
-        if joint_actions.shape[0] != self.N:
-            raise ValueError("joint_actions must have length N")
-
-        if np.sum(joint_actions) <= 0.0:
-            probs = np.ones(self.N, dtype=float) / self.N
+    def reset(self, initial_jobs: Optional[np.ndarray] = None) -> np.ndarray:
+        if initial_jobs is None:
+            self.jobs = np.zeros(self.N, dtype=float)
         else:
-            probs = joint_actions / np.sum(joint_actions)
+            self.jobs = np.maximum(np.asarray(initial_jobs, dtype=float).reshape(-1), 0.0)
+            if self.jobs.size != self.N:
+                raise ValueError("initial_jobs must have length N")
+        self.telemetry_buffer.clear()
+        for _ in range(self.delay_steps + 1):
+            self.telemetry_buffer.append(self.jobs.copy())
+        return self.jobs.copy()
 
-        arrivals = self.total_arrival_rate * self.dt * probs
-        jobs_prev = self.current_jobs()
-        jobs_next = self._queue_step_from_arrivals(jobs_prev, arrivals)
+    def current_jobs(self) -> np.ndarray:
+        return self.jobs.copy()
 
-        # self.telemetry_buffer.append(jobs_next.copy())
+    def delayed_jobs(self) -> np.ndarray:
+        """Return the actual delayed state from the telemetry buffer."""
+        if not self.telemetry_buffer:
+            return self.jobs.copy()
+        return np.asarray(self.telemetry_buffer[0], dtype=float).copy()
 
-        mean_field = self.mean_field()
+    def service_capacity(self) -> np.ndarray:
+        return self.c_list * self.mu_list
+
+    def mean_field(self) -> np.ndarray:
+        total = float(np.sum(self.jobs))
+        if total <= 1e-12:
+            return np.ones(self.N) / self.N
+        return self.jobs / total
+
+    def _normalized_congestion(self, perceived_jobs: np.ndarray) -> np.ndarray:
+        return np.asarray(perceived_jobs, dtype=float) / np.maximum(self.service_capacity(), 1e-12)
+
+    def service_flow(self, q: np.ndarray) -> np.ndarray:
+        """Instantaneous physical service/departure flow."""
+        q = np.maximum(np.asarray(q, dtype=float), 0.0)
+        return self.mu_list * np.minimum(self.c_list, q)
+
+    def reneging_flow(self, q: np.ndarray, perceived_jobs: np.ndarray) -> np.ndarray:
+        """Delayed-information reneging hazard times current population in queue."""
+        congestion = self._normalized_congestion(perceived_jobs)
+        hazard = self.renege_scale * self._sigmoid(
+            self.renege_sensitivity * (congestion - self.renege_threshold)
+        )
+        return hazard * np.maximum(q, 0.0)
+
+    def jockeying_flow(self, q: np.ndarray, perceived_jobs: np.ndarray) -> np.ndarray:
+        """
+        Net jockeying flow.  Agents currently in queue i switch toward queues
+        that look better under delayed telemetry.  The construction is
+        population-conserving: sum_i jockeying_flow_i == 0.
+        """
+        q = np.maximum(np.asarray(q, dtype=float), 0.0)
+        crowd = self._normalized_congestion(perceived_jobs)
+        net = np.zeros(self.N, dtype=float)
+        for i in range(self.N):
+            if q[i] <= 0:
+                continue
+            alternatives = crowd.copy()
+            alternatives[i] = np.inf
+            logits = -self.jockey_sensitivity * (alternatives - self.jockey_threshold)
+            probs = np.zeros(self.N, dtype=float)
+            finite = np.isfinite(logits)
+            if np.any(finite):
+                probs[finite] = self._softmax(logits[finite])
+            switch_rate = self.jockey_scale * float(np.sum(probs))
+            outflow = switch_rate * q[i]
+            net[i] -= outflow
+            net += outflow * probs
+        # Numerical projection onto the mass-conserving subspace.
+        net -= np.mean(net)
+        return net
+
+    def behavioural_flow(self, q: np.ndarray, perceived_jobs: np.ndarray) -> np.ndarray:
+        return -self.reneging_flow(q, perceived_jobs) + self.jockeying_flow(q, perceived_jobs)
+
+    def rhs(self, q: np.ndarray, perceived_jobs: np.ndarray) -> np.ndarray:
+        q = np.maximum(np.asarray(q, dtype=float), 0.0)
+        return self.arrival_rates - self.service_flow(q) + self.behavioural_flow(q, perceived_jobs)
+
+    def step(self, _unused_policy: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
+        """Advance the reduced behavioural MFG one fluid step."""
+        perceived = self.delayed_jobs()
+        flow = self.rhs(self.jobs, perceived)
+        jobs_next = np.maximum(0.0, self.jobs + self.dt * flow)
+        self.jobs = jobs_next
+        self.telemetry_buffer.append(jobs_next.copy())
         return {
             "jobs": jobs_next.copy(),
-            "perceived_jobs": self.delayed_jobs().copy(),
-            "routing_probs": probs.copy(),
-            "arrivals": arrivals.copy(),
-            "mean_field": mean_field.copy(),
+            "perceived_jobs": perceived.copy(),
+            "routing_probs": self.arrival_split.copy(),  # exogenous, NOT information-driven
+            "arrivals": self.arrival_rates * self.dt,
+            "mean_field": self.mean_field().copy(),
+            "reneging_flow": self.reneging_flow(self.jobs, perceived),
+            "jockeying_flow": self.jockeying_flow(self.jobs, perceived),
         }
 
-    def mean_sojourn_proxy(self, probs: np.ndarray) -> float:
-        """
-        Diagnostic mean sojourn proxy under split probs.
-        """
-        probs = np.asarray(probs, dtype=float)
-        total = 0.0
-        for i in range(self.N):
-            lam_i = self.total_arrival_rate * probs[i]
-            total += probs[i] * mmc_sojourn_time(lam_i, float(self.mu_list[i]), int(self.c_list[i]))
-        return float(total)
-
-    def simulate(
-        self,
-        policy_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
-        steps: int = 5000,
-    ) -> Dict[str, np.ndarray]:
-        """
-        Simulate the game under a given policy function.
-
-        policy_fn(perceived_jobs, mean_field) -> routing probabilities
-        """
-        hist: Dict[str, List[np.ndarray]] = {
-            "jobs": [],
-            "perceived_jobs": [],
-            "routing_probs": [],
-            "arrivals": [],
-            "mean_field": [],
-        }
-
+    def simulate(self, policy_fn=None, steps: int = 5000) -> Dict[str, np.ndarray]:
+        hist = {k: [] for k in [
+            "jobs", "perceived_jobs", "routing_probs", "arrivals", "mean_field",
+            "mean_sojourn", "imbalance", "reneging_flow", "jockeying_flow"
+        ]}
         for _ in range(steps):
-            perceived = self.delayed_jobs()
-            mf = self.mean_field()
-            probs = policy_fn(perceived, mf)
-            out = self.step(probs)
-            hist["jobs"].append(out["jobs"])
-            hist["perceived_jobs"].append(out["perceived_jobs"])
-            hist["routing_probs"].append(out["routing_probs"])
-            hist["arrivals"].append(out["arrivals"])
-            hist["mean_field"].append(out["mean_field"])
-
+            out = self.step()
+            for k in out:
+                hist[k].append(out[k])
+            hist["mean_sojourn"].append(self.mean_sojourn_from_state(out["jobs"]))
+            mf = out["mean_field"]
+            hist["imbalance"].append(float(np.max(mf) - np.min(mf)))
         return {k: np.asarray(v) for k, v in hist.items()}
+
+    def mean_sojourn_from_state(self, q: np.ndarray) -> float:
+        if self.total_arrival_rate <= 0:
+            return 0.0
+        return float(np.sum(np.asarray(q, dtype=float)) / self.total_arrival_rate)
+
+    # Backward-compatible name; it now reports physical congestion, not arrival routing.
+    def routing_probs(self, perceived_jobs, mean_field=None):
+        return self.arrival_split.copy()
+
+    def crowding_scores(self, perceived_jobs, mean_field=None):
+        return self._normalized_congestion(perceived_jobs)
+
+    def equilibrium_residual(self, q: np.ndarray) -> np.ndarray:
+        q = np.asarray(q, dtype=float)
+        return self.rhs(q, q)
+
+    def numerical_linearization(self, q_star: np.ndarray, eps: float = 1e-6):
+        """
+        Compute A0 = dF/dq and A_tau = dF/dI for
+            qdot = F(q(t), I(t)), I(t)=q(t-tau).
+        Characteristic equation:
+            det(lambda I - A0 - A_tau exp(-lambda tau)) = 0.
+        """
+        q_star = np.asarray(q_star, dtype=float)
+        n = self.N
+        A0 = np.zeros((n, n), dtype=float)
+        At = np.zeros((n, n), dtype=float)
+        for j in range(n):
+            e = np.zeros(n); e[j] = eps
+            A0[:, j] = (self.rhs(q_star + e, q_star) - self.rhs(q_star - e, q_star)) / (2*eps)
+            At[:, j] = (self.rhs(q_star, q_star + e) - self.rhs(q_star, q_star - e)) / (2*eps)
+        return A0, At
+
+    def characteristic_residual(self, lam: complex, q_star: np.ndarray) -> complex:
+        A0, At = self.numerical_linearization(q_star)
+        M = lam*np.eye(self.N) - A0 - At*np.exp(-lam*self.telemetry_delay)
+        return complex(np.linalg.det(M))
 
 
 class MeanFieldEquilibriumSolver:
-    """
-    Fixed-point solver for a mean-field equilibrium.
+    """Fixed-point iteration for the reduced behavioural MFE."""
 
-    The idea:
-        m_{k+1} = (1-r) m_k + r * T(BR(m_k))
-    where BR is the best response map and T is the population push-forward.
-    """
-
-    def __init__(
-        self,
-        game: MeanFieldQueueGame,
-        tol: float = 1e-4,
-        max_iter: int = 200,
-        relaxation: float = 0.5,
-    ):
-        if not (0.0 < relaxation <= 1.0):
-            raise ValueError("relaxation must be in (0, 1]")
+    def __init__(self, game: MeanFieldQueueGame, tol=1e-6, max_iter=10000, relaxation=0.5):
         self.game = game
         self.tol = float(tol)
         self.max_iter = int(max_iter)
         self.relaxation = float(relaxation)
 
-    def best_response(self, m: np.ndarray) -> np.ndarray:
-        """
-        Return routing probabilities that minimize a local delay proxy
-        given the current mean field m.
-        """
-        m = np.asarray(m, dtype=float)
-        perceived = self.game.delayed_jobs()
-        crowd = self.game.crowding_scores(perceived, mean_field=m)
-        logits = -self.game.choice_sharpness * crowd
-        return self.game._softmax(logits)
-
-    def push_forward(self, m: np.ndarray, policy: np.ndarray) -> np.ndarray:
-        """
-        Advance the population state one macro-step under a given policy.
-        """
-        _ = m  # kept for signature clarity; the game itself holds the state
-        out = self.game.step(policy)
-        jobs_next = np.asarray(out["jobs"], dtype=float)
-        total = float(np.sum(jobs_next))
-        if total <= 1e-12:
-            return np.ones(self.game.N, dtype=float) / self.game.N
-        return jobs_next / total
-
-    def solve_mfe(self, m0: Optional[np.ndarray] = None) -> MFEResult:
+    def solve_mfe(self, m0=None) -> MFEResult:
         if m0 is None:
-            m = self.game.mean_field().copy()
+            q = self.game.current_jobs()
         else:
-            m = np.asarray(m0, dtype=float).copy()
-            if m.shape[0] != self.game.N:
-                raise ValueError("m0 must have the same length as the number of queues")
+            q = np.maximum(np.asarray(m0, dtype=float).reshape(-1), 0.0)
+        if q.size != self.game.N:
+            raise ValueError("m0 must have length N")
 
-        history: Dict[str, List[np.ndarray]] = {
-            "m": [m.copy()],
-            "policy": [],
-            "m_next": [],
-            "error": [],
-        }
-
+        history = {"m": [q.copy()], "policy": [], "m_next": [], "error": []}
         converged = False
-        policy_star = np.ones(self.game.N, dtype=float) / self.game.N
-
-        # Re-seed the environment from the current state so the solver
-        # starts from a clean macro-state.
-        self.game.reset(initial_jobs=(m / max(np.sum(m), 1e-12)))
+        self.game.reset(q)
 
         for k in range(self.max_iter):
-            policy = self.best_response(m)
-            m_candidate = self.push_forward(m, policy)
-            m_next = (1.0 - self.relaxation) * m + self.relaxation * m_candidate
-
-            err = float(np.linalg.norm(m_next - m, ord=1))
-
-            history["policy"].append(policy.copy())
-            history["m_next"].append(m_candidate.copy())
-            history["error"].append(np.array([err], dtype=float))
-            history["m"].append(m_next.copy())
-
-            policy_star = policy
-            m = m_next
-
-            if err < self.tol:
+            # At stationarity I=q, so solve the actual behavioural balance,
+            # not an arrival-allocation softmax fixed point.
+            residual = self.game.equilibrium_residual(q)
+            # Damped pseudo-time fixed-point step.
+            scale = max(float(np.max(self.game.service_capacity())), 1.0)
+            q_candidate = np.maximum(q + (self.game.dt * scale) * residual, 0.0)
+            q_next = (1-self.relaxation)*q + self.relaxation*q_candidate
+            err = float(np.linalg.norm(q_next-q, ord=1))
+            history["m"].append(q_next.copy())
+            history["m_next"].append(q_candidate.copy())
+            history["policy"].append(self.game.arrival_split.copy())
+            history["error"].append(np.array([err]))
+            q = q_next
+            if err < self.tol and np.linalg.norm(self.game.equilibrium_residual(q), ord=np.inf) < self.tol:
                 converged = True
                 break
 
-        mean_sojourn = float(self.game.mean_sojourn_proxy(policy_star))
-        osc_amp = float(np.std(np.asarray(history["error"]).reshape(-1))) if history["error"] else float("nan")
-
+        residual_norm = float(np.linalg.norm(self.game.equilibrium_residual(q), ord=np.inf))
+        A0, At = self.game.numerical_linearization(q)
+        eigs = np.linalg.eigvals(A0) if self.game.telemetry_delay == 0 else None
+        recent = np.asarray(history["error"][-20:]).reshape(-1)
+        osc_amp = float(np.std(recent)) if recent.size else 0.0
         return MFEResult(
-            m_star=m.copy(),
-            policy_star=policy_star.copy(),
-            converged=converged,
-            iterations=k + 1,
-            history=history,
-            mean_sojourn=mean_sojourn,
-            oscillation_amp=osc_amp,
+            m_star=q.copy(), policy_star=self.game.arrival_split.copy(),
+            converged=converged, iterations=k+1, history=history,
+            mean_sojourn=self.game.mean_sojourn_from_state(q),
+            oscillation_amp=osc_amp, equilibrium_residual=residual_norm,
+            stability_eigs=eigs,
         )
-
 
 
 def visualize_results(metrics_file="simu_results.csv", window=5):
@@ -5286,12 +5292,12 @@ def main():
     print("Environment and RequestQueue initialized successfully!")
 
     # Simulation parameters
-    duration = 2 # 7  # Time steps per episode
-    num_episodes = 5 # 40  # Number of training episodes
+    duration = 20 # 7  # Time steps per episode
+    num_episodes = 50 # 40  # Number of training episodes
     num_seeds = 1 # 4  # Number of random seeds for averaging
 
     dt = 0.01
-    telemetry_delay = 0.25
+    telemetry_delay = 0.15
     choice_sharpness = 3.0
 
     tipping_grid = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.35, 0.50]
@@ -5320,27 +5326,10 @@ def main():
         path_dist : Dict[str, np.ndarray]
             Window-level means, masses, covariances, and rates.
         """
-        q_hist = np.asarray(getattr(rq, "queue_length_history", []), dtype=float)
-        mu_hist = np.asarray(getattr(rq, "service_rate_history", []), dtype=float)
-        lam_hist = np.asarray(getattr(rq, "arrival_rate_history", []), dtype=float)
-
-        if q_hist.size == 0 or mu_hist.size == 0:
-            q1_size, q2_size = rq.get_queue_sizes()
-            terminal_jobs = np.array([float(q1_size), float(q2_size)], dtype=float)
-            mu1 = float(rq.dict_servers_info.get("1", 1.0))
-            mu2 = float(rq.dict_servers_info.get("2", 1.0))
-            lam = float(getattr(rq, "arr_rate", getattr(rq.objQueues, "sampled_arr_rate", 1.0)))
-            total_jobs = float(np.sum(terminal_jobs))
-            m0 = terminal_jobs / max(total_jobs, 1e-12) if total_jobs > 0 else np.ones(2, dtype=float) / 2.0
-            path_dist = {
-                "window_means": np.asarray([terminal_jobs]),
-                "window_mass": np.asarray([m0]),
-                "window_lambda": np.asarray([lam]),
-                "window_mu": np.asarray([[mu1, mu2]], dtype=float),
-                "window_cov": np.asarray([np.zeros((2, 2), dtype=float)]),
-                "window_centers": np.asarray([0], dtype=int),
-            }
-            return terminal_jobs, [mu1, mu2], lam, m0, path_dist
+        
+        q_hist = np.asarray(getattr(rq, "global_queue_length_history", []), dtype=float)
+        mu_hist = np.asarray(getattr(rq, "global_service_rate_history", []), dtype=float)
+        lam_hist = np.asarray(getattr(rq, "global_arrival_rate_history", []), dtype=float)
 
         start = int(len(q_hist) * burn_in_fraction)
         q_win = q_hist[start:]
@@ -5409,7 +5398,7 @@ def main():
         empirical_m0 = np.mean(window_mass, axis=0)
         empirical_m0 = empirical_m0 / max(float(np.sum(empirical_m0)), eps)
 
-        path_dist = {
+        path_dist: Dict[str, np.ndarray] = {
             "window_means": window_means,
             "window_mass": window_mass,
             "window_lambda": window_lambda,
@@ -5417,6 +5406,26 @@ def main():
             "window_cov": window_cov,
             "window_centers": window_centers,
         }
+
+        if q_hist.size == 0 or mu_hist.size == 0:
+            q1_size, q2_size = rq.get_queue_sizes()
+            terminal_jobs = np.array([float(q1_size), float(q2_size)], dtype=float)
+            mu1 = float(getattr(rq, "srvrates_1", rq.dict_servers_info.get("1", 1.0)))
+            mu2 = float(getattr(rq, "srvrates_2", rq.dict_servers_info.get("2", 1.0)))
+            lam = float(getattr(rq, "arr_rate", getattr(rq.objQueues, "sampled_arr_rate", 1.0)))
+
+            total_jobs = float(np.sum(terminal_jobs))
+            m0 = terminal_jobs / max(total_jobs, 1e-12) if total_jobs > 0 else np.ones(2)/2.0
+
+            path_dist = {
+                "window_means": np.asarray([terminal_jobs]),
+                "window_mass": np.asarray([m0]),
+                "window_lambda": np.asarray([lam]),
+                "window_mu": np.asarray([[mu1, mu2]], dtype=float),
+                "window_cov": np.asarray([np.zeros((2, 2), dtype=float)]),
+                "window_centers": np.asarray([0], dtype=int),
+            }
+            return terminal_jobs, [mu1, mu2], lam, m0, path_dist
 
         return empirical_queue_mean, empirical_mu_mean.tolist(), empirical_lambda, empirical_m0, path_dist
 
@@ -5506,13 +5515,24 @@ def main():
     print("PART 2: MFE SEEDED FROM BASELINE TERMINATION")
     print("=" * 80)
 
+    empirical_mu_list = np.atleast_1d(np.asarray(empirical_mu_list, dtype=float))
+    if empirical_mu_list.size == 1:
+        empirical_mu_list = np.repeat(empirical_mu_list.item(), 2)  # because c_list=[1,1]
+    empirical_mu_list = empirical_mu_list.tolist()
+
+    empirical_jobs = np.atleast_1d(np.asarray(empirical_jobs, dtype=float))    
+    if empirical_jobs.size == 1:
+        empirical_jobs = np.repeat(empirical_jobs.item(), 2)  # c_list=[1,1]
+    empirical_jobs = empirical_jobs.tolist()
+
     mfe_game = MeanFieldQueueGame(
         c_list=[1, 1],
         mu_list=empirical_mu_list,
         total_arrival_rate=empirical_lambda,
+        telemetry_delay=telemetry_delay,
         dt=dt,
         choice_sharpness=choice_sharpness,
-        initial_jobs=empirical_jobs.tolist(),
+        initial_jobs=empirical_jobs,
     )
 
     mfe_solver = MeanFieldEquilibriumSolver(
@@ -5562,9 +5582,10 @@ def main():
         c_list=[1, 1],
         mu_list=empirical_mu_list,
         total_arrival_rate=empirical_lambda,
+        telemetry_delay=telemetry_delay,
         dt=dt,
         choice_sharpness=choice_sharpness,
-        initial_jobs=empirical_jobs.tolist(),
+        initial_jobs=empirical_jobs, #.tolist(),
     )
     braess_base_solver = MeanFieldEquilibriumSolver(
         braess_base_game,
@@ -5578,6 +5599,7 @@ def main():
         c_list=[1] * expanded_N,
         mu_list=expanded_mu_list,
         total_arrival_rate=empirical_lambda,
+        telemetry_delay=telemetry_delay,
         dt=dt,
         choice_sharpness=choice_sharpness,
         initial_jobs=expanded_jobs.tolist(),
@@ -5610,9 +5632,10 @@ def main():
             c_list=[1, 1],
             mu_list=empirical_mu_list,
             total_arrival_rate=empirical_lambda,
+            telemetry_delay=tau,
             dt=dt,
             choice_sharpness=choice_sharpness,
-            initial_jobs=empirical_jobs.tolist(),
+            initial_jobs=empirical_jobs, #.tolist(),
         )
         tip_solver = MeanFieldEquilibriumSolver(
             tip_game,
@@ -5779,12 +5802,13 @@ def estimate_critical_load(
         total_capacity = N * c * mu
         lam = rho * total_capacity
 
-        game = DelayedMeanFieldQueueGame(
+        game = MeanFieldQueueGame(
             c_list=[c] * N, mu_list=[mu] * N, total_arrival_rate=lam,
-            tau=tau, dt=dt, choice_sharpness=choice_sharpness,
+            telemetry_delay=tau, dt=dt, choice_sharpness=choice_sharpness, initial_jobs=[1.0] * N,
         )
 
         hist = game.simulate(steps=steps)
+
         stats = summarize_history(hist, dt=dt, burn_in=burn_in)
 
         row = {
@@ -5822,12 +5846,13 @@ def detect_braess_like_paradox(
         total_capacity = N * c * mu
         lam = rho * total_capacity
 
-        game = DelayedMeanFieldQueueGame(
+        game = MeanFieldQueueGame(
             c_list=[c] * N, mu_list=[mu] * N, total_arrival_rate=lam,
-            tau=tau, dt=dt, choice_sharpness=choice_sharpness,
+            telemetry_delay=tau, dt=dt, choice_sharpness=choice_sharpness, initial_jobs=[1.0] * N,
         )
 
         hist = game.simulate(steps=steps)
+
         stats = summarize_history(hist, dt=dt, burn_in=burn_in)
         stats.update({"N": float(N), "capacity": float(total_capacity)})
         summaries.append(stats)
@@ -5876,8 +5901,8 @@ def run_visibility_checks(dt: float) -> None:
 
     if critical_rho is not None:
         print(
-            f"\n[THEOREM CONFIRMED] Information-Induced Tipping Point identified "
-            f"at critical load: {critical_rho}"
+            f"\n[NUMERICAL INDICATOR] A load level crossed the selected oscillation "
+            f"threshold at rho={critical_rho}. This is not, by itself, a theorem proof."
         )
     else:
         print("\n[NO TIPPING POINT FOUND] No critical load crossed the threshold on this grid.")
@@ -5897,7 +5922,7 @@ def run_visibility_checks(dt: float) -> None:
         print(f"  - Baseline Average Sojourn: {comp['mean_sojourn_from']:.3f}")
         print(f"  - Expanded Average Sojourn: {comp['mean_sojourn_to']:.3f}")
         if comp["braess_like"] > 0:
-            print("  - [PARADOX DETECTED]: Structural expansion yielded strictly worse average sojourn times!")
+            print("  - [BRAESS-LIKE SIGNAL]: Structural expansion yielded strictly worse average sojourn times in this simulation.")
         else:
             print("  - No Braess-like worsening detected on this pair.")
 
