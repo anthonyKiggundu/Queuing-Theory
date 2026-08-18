@@ -21,7 +21,7 @@ must still be established analytically.
 """
 
 from dataclasses import dataclass
-from typing import Callable, Optional, Sequence
+from typing import Callable, Optional, Protocol
 import numpy as np
 from numpy.linalg import norm
 from scipy.optimize import root, minimize, brentq
@@ -62,39 +62,47 @@ class MFGParams:
                 raise ValueError(f"{name} must have length N={self.N}")
 
 
-#def sigmoid(x):
-#    x = np.clip(x, -60.0, 60.0)
-#    return 1.0 / (1.0 + np.exp(-x))
-
-
-#def softmax(z):
-#    z = z - np.max(z)
-#    e = np.exp(z)
-#    return e / np.sum(e)
-
-@staticmethod
-def _sigmoid(x: np.ndarray) -> np.ndarray:
+def sigmoid(x: np.ndarray) -> np.ndarray:
     x = np.clip(np.asarray(x, dtype=float), -60.0, 60.0)
     return 1.0 / (1.0 + np.exp(-x))
 
-@staticmethod
-def _softmax(logits: np.ndarray) -> np.ndarray:
+
+def softmax(logits: np.ndarray) -> np.ndarray:
     logits = np.asarray(logits, dtype=float)
     if logits.size == 0:
         return logits
-    x = logits - np.max(logits)
-    exps = np.exp(x)
+    z = logits - np.max(logits)
+    e = np.exp(z)
+    return e / max(float(np.sum(e)), 1e-15)
 
-    return exps / max(float(np.sum(exps)), 1e-15)
+
+class BehaviouralModel(Protocol):
+    """
+    Behavioural adapter interface consumed by the analytical MFG engine.
+
+    Implementations may come from analytical models (softmax benchmark),
+    Markov estimators, actor-critic policies, threshold rules, etc.
+    """
+
+    def perceive(self, q: Array) -> Array:
+        ...
+
+    def flow(self, q: Array, I: Array, p: MFGParams) -> Array:
+        ...
+
+    def jacobian_q(self, q: Array, I: Array, p: MFGParams) -> Array:
+        ...
+
+    def jacobian_I(self, q: Array, I: Array, p: MFGParams) -> Array:
+        ...
 
 
 class InformationModel:
     """
-    H(q) maps the physical state to the perceived state.
-
-    Replace H by a Markovian estimator, learned estimator, etc.
-    For delayed telemetry the DDE itself supplies q(t-tau) to H.
+    Backward-compatible information-only wrapper.
+    Can still be used with helper adapters if needed.
     """
+
     def __init__(self, H: Callable[[Array], Array]):
         self.H = H
 
@@ -102,6 +110,76 @@ class InformationModel:
         return np.asarray(self.H(q), dtype=float)
 
 
+class SoftmaxBehaviouralModel:
+    """
+    Benchmark analytical behavioural model.
+
+    This reproduces the prior analytical structure:
+      - information-dependent reneging
+      - softmax-based jockeying among already-present tenants
+    and exposes it through the BehaviouralModel interface.
+    """
+
+    def __init__(self, information_model: Optional[InformationModel] = None):
+        self._info = information_model or InformationModel(lambda q: q.copy())
+
+    def perceive(self, q: Array) -> Array:
+        return self._info.perceive(q)
+
+    @staticmethod
+    def perceived_reward(I: Array, p: MFGParams) -> Array:
+        return p.U - p.a * I
+
+    def reneging(self, q: Array, I: Array, p: MFGParams) -> Array:
+        return p.alpha_max * sigmoid(
+            p.k_alpha * (p.a * I - p.alpha_threshold)
+        )
+
+    def d_reneging_dI(self, q: Array, I: Array, p: MFGParams) -> Array:
+        s = sigmoid(p.k_alpha * (p.a * I - p.alpha_threshold))
+        return p.alpha_max * p.k_alpha * p.a * s * (1.0 - s)
+
+    def jockeying_matrix(self, I: Array, p: MFGParams) -> Array:
+        """
+        r[j,i] = switching rate from queue j to queue i.
+
+        Softmax/Boltzmann appears here as a behavioural response among
+        already-present tenants. It is NOT an arrival splitter.
+        """
+        N = p.N
+        R = self.perceived_reward(I, p)
+        rates = np.zeros((N, N))
+
+        for j in range(N):
+            mask = np.ones(N, dtype=bool)
+            mask[j] = False
+            rates[j, mask] = p.gamma * softmax(p.beta * R[mask])
+
+        return rates
+
+    def jockeying_net_flow(self, q: Array, I: Array, p: MFGParams) -> Array:
+        R = self.jockeying_matrix(I, p)
+        inflow = q @ R
+        outflow = q * np.sum(R, axis=1)
+        return inflow - outflow
+
+    def flow(self, q: Array, I: Array, p: MFGParams) -> Array:
+        """
+        Net behavioural flow B(q, I):
+            jockeying inflow/outflow minus reneging departures.
+        """
+        return self.jockeying_net_flow(q, I, p) - self.reneging(q, I, p)
+
+    def jacobian_q(self, q: Array, I: Array, p: MFGParams) -> Array:
+        # Default robust numerical derivative for generality.
+        return numerical_jacobian(lambda x: self.flow(x, I, p), q)
+
+    def jacobian_I(self, q: Array, I: Array, p: MFGParams) -> Array:
+        # Default robust numerical derivative for generality.
+        return numerical_jacobian(lambda x: self.flow(q, x, p), I)
+
+
+# ---------------------------- Physical service layer ----------------------------
 def service(q, p):
     # Continuous increasing example.
     return p.mu0 + p.mu_slope * q / (1.0 + q)
@@ -111,81 +189,52 @@ def d_service(q, p):
     return p.mu_slope / (1.0 + q) ** 2
 
 
+# --------------------- Compatibility wrappers (old function names) --------------
 def perceived_reward(I, p):
-    return p.U - p.a * I
+    return SoftmaxBehaviouralModel.perceived_reward(I, p)
 
 
 def reneging(q, I, p):
-    # Information affects reneging through perceived congestion.
-    return p.alpha_max * sigmoid(
-        p.k_alpha * (p.a * I - p.alpha_threshold)
-    )
+    return SoftmaxBehaviouralModel().reneging(q, I, p)
 
 
 def d_reneging_dI(q, I, p):
-    s = sigmoid(p.k_alpha * (p.a * I - p.alpha_threshold))
-    return p.alpha_max * p.k_alpha * p.a * s * (1.0 - s)
+    return SoftmaxBehaviouralModel().d_reneging_dI(q, I, p)
 
 
 def jockeying_matrix(I, p):
-    """
-    r[j,i] = switching rate from queue j to queue i.
-
-    Softmax/Boltzmann appears here as a behavioural response among
-    already-present tenants. It is NOT an arrival splitter.
-    """
-    N = p.N
-    R = perceived_reward(I, p)
-    rates = np.zeros((N, N))
-
-    for j in range(N):
-        mask = np.ones(N, dtype=bool)
-        mask[j] = False
-        rates[j, mask] = p.gamma * softmax(p.beta * R[mask])
-
-    return rates
+    return SoftmaxBehaviouralModel().jockeying_matrix(I, p)
 
 
 def jockeying_net_flow(q, I, p):
-    R = jockeying_matrix(I, p)
-    inflow = q @ R
-    outflow = q * np.sum(R, axis=1)
-    return inflow - outflow
+    return SoftmaxBehaviouralModel().jockeying_net_flow(q, I, p)
 
 
-def vector_field(q, p, info):
+# --------------------------- Core MFG analytical engine --------------------------
+def vector_field(q, p, behaviour: BehaviouralModel):
     """
     Stationary/zero-delay population dynamics:
-        qdot = lambda0
-             + jockeying_net_flow(q,H(q))
-             - service(q)
-             - reneging(q,H(q))
+        qdot = lambda0 - service(q) + B(q, I), with I = H(q).
 
-    Arrival rates lambda0 are exogenous and are NOT determined by H.
+    Arrival rates lambda0 are exogenous and are NOT determined by information.
     """
     I = behaviour.perceive(q)
     B = behaviour.flow(q, I, p)
 
-
-    return (
-        p.lambda0
-        + jockeying_net_flow(q, I, p)
-        - service(q, p)
-        + B
-    )
+    return p.lambda0 - service(q, p) + B
 
 
-def find_mfe(p, info, q0=None):
+def find_mfe(p, behaviour: BehaviouralModel, q0=None):
     if q0 is None:
         q0 = np.maximum(p.lambda0 / np.maximum(p.mu0, 1e-8), 1e-3)
 
-    sol = root(lambda q: vector_field(q, p, info), q0)
+    sol = root(lambda q: vector_field(q, p, behaviour), q0)
 
     if not sol.success:
         raise RuntimeError(sol.message)
 
     q_star = np.maximum(sol.x, 0.0)
-    residual = norm(vector_field(q_star, p, info), np.inf)
+    residual = norm(vector_field(q_star, p, behaviour), np.inf)
 
     if residual > 1e-7:
         raise RuntimeError(
@@ -213,41 +262,49 @@ def numerical_jacobian(f, x, eps=1e-6):
 
 def physical_matrix(q_star, p):
     """
-    A in
-        delta qdot(t) = A delta q(t) + B delta q(t-tau).
+    A_phys in:
+        delta qdot(t) = A0 delta q(t) + At delta q(t-tau).
 
-    For the delayed-information model, instantaneous physical damping
-    comes from service and any direct q-dependence of departures.
+    Physical instantaneous damping comes from service.
     """
     return -np.diag(d_service(q_star, p))
 
 
-def behavioural_matrix(q_star, p):
+def behavioural_matrix_q(q_star, p, behaviour: BehaviouralModel):
+    """J_q B(q*, I*) with I*=H(q*)."""
+    I_star = behaviour.perceive(q_star)
+    return behaviour.jacobian_q(q_star, I_star, p)
+
+
+def behavioural_matrix_I(q_star, p, behaviour: BehaviouralModel):
+    """J_I B(q*, I*) with I*=H(q*)."""
+    I_star = behaviour.perceive(q_star)
+    return behaviour.jacobian_I(q_star, I_star, p)
+
+
+def linear_dde_matrices(q_star, p, behaviour: BehaviouralModel):
     """
-    B in the delayed linearization.
+    Returns (A0, At) in:
+        zdot(t) = A0 z(t) + At z(t-tau)
 
-    Information-dependent jockeying and reneging are placed in B.
+    where A0 = -J_D + J_qB, At = J_IB.
     """
-    def g(I):
-        return (
-            jockeying_net_flow(q_star, I, p)
-            - reneging(q_star, I, p)
-        )
-
-    return numerical_jacobian(g, q_star)
+    A0 = physical_matrix(q_star, p) + behavioural_matrix_q(q_star, p, behaviour)
+    At = behavioural_matrix_I(q_star, p, behaviour)
+    return A0, At
 
 
-def characteristic_matrix(lam, A, B, tau):
-    n = A.shape[0]
-    return lam * np.eye(n) - A - B * np.exp(-lam * tau)
+def characteristic_matrix(lam, A0, At, tau):
+    n = A0.shape[0]
+    return lam * np.eye(n) - A0 - At * np.exp(-lam * tau)
 
 
-def characteristic_residual(lam, A, B, tau):
-    return abs(np.linalg.det(characteristic_matrix(lam, A, B, tau)))
+def characteristic_residual(lam, A0, At, tau):
+    return abs(np.linalg.det(characteristic_matrix(lam, A0, At, tau)))
 
 
 def characteristic_roots(
-    A, B, tau,
+    A0, At, tau,
     re_grid=np.linspace(-2.0, 1.0, 15),
     im_grid=np.linspace(-8.0, 8.0, 31),
     tol=1e-7
@@ -261,7 +318,7 @@ def characteristic_roots(
 
     def objective(x):
         lam = x[0] + 1j * x[1]
-        return np.log1p(characteristic_residual(lam, A, B, tau))
+        return np.log1p(characteristic_residual(lam, A0, At, tau))
 
     for re0 in re_grid:
         for im0 in im_grid:
@@ -273,20 +330,20 @@ def characteristic_roots(
             )
 
             lam = sol.x[0] + 1j * sol.x[1]
-            if characteristic_residual(lam, A, B, tau) < tol:
+            if characteristic_residual(lam, A0, At, tau) < tol:
                 if not any(abs(lam - z) < 1e-4 for z in roots):
                     roots.append(lam)
 
     return sorted(roots, key=lambda z: z.real, reverse=True)
 
 
-def rightmost_root(A, B, tau):
-    roots = characteristic_roots(A, B, tau)
+def rightmost_root(A0, At, tau):
+    roots = characteristic_roots(A0, At, tau)
     return roots[0] if roots else None
 
 
-def stability_diagnostic(A, B, tau):
-    lam = rightmost_root(A, B, tau)
+def stability_diagnostic(A0, At, tau):
+    lam = rightmost_root(A0, At, tau)
 
     if lam is None:
         return {"root": None, "classification": "undetermined"}
@@ -301,7 +358,7 @@ def stability_diagnostic(A, B, tau):
     return {"root": lam, "classification": cls}
 
 
-def estimate_hopf_threshold(A, B, tau_lo=0.0, tau_hi=10.0, n_scan=40):
+def estimate_hopf_threshold(A0, At, tau_lo=0.0, tau_hi=10.0, n_scan=40):
     """
     Locate the first numerical crossing of Re(lambda_max(tau))=0.
 
@@ -313,7 +370,7 @@ def estimate_hopf_threshold(A, B, tau_lo=0.0, tau_hi=10.0, n_scan=40):
     vals = []
 
     for tau in taus:
-        lam = rightmost_root(A, B, tau)
+        lam = rightmost_root(A0, At, tau)
         vals.append(np.nan if lam is None else lam.real)
 
     for k in range(len(taus) - 1):
@@ -323,7 +380,7 @@ def estimate_hopf_threshold(A, B, tau_lo=0.0, tau_hi=10.0, n_scan=40):
             continue
 
         def f(t):
-            lam = rightmost_root(A, B, t)
+            lam = rightmost_root(A0, At, t)
             return np.nan if lam is None else lam.real
 
         try:
@@ -331,7 +388,7 @@ def estimate_hopf_threshold(A, B, tau_lo=0.0, tau_hi=10.0, n_scan=40):
         except ValueError:
             continue
 
-        lam_c = rightmost_root(A, B, tau_c)
+        lam_c = rightmost_root(A0, At, tau_c)
 
         if lam_c is not None and abs(lam_c.imag) > 1e-5:
             return tau_c, lam_c
@@ -339,15 +396,16 @@ def estimate_hopf_threshold(A, B, tau_lo=0.0, tau_hi=10.0, n_scan=40):
     return None, None
 
 
-def local_contraction_diagnostic(p, info, q_star, eta=0.05):
+def local_contraction_diagnostic(p, behaviour: BehaviouralModel, q_star, eta=0.05):
     """
     Numerical diagnostic only.
 
     T(q)=q-eta*F(q).  If ||DT(q*)||<1 this suggests local contraction,
     but it does NOT establish global uniqueness.
     """
+
     def T(q):
-        return q - eta * vector_field(q, p, info)
+        return q - eta * vector_field(q, p, behaviour)
 
     J = numerical_jacobian(T, q_star)
     L = np.linalg.norm(J, 2)
@@ -370,23 +428,28 @@ def performance_proxy(q, lambda0):
     return float(np.sum(q) / np.sum(lambda0))
 
 
-def evaluate_model(p, info, q0=None):
-    q_star = find_mfe(p, info, q0)
-    I_star = info.perceive(q_star)
+def evaluate_model(p, behaviour: BehaviouralModel, q0=None):
+    q_star = find_mfe(p, behaviour, q0)
+    I_star = behaviour.perceive(q_star)
 
-    A = physical_matrix(q_star, p)
-    B = behavioural_matrix(q_star, p)
+    A0, At = linear_dde_matrices(q_star, p, behaviour)
+
+    B_star = behaviour.flow(q_star, I_star, p)
 
     return {
         "q_star": q_star,
         "I_star": I_star,
-        "residual_inf": norm(vector_field(q_star, p, info), np.inf),
+        "residual_inf": norm(vector_field(q_star, p, behaviour), np.inf),
         "service": service(q_star, p),
-        "reneging": reneging(q_star, I_star, p),
-        "jockeying_net": jockeying_net_flow(q_star, I_star, p),
-        "A": A,
-        "B": B,
-        "contraction": local_contraction_diagnostic(p, info, q_star),
+        "behavioural_flow": B_star,
+        # Keep legacy keys for convenience in downstream scripts
+        "reneging": np.maximum(0.0, -B_star),
+        "jockeying_net": B_star + np.maximum(0.0, -B_star),
+        "A": A0,
+        "B": At,
+        "A0": A0,
+        "At": At,
+        "contraction": local_contraction_diagnostic(p, behaviour, q_star),
         "performance_proxy": performance_proxy(q_star, p.lambda0),
     }
 
@@ -399,12 +462,11 @@ def print_result(name, r):
     print("I* =", np.round(r["I_star"], 6))
     print("MFE residual =", f"{r['residual_inf']:.3e}")
     print("service =", np.round(r["service"], 6))
-    print("reneging =", np.round(r["reneging"], 6))
-    print("net jockeying =", np.round(r["jockeying_net"], 6))
-    print("\nA =")
-    print(np.round(r["A"], 6))
-    print("\nB =")
-    print(np.round(r["B"], 6))
+    print("behavioural_flow =", np.round(r["behavioural_flow"], 6))
+    print("\nA0 =")
+    print(np.round(r["A0"], 6))
+    print("\nAt =")
+    print(np.round(r["At"], 6))
     print("\ncontraction diagnostic =", r["contraction"])
     print("occupancy/arrival proxy =", r["performance_proxy"])
 
@@ -431,21 +493,13 @@ def identity_information(q):
 
 
 if __name__ == "__main__":
-    '''
-    Base MFE Evaluation: Computes equilibrium queue lengths $q^*$, system residuals, and Jacobians $A$ and $B$ for a 3-queue system.
-    Multiple-Start Equilibrium Test: Probes for potential multi-stability by solving from multiple initial conditions ($q_0$).
-    Delay Stability Sweep: Tracks the rightmost characteristic root across delays $\tau \in [0, 8]$.
-    Hopf Threshold Estimation: Finds candidate critical delay $\tau_c$ and crossing frequency $\omega_c$.
-
-    Dimensionality Scaling: Tests how mean equilibrium occupancy scales across system sizes $N \in \{2, 3, 4, 5\}$.
-    '''
     # --------------------------------------------------------------
     # Base information-induced MFE
     # --------------------------------------------------------------
     p = make_example(N=3, tau=0.0)
-    info = InformationModel(identity_information)
+    behaviour = SoftmaxBehaviouralModel(InformationModel(identity_information))
 
-    r = evaluate_model(p, info)
+    r = evaluate_model(p, behaviour)
     print_result("BASE INFORMATION-INDUCED MFE", r)
 
     # --------------------------------------------------------------
@@ -464,7 +518,7 @@ if __name__ == "__main__":
 
     for q0 in starts:
         try:
-            q = find_mfe(p, info, q0)
+            q = find_mfe(p, behaviour, q0)
             print("start =", q0, " -> q* =", np.round(q, 6))
         except RuntimeError as e:
             print("start =", q0, " -> FAILED:", e)
@@ -477,14 +531,14 @@ if __name__ == "__main__":
     print("=" * 72)
 
     for tau in np.linspace(0.0, 8.0, 9):
-        d = stability_diagnostic(r["A"], r["B"], tau)
+        d = stability_diagnostic(r["A0"], r["At"], tau)
         print(f"tau={tau:5.2f}  {d}")
 
     # --------------------------------------------------------------
     # Numerical Hopf diagnostic
     # --------------------------------------------------------------
     tau_c, lambda_c = estimate_hopf_threshold(
-        r["A"], r["B"], tau_lo=0.0, tau_hi=8.0, n_scan=25
+        r["A0"], r["At"], tau_lo=0.0, tau_hi=8.0, n_scan=25
     )
 
     print("\n" + "=" * 72)
@@ -511,8 +565,8 @@ if __name__ == "__main__":
 
     for N in [2, 3, 4, 5]:
         pp = make_example(N=N, tau=0.0)
-        ii = InformationModel(identity_information)
-        rr = evaluate_model(pp, ii)
+        bb = SoftmaxBehaviouralModel(InformationModel(identity_information))
+        rr = evaluate_model(pp, bb)
         print(
             f"N={N}: mean(q*)={np.mean(rr['q_star']):.5f}, "
             f"proxy={rr['performance_proxy']:.5f}"
