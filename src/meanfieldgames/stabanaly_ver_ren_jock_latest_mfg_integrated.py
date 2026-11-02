@@ -52,6 +52,9 @@ from scipy.optimize import minimize, brentq
 #    level=logging.INFO
 #)
 
+import traceback
+traceback.print_stack(limit=3)
+
 ################################## Globals ####################################
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -162,6 +165,172 @@ class Observations:
     def get_jockey_obs(self):
 		
         return self.curr_obs_jockey    
+
+
+# ============================================================================
+# Full continuous HJB-FPK MFG + full-density delay stability layer
+# Integrated from full_mfg_fixed.py.
+#
+# The legacy reduced fluid MFE layer below is retained for backward compatibility,
+# but it is NOT used by the full-density HJB-FPK Hopf analysis.
+# ============================================================================
+
+@dataclass
+class MFGParams:
+    """
+    Holds model parameters for the coupled HJB-FPK MFG system and stability scanner.
+    """
+    N: int = 2                        # Number of queues/channels
+    mu: np.ndarray = None             # Base service capacities
+    lam: np.ndarray = None            # Baseline arrival intensities per queue
+    W_max: np.ndarray = None          # Queue bound caps: w_i in [0, W_max_i]
+    K_abandon: float = 0.3            # Control gain parameter for reneging
+    K_switch: float = 0.2             # Control gain parameter for jockeying
+    rho: float = 0.04                 # Discount factor for backward HJB
+    eta: np.ndarray = None            # Congestion weight coefficients in running cost
+    m0_mean: np.ndarray = None        # Baseline initial mean wait per queue
+    m0_std: float = 1.0               # Initial distribution spread
+
+    # Numerical Grid Discretization (Fine resolution to satisfy CFL)
+    Nw: int = 50 #100                     # Spatial grid points for waiting-time state w
+    T_final: float = 100.0 #8.0              # Finite time horizon for simulation
+    Nt: int = 2000 #800                     # Fine time steps for advection stability
+
+    # Convergence and Numerical Safeguards
+    max_mfg_iters: int = 25           # Picard iterations for McKean-Vlasov fixed point
+    mfg_tol: float = 1e-4             # Convergence tolerance for HJB value function
+    u_clip_max: float = 50.0          # Upper clipping threshold for value function u
+    ctrl_clip_max: float = 5.0        # Upper clipping threshold for optimal controls
+    omega_max: float = 50.0           # Maximum frequency scanning bound
+    omega_steps: int = 4000           # Grid steps for imaginary axis frequency sweep
+
+    # Information-model selector: this is supplied from RequestQueue.uses_nn.
+    # False -> Markov/state-based information; True -> Actor-Critic/NN information.
+    uses_nn: bool = False
+
+    # Local full-density feedback linearization
+    linearization_eps: float = 1e-4   # Density perturbation for A0 finite differences
+    information_eps: float = 1e-3     # Delayed-information perturbation for U finite differences
+    linearization_nt: int = 120       # Reduced horizon used only by local policy re-solves
+    operating_fraction: float = 0.15  # Time slice used as the quasi-stationary operating point
+
+    def __post_init__(self):
+        if self.mu is None:
+            self.mu = np.array([2.0, 1.8])
+        if self.lam is None:
+            self.lam = np.array([0.6, 0.6])
+        if self.W_max is None:
+            self.W_max = np.array([10.0, 10.0])
+        if self.eta is None:
+            self.eta = np.array([0.4, 0.4])
+        if self.m0_mean is None:
+            self.m0_mean = np.array([2.5, 2.5])
+        self.uses_nn = bool(self.uses_nn)
+        self.information_model = "Actor-Critic" if self.uses_nn else "Markov"
+
+
+
+class FullDensityMFG:
+    """
+    Single entry point for the HJB-FPK mean-field game and its delay-stability analysis.
+
+    Information models differ ONLY through the parameters passed to it:
+    K_switch, K_abandon and tau, measured from each subscriber group.
+    """
+
+    def __init__(self, uses_nn: bool, base_params: Optional[MFGParams] = None):
+        self.uses_nn = bool(uses_nn)
+        self.model_name = "Actor-Critic" if self.uses_nn else "Markov"
+        self.base_params = base_params
+        self.history: List[dict] = []
+        self.last: Optional[dict] = None
+
+    # ---- construction from simulator output ----
+    def build_params(self, baseline: dict, calib: Optional[dict] = None,
+                     overrides: Optional[dict] = None) -> MFGParams:
+        kw = {
+            "N": 2,
+            "mu": np.asarray(baseline["mu_bar"], dtype=float),
+            "lam": np.full(2, baseline["lam_bar"] / 2.0),
+            "m0_mean": np.clip(np.asarray(baseline["wait_proxy"], dtype=float), 0.5, 8.0),
+        }
+        if calib is not None:
+            kw["K_switch"] = float(calib["K_switch"])
+            kw["K_abandon"] = float(calib["K_abandon"])
+        if overrides:
+            kw.update(overrides)
+        kw["uses_nn"] = self.uses_nn          # authoritative
+        self.base_params = MFGParams(**kw)
+        return self.base_params
+
+    # ---- analysis ----
+    def solve(self, tau: float) -> dict:
+        return solve_mfg(self.base_params, tau=float(tau))
+
+    def analyze(self, tau: float, calib: Optional[dict] = None,
+                run_id: str = "run", record: bool = True) -> dict:
+        p = self.base_params
+        sol = self.solve(tau)
+        A0, U, Vt = linearize_full(p, float(tau), sol)
+        A_tau = U @ Vt
+        stable0, eig0 = check_zero_delay_stability(A0, U, Vt)
+        tau_c, crossings = tau_c_full(A0, U, Vt, omega_max=p.omega_max,
+                                      n=p.omega_steps,
+                                      require_zero_delay_stability=True)
+        if tau_c is None:
+            lo, hi = 0.25 * tau, 0.75 * tau
+        else:
+            lo, hi = max(1e-4, 0.5 * tau_c), 1.5 * tau_c
+        T = max(10.0, 2.0 * max(lo, hi, 1e-2))
+        t_lo, x_lo = simulate_delayed_linearized_dynamics(A0, A_tau, lo, T_sim=T)
+        t_hi, x_hi = simulate_delayed_linearized_dynamics(A0, A_tau, hi, T_sim=T)
+
+        rec = {
+            "run_id": run_id, "information_model": self.model_name,
+            "uses_nn": int(self.uses_nn), "operating_tau": float(tau),
+            "tau_c": np.nan if tau_c is None else float(tau_c),
+            "stable_at_tau0": bool(stable0),
+            "stable_at_operating_tau": bool(stable0 and (tau_c is None or tau < tau_c)),
+            "max_real_eig_tau0": float(np.max(eig0.real)),
+            "mu1": float(p.mu[0]), "mu2": float(p.mu[1]),
+            "mu2_mu1": float(p.mu[1] / max(p.mu[0], 1e-12)),
+            "lambda_total": float(np.sum(p.lam)),
+            "K_switch": float(p.K_switch), "K_abandon": float(p.K_abandon),
+            "mfg_iters": int(sol["iters"]), "mfg_err": float(sol["err"]),
+            "n_crossings": int(len(crossings)),
+        }
+        if calib:
+            rec.update({"calib_jockey_rate": calib["jockey_rate"],
+                        "calib_renege_rate": calib["renege_rate"],
+                        "calib_n_subscribers": calib["n_subscribers"],
+                        "calib_n_dispatches": calib["n_dispatches"],
+                        "tau_sim": calib["tau_sim"]})
+        if record:
+            self.history.append(rec)
+            pd.DataFrame(self.history).to_csv(
+                f"mfg_stability_history_{self.model_name.lower().replace('-', '_')}.csv",
+                index=False)
+        self.last = {"params": p, "solution": sol, "A0": A0, "U": U, "Vt": Vt,
+                     "A_tau": A_tau, "tau_c": tau_c, "crossing_delays": crossings,
+                     "t_lo": t_lo, "x_lo": x_lo, "t_hi": t_hi, "x_hi": x_hi,
+                     "stable_tau0": stable0, "history_record": rec,
+                     "M_bar": sol["M"][:, sol["operating_idx"]]}
+        return self.last
+
+    def plot_tau_c_history(self, filename=None):
+        if not self.history:
+            return None
+        df = pd.DataFrame(self.history)
+        filename = filename or f"mfg_tau_c_{self.model_name.lower().replace('-', '_')}.png"
+        fig, ax = plt.subplots(figsize=(8, 5))
+        x = np.arange(len(df))
+        ax.plot(x, df["tau_c"], "o-", label=r"$\tau_c$")
+        ax.plot(x, df["operating_tau"], "--", label=r"operating $\tau$")
+        ax.set_xlabel("run"); ax.set_ylabel("delay")
+        ax.set_title(f"Critical delay, {self.model_name}")
+        ax.legend(); ax.grid(alpha=0.3); fig.tight_layout()
+        fig.savefig(filename, dpi=300); plt.close(fig)
+        return df
 
 
 class Queues(object):
@@ -893,7 +1062,6 @@ class RequestQueue:
         self.min_amount_observations=int(min_amount_observations)
         self.dist_local_delay=dist_local_delay
         self.para_local_delay=list(para_local_delay)
-        # (False, serv_rate, queue_intensity, False,self.time-time_entrance,self.generateLocalCompUtility(req), reward, req.min_amount_observations)       
         self.decision_rule=str(decision_rule)
         self.truncation_length=float(truncation_length)
         self.preempt_timeout=float(preempt_timeout)
@@ -927,7 +1095,6 @@ class RequestQueue:
         if self.dict_queues_obj:
             self.queueID = str(max(self.dict_queues_obj, key=lambda q: len(self.dict_queues_obj[q])))
          
-        # print("\n QUEUE ID: ", self.queueID)  
         self.renege_reward = 0.0
         self.jockey_reward = 0.0
         self.curr_state = {} # ["Busy","Empty"]
@@ -949,13 +1116,11 @@ class RequestQueue:
             raise ValueError('Invalid outage risk threshold! Please select between (0,1)') # get_curr_obs_renege
         
         self.exp_time_service_end = exp_time_service_end
-        #self.dist_local_delay=dist_local_delay
         self.loc_local_delay=np.random.uniform(low=float(para_local_delay[0]),high=(para_local_delay[1]))
         self.scale_local_delay=float(para_local_delay[2])
         self.max_local_delay=self.dist_local_delay.ppf(self.certainty,loc=self.loc_local_delay,scale=self.scale_local_delay)
         self.max_cloud_delay= np.inf  # float(self.arr_rate/self.serv_rate) #
         
-        # self.observations=np.array([]) 
         self.error_loss=1
 
         # Baseline configuration (static threshold comparator)
@@ -987,11 +1152,17 @@ class RequestQueue:
         self.m_t = {"1": 0.5, "2": 0.5}  # Empirical distribution of the mass
         self.population_history = {"1": [], "2": []}
 
+        self.mfg = FullDensityMFG(uses_nn=self.uses_nn)
+
         # Telemetry Configuration & Tipping Point Params
         self.alpha = 0.7                  # Telemetry Penetration Rate (α ∈ [0, 1])
         self.broadcast_interval = 5       # Telemetry update latency (τ)
         self.last_broadcast_time = 0.0
         self.global_telemetry_feed = {}   # Macro-state visible to subscribers
+
+        # Dispatch-period tracking (simulation-time stamps of each dispatch)
+        # Used to calibrate the MFG telemetry delay tau per information model.
+        self.dispatch_times = {"markov": [], "nn": []}
        
         self.queue_length_history = []
         self.service_rate_history = []
@@ -1143,18 +1314,6 @@ class RequestQueue:
 
         return summary
         
-    ''' 
-    def compute_reneging_rate(self, queue):
-        """Compute the reneging rate for a given queue."""
-        renegs = sum(1 for req in queue if '_reneged' in req.customerid)
-        return renegs / len(queue) if len(queue) > 0 else 0
-        
-
-    def compute_jockeying_rate(self, queue):
-        """Compute the jockeying rate for a given queue."""
-        jockeys = sum(1 for req in queue if '_jockeyed' in req.customerid)
-        return jockeys / len(queue) if len(queue) > 0 else 0
-    '''
     
     def get_curr_request(self):
 		
@@ -1564,10 +1723,6 @@ class RequestQueue:
                     unique_k_i_values.add(k_i)
                     # --- end baseline evaluation ---
                 
-                    # Step 1: Get action from the agent based on the current state
-                    #action, policy_entropy = self.agent.select_action_with_entropy(state)
-                    #episode_policy_entropy += policy_entropy
-                
                     # Step 2: Apply the action to the environment and get feedback
                     next_state, reward, done, info = self.env.step(action)                
                 
@@ -1576,7 +1731,6 @@ class RequestQueue:
 
                     # Step 3: Store the reward for training
                     self.agent.store_reward(reward)
-                    #step_rewards += reward
                     total_reward += reward
 
                     # Baseline decisions
@@ -1602,9 +1756,6 @@ class RequestQueue:
                     state = next_state
                     i += 1            
 
-                    #if done:  # Exit loop if the environment terminates
-                    #   break
-                              
                     self.processEntries(all_entries, i) #, self.uses_nn)
                     self.time+=self.time_res
             
@@ -1683,10 +1834,6 @@ class RequestQueue:
                 metrics.append(episode_metrics)            
             
                 # Calculate average reward for Markov state-based requests
-                #markov_rewards_episode = [m.get("reward", 0) for m in self.objObserv.get_jockey_obs() + self.objObserv.get_renege_obs()]
-                #total_markov_reward = np.mean(markov_rewards_episode) if markov_rewards_episode else 0
-
-                # Calculate average reward for Markov state-based requests
                 if self.markov_rewards:
                     total_markov_reward = np.mean(self.markov_rewards)
                 else:
@@ -1694,7 +1841,6 @@ class RequestQueue:
 
                 rl_rewards.append(total_rl_reward)
                 sed_rewards.append(total_sed_reward)
-               # markov_rewards.append(total_markov_reward)
 
                 # Episode summary
                 print(f"Episode {episode + 1}/{num_episodes} (Seed {seed}):")
@@ -1705,13 +1851,6 @@ class RequestQueue:
                     f"Actor Loss={episode_metrics['actor_loss']:.4f}, Critic Loss={episode_metrics['critic_loss']:.4f}, "
                     f"Total Loss={episode_metrics['total_loss']:.4f}, "
                     f"Duration={episode_metrics['duration']:.2f}s")
-                #)
-
-                #print(f"Episode {episode + 1} Summary: Total Reward={episode_metrics['total_reward']}, "
-                #    f"Avg Reward={episode_metrics['average_reward']:.2f}, Steps={episode_metrics['steps']}, "      
-                #    f"Actor Loss={episode_metrics['actor_loss']:.4f}, Critic Loss={episode_metrics['critic_loss']:.4f}, "
-                #    f"Total Loss={episode_metrics['total_loss']:.4f}, "
-                #    f"Duration={episode_metrics['duration']:.2f}s")
 
                 print(f"Episode {episode + 1} finished with a total reward of {episode_metrics['total_reward']}")
             
@@ -1875,16 +2014,9 @@ class RequestQueue:
             # selector for Markov (False) versus Actor-Critic/NN (True).
             uses_nn = self.uses_nn
             req = self.addNewRequest(entry[0], batchid, uses_nn)
-            #self.arr_prev_times = np.append(self.arr_prev_times, entry[0])
-                
-            #else:                
             q_selector = random.randint(1, 2)
                 
-            #print("\n Jumped into Processing now .....now serving ...", q_selector)
-                  
             curr_queue = self.dict_queues_obj.get("1") if q_selector == "1" else self.dict_queues_obj.get("2")
-            #jockeying_rate = self.compute_jockeying_rate_per_server(self.state_subscribers, queueid) # self.compute_jockeying_rate(curr_queue)
-            #reneging_rate = self.compute_reneging_rate_per_server(self.state_subscribers, queueid) # self.compute_jockeying_rate(curr_queue) # MATCH
                 
             if q_selector == 1:					
                 self.queueID = "1" # Server1
@@ -1895,7 +2027,6 @@ class RequestQueue:
                 if req.uses_nn: 
                     jockeying_rate = self.compute_jockeying_rate_per_server(self.nn_subscribers, self.queueID)
                     reneging_rate = self.compute_reneging_rate_per_server(self.nn_subscribers, self.queueID)           
-                    # self.serveOneRequest(self.queueID, jockeying_rate, reneging_rate, entries) # Server1 = self.dict_queues_obj["1"][0], entry[0],
                 else:
                     jockeying_rate = self.compute_jockeying_rate_per_server(self.state_subscribers, self.queueID)
                     reneging_rate = self.compute_reneging_rate_per_server(self.state_subscribers, self.queueID)           
@@ -1910,7 +2041,6 @@ class RequestQueue:
                 if req.uses_nn: 
                     jockeying_rate = self.compute_jockeying_rate_per_server(self.nn_subscribers, self.queueID)
                     reneging_rate = self.compute_reneging_rate_per_server(self.nn_subscribers, self.queueID)           
-                    # self.serveOneRequest(self.queueID, jockeying_rate, reneging_rate, entries) # Server1 = self.dict_queues_obj["1"][0], entry[0],
                 else:
                     jockeying_rate = self.compute_jockeying_rate_per_server(self.state_subscribers, self.queueID)
                     reneging_rate = self.compute_reneging_rate_per_server(self.state_subscribers, self.queueID)
@@ -1959,8 +2089,6 @@ class RequestQueue:
     
     
     def generateExpectedJockeyCloudDelay (self, req, id_queue):
-        #id_queue = np.array([req.id for req in self.queue]) get_queue_curr_state
-        # req = self.queue[np.where(id_queue==req_id)[0][0]]
 
         total_jockey_delay = 0.0
         
@@ -1980,7 +2108,6 @@ class RequestQueue:
             # And then compute the expected delay here using Little's Law
             expected_delay_in_alt_queue_pose = float(pos_in_alt_queue/self.arr_rate) # self.sampled_arr_rate)
             total_jockey_delay = expected_delay_in_alt_queue_pose + init_delay
-            #self.queue= queue
             
         return total_jockey_delay
                
@@ -1999,9 +2126,6 @@ class RequestQueue:
             self.customerid = self.get_customer_id()
             self.customerid = "Batch"+str(self.get_batch_id())+"_"+self.customerid
             self.queue_intensity = self.arr_rate/rate_srv1
-            #expected_time_to_service_end = self.estimateMarkovWaitingTime(float(pose)) # , queue_intensity, time_entered)
-            #time_local_service = self.generateLocalCompUtility(req)
-            
 
         else:
             pose = lengthQueTwo+1
@@ -2010,12 +2134,7 @@ class RequestQueue:
             self.customerid = "Batch"+str(self.get_batch_id())+"_"+self.customerid
             time_entered = self.time #self.estimateMarkovWaitingTime(lengthQueTwo)
             self.queue_intensity = self.arr_rate/rate_srv2
-            #expected_time_to_service_end = self.estimateMarkovWaitingTime(float(pose)) #, queue_intensity, time_entered)
-            #time_local_service = self.generateLocalCompUtility(req)
-            
-            # self.long_avg_serv_time = self.get_long_run_avg_service_time(server_id)
                     
-        
         if uses_nn:
             req=Request(uses_nn, self.uses_intensity_based,time_entrance=time_entered, pos_in_queue=pose, utility_basic=self.utility_basic, service_time=expected_time_to_service_end,
                     discount_coef=self.discount_coef,outage_risk=self.outage_risk,customerid=self.customerid, learning_mode=self.learning_mode,
@@ -2100,6 +2219,11 @@ class RequestQueue:
         
     
     def dispatch_queue_state(self, curr_queue, curr_queue_id, uses_intensity_based):
+
+        key = "nn" if self.uses_nn else "markov"
+        # Avoid duplicate stamps when both queues dispatch within the same sim step
+        if not self.dispatch_times[key] or self.dispatch_times[key][-1] != self.time:
+            self.dispatch_times[key].append(float(self.time))
 		
         rate_srv1,rate_srv2 = self.srvrates_1, self.srvrates_2 # self.get_server_rates()
 		
@@ -2189,11 +2313,7 @@ class RequestQueue:
         action = self.agent.select_action(state_tensor)  # self.actor_critic.select_action(state_tensor)# rate_reneged
         # print("\n Learned Action => ", "Jockey" if action == 1 else "Renege")
         return {"action": action, "nn_based": True}
-       
-    #    if not isinstance(None, type(state_tensor)):
-    #        action, _, _, _ = self.agent.select_action(state_tensor)  # self.actor_critic.select_action(state_tensor)                          
-    #        return {"action": action.cpu().numpy(), "nn_based": True}
-        
+
 
     def compare_rates_by_information_source(self):
         """
@@ -2204,14 +2324,14 @@ class RequestQueue:
         markov_based_requests = [req for req in self.state_subscribers] # if req.uses_nn] # not
 
         # Calculate rates for intensity-based requests
-        
+
         reneging_rate_nn = self.compute_reneging_rate(nn_based_requests)
         jockeying_rate_nn = self.compute_jockeying_rate(nn_based_requests)
 
         # Calculate rates for departure-based requests
         reneging_rate_markov = self.compute_reneging_rate(markov_based_requests)
         jockeying_rate_markov = self.compute_jockeying_rate(markov_based_requests)
-        
+
         # Print and return the comparison
         comparison = {
             "nn_based": {
@@ -2222,11 +2342,11 @@ class RequestQueue:
                 "reneging_rate": reneging_rate_markov,
                 "jockeying_rate": jockeying_rate_markov,
             },
-        }       
-        
+        }
+
         return comparison
-        
-        
+
+
 
         def plot_information_source_comparison(comparison):
             sources = ['NN-based', 'Markov-based']
@@ -2253,15 +2373,13 @@ class RequestQueue:
             ax.set_xticklabels(sources)
             ax.legend()
             plt.tight_layout()
-            plt.savefig("info_source_baseline.png", dpi=300)
-            plt.close()
-            #plt.show()
-        
-    
+            plt.show()
+
+
         comparison = compare_rates_by_information_source()
         plot_information_source_comparison(comparison)
-   
-    
+
+
     def dispatch(self, uses_nn): #  dispatch_data,   alt_queue_id
         """
         Dispatch state-action information or raw server status based on the use_nn flag.
@@ -2270,49 +2388,28 @@ class RequestQueue:
             self.dispatch_nn_based_requests()
         else:
             self.dispatch_raw_server_status_requests()
-            
+
 
     def dispatch_nn_based_requests(self): # dispatch_data,   alt_queue_id
         """
         Dispatch state-action information to NN-based subscribers.
         """
-        
+
         for queue_id in ["1", "2"]:
             curr_queue = self.dict_queues_obj[queue_id]
             self.dispatch_queue_state( curr_queue, queue_id, self.uses_intensity_based) # alt_queue,
-        
-        #for req in self.nn_subscribers:
-        #    state_action_info = env.get_state_action_info()
-            # Add logic to send state_action_info to the request
-        #print(f"Dispatched the state-action info:  {state_action_info} about: {queueid} to all requests in {alt_queue_id}")
-            
+
 
     def dispatch_raw_server_status_requests(self): # dispatch_data,
         """
         Dispatch raw server status information to state-based subscribers.
         """
-        
+
         for queue_id in ["1", "2"]:
             curr_queue = self.dict_queues_obj[queue_id]
             self.dispatch_queue_state( curr_queue, queue_id, self.uses_intensity_based)  #  alt_queue,
-        
-        #raw_server_status = self.get_queue_state(alt_queue_id) 
-        
-        #print("\n => ", raw_server_status) # MATCH
-        
-        #if not isinstance(None, type(raw_server_status)):
-        #    for req in self.state_subscribers:
 
-        #        if 'server_1' in raw_server_status.keys(): # dispatch_data                
-                    # Add logic to send raw_server_status to the request
-        #            print(f"Dispatching state: {raw_server_status} of server {alt_queue_id} to all requests in server {queueid}")
-        #        else:
-                    # Add logic to send raw_server_status to the request
-        #            print(f"Dispatching state: {raw_server_status} of server {alt_queue_id} to all requests in server  {queueid}")
-        #else:
-        #    return 
-       
-    
+
     def dispatch_all_queues(self):
         """
         Dispatch the status of all queues and collect jockeying and reneging rates
@@ -2333,15 +2430,15 @@ class RequestQueue:
             jockeying_rate_nn = jockeying_rate_raw * 1.1  # Example logic (adjust based on your simulation logic)
             reneging_rate_nn = reneging_rate_raw * 0.9    # Example logic (adjust based on your simulation logic)
             '''
-            
+
             #if not uses_nn:
             #    reneging_rate_raw = self.compute_reneging_rate(self.state_subscribers)
-            #    jockeying_rate_raw = self.compute_jockeying_rate(self.state_subscribers)                   
-                
+            #    jockeying_rate_raw = self.compute_jockeying_rate(self.state_subscribers)
+
             #else:
 			#	reneging_rate_nn = self.compute_reneging_rate(self.nn_subscribers)
 			#	jockeying_rate_nn = self.compute_jockeying_rate(self.nn_subscribers)
-			
+
 			# For Markov/raw subscribers
             srv1_reneging_rate_markov = self.compute_reneging_rate_per_server(self.state_subscribers, "1")
             srv2_reneging_rate_markov = self.compute_reneging_rate_per_server(self.state_subscribers, "2")
@@ -2352,8 +2449,8 @@ class RequestQueue:
             srv1_reneging_rate_nn = self.compute_reneging_rate_per_server(self.nn_subscribers, "1")
             srv2_reneging_rate_nn = self.compute_reneging_rate_per_server(self.nn_subscribers, "2")
             srv1_jockeying_rate_nn = self.compute_jockeying_rate_per_server(self.nn_subscribers, "1")
-            srv2_jockeying_rate_nn = self.compute_jockeying_rate_per_server(self.nn_subscribers, "2")				 
-				
+            srv2_jockeying_rate_nn = self.compute_jockeying_rate_per_server(self.nn_subscribers, "2")
+
             # Update dispatch data
             if "1" in queue_id:
                 self.dispatch_data["server_1"]["num_requests"].append(queue_size)
@@ -2374,22 +2471,22 @@ class RequestQueue:
         self.use_nn = True
         self.dispatch(self.uses_nn)  # Dispatch NN-based information
         self.use_nn = False
-        self.dispatch(self.uses_nn)  # Dispatch raw server status information            
-            
-        
+        self.dispatch(self.uses_nn)  # Dispatch raw server status information
+
+
     def setup_dispatch_intervals(self):
         """
         Set up the intervals for dispatching the queue status information.
         """
-        
+
         #schedule.every(10).seconds.do(self.dispatch_all_queues)
         schedule.every(30).seconds.do(self.dispatch_all_queues)
-        #schedule.every(60).seconds.do(self.dispatch_all_queues)       
-            
- 
+        #schedule.every(60).seconds.do(self.dispatch_all_queues)
+
+
     def run_proper_heterogeneity_sweep(self, duration, env, num_seeds=3, num_episodes=5, 
                                    fixed_arrival_rate=False, run_mfg_stability=True,
-                                   mfg_tau=0.3, mfg_overrides=None):
+                                   mfg_tau=None, mfg_overrides=None):    
         """
         Proper heterogeneity sweep: vary μ₂/μ₁ ratio systematically.
         Compares RL (Actor-Critic), SED baseline, and Markov state-based approaches.
@@ -2397,12 +2494,12 @@ class RequestQueue:
         results = []
         base_lambda = 10  # Base arrival rate
         heterogeneity_ratios = [1.0, 1.2, 1.5, 2.0, 3.0]  # μ₂/μ₁ ratios
-    
+
         for ratio in heterogeneity_ratios:
             print(f"\n{'='*60}")
             print(f"Testing Heterogeneity Ratio μ₂/μ₁ = {ratio}")
             print(f"{'='*60}")
-        
+
             if fixed_arrival_rate:
                 mu1 = base_lambda / 1.5
                 mu2 = mu1 * ratio
@@ -2417,19 +2514,19 @@ class RequestQueue:
                 mu2 = mu1 * ratio
                 print(f"DYNAMIC Configuration: λ varies naturally, μ₂/μ₁ target ratio = {ratio}")
                 print(f"  Representative rates: μ₁≈{mu1:.2f}, μ₂≈{mu2:.2f} (will vary with λ)")
-        
+
             print(f"Arrival rate behavior: {'FIXED' if fixed_arrival_rate else 'DYNAMIC (varies each step)'}")
-        
-            # Snapshot the history boundary so MFG stability uses this run only.
-            mfg_history_start = len(self.global_queue_length_history)
 
             # Reset environment
             self.nn_subscribers = []
             self.state_subscribers = []
+            self.dispatch_times = {"markov": [], "nn": []}
             self.all_requests = []
-        
-            stats_queue = queue.Queue()
-        
+
+            stats_queue = Queue()
+
+            mfg_history_start = len(self.global_queue_length_history)   # BEFORE the thread starts
+
             def threaded_run():
                 metrics, stats = self.run(
                     duration,
@@ -2442,29 +2539,26 @@ class RequestQueue:
                     use_dynamic_heterogeneity=(not fixed_arrival_rate)
                 )
                 stats_queue.put({"metrics": metrics, "stats": stats})
-        
+
             scheduler_thread = threading.Thread(target=threaded_run)
             scheduler_thread.start()
             scheduler_thread.join()
-        
+
             result = stats_queue.get()
-            metrics = result["metrics"]
-            stats = result["stats"]
 
             mfg_result = None
             if run_mfg_stability:
                 try:
                     mfg_result = self.run_mfg_from_baseline(
-                        tau_base=mfg_tau,
-                        fname=f"mfg_ratio_{ratio:.1f}_{'fixed' if fixed_arrival_rate else 'dynamic'}",
-                        history_start=mfg_history_start,
-                        run_id=f"ratio_{ratio:.1f}",
-                        mfg_overrides=mfg_overrides,
-                        record_history=True,
-                    )
+                        tau_base=mfg_tau, history_start=mfg_history_start,
+                        run_id=f"{self.get_information_model()}_ratio_{ratio:.1f}",
+                        mfg_overrides=mfg_overrides)
                 except Exception as exc:
-                    print(f"MFG stability analysis failed at ratio={ratio}: {exc}")
-        
+                    print(f"MFG failed at ratio={ratio}: {exc}")
+
+            metrics = result["metrics"]
+            stats = result["stats"]
+
             # Extract performance metrics for RL, SED, and Markov
             if "means" in stats and len(stats["means"]) >= 3:
                 rl_reward = stats["means"][0]      # RL (Actor-Critic)
@@ -2473,7 +2567,7 @@ class RequestQueue:
             else:
                 # Fallback: calculate from metrics
                 rl_reward = np.mean([m["total_reward"] for m in metrics])
-            
+
                 # Calculate SED performance (approximate from state_subscribers)
                 sed_rewards = []
                 self.markov_rewards = []
@@ -2481,17 +2575,17 @@ class RequestQueue:
                     # You'll need to track these separately in your metrics
                     sed_rewards.append(m.get("sed_total_reward", np.nan))
                     self.markov_rewards.append(m.get("markov_total_reward", np.nan))
-            
+
                 sed_reward = np.nanmean(sed_rewards) if sed_rewards else np.nan
                 self.markov_reward = np.nanmean(self.markov_rewards) if self.markov_rewards else np.nan
-        
+
             # Calculate RL advantages
             rl_advantage_over_sed = rl_reward - sed_reward if not np.isnan(sed_reward) else np.nan
             rl_advantage_over_markov = rl_reward - self.markov_reward if not np.isnan(self.markov_reward) else np.nan
-        
+
             # Calculate load balance
             load_balance = abs((base_lambda / mu1) - (base_lambda / mu2))
-        
+
             results.append({
                 "ratio_target": ratio,
                 "mu1": mu1,
@@ -2504,34 +2598,28 @@ class RequestQueue:
                 "rl_advantage_sed": rl_advantage_over_sed,
                 "rl_advantage_markov": rl_advantage_over_markov,
                 "information_model": self.get_information_model(),
-                "uses_nn": int(bool(self.uses_nn)),
-                "tau_c": (np.nan if mfg_result is None else mfg_result["tau_c"]),
-                "operating_tau": (np.nan if mfg_result is None else mfg_result["history_record"]["operating_tau"]),
-                "stable_at_tau0": (False if mfg_result is None else mfg_result["stable_tau0"]),
-                "stable_at_operating_tau": (False if mfg_result is None else mfg_result["history_record"]["stable_at_operating_tau"]),
+                "tau_c": np.nan if mfg_result is None else mfg_result["tau_c"],
+                "operating_tau": np.nan if mfg_result is None else mfg_result["history_record"]["operating_tau"],
+                "K_switch": np.nan if mfg_result is None else mfg_result["history_record"]["K_switch"],
+                "K_abandon": np.nan if mfg_result is None else mfg_result["history_record"]["K_abandon"]
             })
-        
+
             print(f"\nResults for ratio {ratio} ({'fixed' if fixed_arrival_rate else 'dynamic'} λ):")
             print(f"  RL (Actor-Critic): {rl_reward:.3f}")
             if not np.isnan(sed_reward):
                 print(f"  SED Baseline:      {sed_reward:.3f} (RL advantage: {rl_advantage_over_sed:.3f})")
             if not np.isnan(self.markov_reward):
                 print(f"  Markov State:      {self.markov_reward:.3f} (RL advantage: {rl_advantage_over_markov:.3f})")
-    
+
         # Create DataFrame
         df = pd.DataFrame(results)
         csv_filename = f"heterogeneity_sweep_{'fixed' if fixed_arrival_rate else 'dynamic'}.csv"
         df.to_csv(csv_filename, index=False)
         print(f"\n✓ Results saved to {csv_filename}")
 
-        if run_mfg_stability and "tau_c" in df.columns:
-            self.plot_mfg_tau_c_history(
-                filename=f"mfg_tau_c_heterogeneity_{'fixed' if fixed_arrival_rate else 'dynamic'}.png"
-            )
-    
         # Generate plots
         self.plot_heterogeneity_analysis(df, fixed_arrival=fixed_arrival_rate)
-     
+
         return df
 
 
@@ -2539,35 +2627,35 @@ class RequestQueue:
         """
         Create comprehensive visualization of heterogeneity sweep results.
         Compares RL, SED baseline, and Markov state-based policy.
-    
+
         Args:
             df: DataFrame with heterogeneity sweep results
             fixed_arrival: Whether this was a fixed or dynamic arrival rate experiment
         """
         mode_str = "Fixed λ" if fixed_arrival else "Dynamic λ"
-    
+
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    
+
         # Plot 1: Absolute Performance
         ax1 = axes[0, 0]
-        ax1.plot(df["ratio_target"], df["rl_reward"], 'o-', label='RL (Actor-Critic)', 
+        ax1.plot(df["ratio_target"], df["rl_reward"], 'o-', label='RL (Actor-Critic)',
                  linewidth=2, markersize=8, color='blue')
         if not df["sed_reward"].isna().all():
-            ax1.plot(df["ratio_target"], df["sed_reward"], 's--', label='SED Baseline', 
+            ax1.plot(df["ratio_target"], df["sed_reward"], 's--', label='SED Baseline',
                      linewidth=2, markersize=8, color='orange')
         if not df["markov_reward"].isna().all():
-            ax1.plot(df["ratio_target"], df["markov_reward"], '^--', label='Markov State-Based', 
+            ax1.plot(df["ratio_target"], df["markov_reward"], '^--', label='Markov State-Based',
                      linewidth=2, markersize=8, color='green')
         ax1.set_xlabel("Service Rate Ratio (μ₂/μ₁)")
         ax1.set_ylabel("Mean Reward")
         ax1.set_title(f"Absolute Performance vs Heterogeneity ({mode_str})")
         ax1.legend(loc='best')
         ax1.grid(True, alpha=0.3)
-    
+
         # Plot 2: RL Advantage over Baselines
         ax2 = axes[0, 1]
         if "rl_advantage_sed" in df.columns and not df["rl_advantage_sed"].isna().all():
-            ax2.plot(df["ratio_target"], df["rl_advantage_sed"], 'o-', 
+            ax2.plot(df["ratio_target"], df["rl_advantage_sed"], 'o-',
                      label='RL - SED', linewidth=2, markersize=8, color='green')
         ax2.axhline(y=0, color='r', linestyle='--', alpha=0.5, label='Zero advantage')
         ax2.set_xlabel("Service Rate Ratio (μ₂/μ₁)")
@@ -2575,18 +2663,18 @@ class RequestQueue:
         ax2.set_title(f"RL Advantage vs Heterogeneity ({mode_str})")
         ax2.legend(loc='best')  # ← ADD THIS
         ax2.grid(True, alpha=0.3)
-    
+
         # Plot 3: Load Imbalance (bottom-left) - ADD LEGEND
         ax3 = axes[1, 0]
         if "load_balance" in df.columns:
-            ax3.plot(df["ratio_target"], df["load_balance"], 'o-', 
+            ax3.plot(df["ratio_target"], df["load_balance"], 'o-',
                      linewidth=2, markersize=8, color='purple', label='Load Imbalance')
         ax3.set_xlabel("Service Rate Ratio (μ₂/μ₁)")
         ax3.set_ylabel("Load Imbalance |ρ₁ - ρ₂|")
         ax3.set_title(f"System Load Imbalance ({mode_str})")
         ax3.legend(loc='best')  # ← ADD THIS
         ax3.grid(True, alpha=0.3)
-    
+
         # Plot 4: Relative Improvement (bottom-right) - ADD LEGEND
         ax4 = axes[1, 1]
         if "sed_reward" in df.columns and not df["sed_reward"].isna().all() and (df["sed_reward"] != 0).all():
@@ -2599,9 +2687,9 @@ class RequestQueue:
             ax4.grid(True, alpha=0.3, axis='y')
             ax4.axhline(y=0, color='r', linestyle='--', alpha=0.3)
         else:
-            ax4.text(0.5, 0.5, 'Insufficient baseline data', 
+            ax4.text(0.5, 0.5, 'Insufficient baseline data',
                     ha='center', va='center', transform=ax4.transAxes)
-            ax4.set_title(f"RL % Improvement over SED ({mode_str})") 
+            ax4.set_title(f"RL % Improvement over SED ({mode_str})")
         plt.tight_layout()
         filename = f"heterogeneity_analysis_{'fixed' if fixed_arrival else 'dynamic'}.png"
         plt.savefig(filename, dpi=300, bbox_inches='tight')
@@ -2701,14 +2789,13 @@ class RequestQueue:
                 axes[i, j].set_xlabel("Queue Size")
                 axes[i, j].grid(True, linestyle='--', alpha=0.5, which='both')  # Grid for both major and minor ticks
                 axes[i, j].legend(loc='best', fontsize='small')
-            
+
                 # Add minor grid lines for log scale
                 axes[i, j].grid(True, which='minor', linestyle=':', alpha=0.3)
 
         plt.tight_layout()
-        #plt.show()
-        plt.savefig("rates_baseline.png", dpi=300)
-        plt.close() 
+        plt.show()
+
 
     def non_log_plot_rates(self):
         """
@@ -2800,22 +2887,20 @@ class RequestQueue:
                 axes[i, j].legend()
 
         plt.tight_layout()
-        #plt.show()
-        plt.savefig("non_log_rates_baseline.png", dpi=300)
-        plt.close()
+        plt.show()
 
-        
+
     def adjust_service_rates(self):
         """
         Adjust the service rates of each queue to match the incoming request rate.
         """
         queue_sizes = {key: len(queue) for key, queue in self.dict_queues_obj.items()}
         total_requests = sum(queue_sizes.values())
-        
+
         if total_requests == 0:
             print("No incoming requests, service rates remain unchanged.")
             return
-        
+
         # Total arrival rate across all queues
         total_arrival_rate = self.sampled_arr_rate * len(self.dict_queues_obj)
 
@@ -2827,8 +2912,8 @@ class RequestQueue:
             # Ensure a minimum service rate
             self.dict_servers[queue_id] = max(adjusted_service_rate, 1.0)
 
-        print("Adjusted Service Rates:", self.dict_servers)          
-            
+        print("Adjusted Service Rates:", self.dict_servers)
+
 
     def run_scheduler(self): #, State):
         """
@@ -2836,121 +2921,121 @@ class RequestQueue:
         """
         self.setup_dispatch_intervals()
         while True: # duration: #
-            schedule.run_pending()            
+            schedule.run_pending()
             time.sleep(1)
-            
+
             #self.adjust_service_rates()
-    
-    
+
+
     def get_long_run_avg_service_time(self, queue_id):
-		
-        total_service_time = 0  
-        
+
+        total_service_time = 0
+
         if self.total_served_requests_srv1 == 0 or self.total_served_requests_srv2 == 0:
-            return total_service_time      
-    
+            return total_service_time
+
         if  "1" in queue_id:
-            
-            for req in self.dict_queues_obj["1"]:                
-                total_service_time += req.service_time # exp_time_service_end                 
-                             
+
+            for req in self.dict_queues_obj["1"]:
+                total_service_time += req.service_time # exp_time_service_end
+
             return total_service_time / self.total_served_requests_srv1
         else:
-            
-            for req in self.dict_queues_obj["2"]:                
-                total_service_time += req.service_time  # exp_time_service_end                  
-                              
-            return total_service_time / self.total_served_requests_srv2                   
-    
-    
+
+            for req in self.dict_queues_obj["2"]:
+                total_service_time += req.service_time  # exp_time_service_end
+
+            return total_service_time / self.total_served_requests_srv2
+
+
     def initialize_queue_states(self, queueid, pose, jockeying_rate, reneging_rate, req, reward):
-		
+
         self.history.append({
-				    "ServerID": queueid, 
-                    "at_pose": pose, 
-                    "rate_jockeyed": jockeying_rate, 
-                    "rate_reneged": reneging_rate, 
-                    "expected_service_time": req.exp_time_service_end,               
-                    "this_busy": self.queue_intensity, 
+				    "ServerID": queueid,
+                    "at_pose": pose,
+                    "rate_jockeyed": jockeying_rate,
+                    "rate_reneged": reneging_rate,
+                    "expected_service_time": req.exp_time_service_end,
+                    "this_busy": self.queue_intensity,
                     "long_avg_serv_time": self.long_avg_serv_time,
                     "time_service_took": req.time_exit-req.time_entrance,
-                    "reward": reward, 
-                    "action": "served",	
-                    "intensity_based_info": self.uses_intensity_based,			 
-			})	
-    
-                    
-    def get_queue_state(self, queueid): # , queueobj): #, action):      
-		
-        if "1" in queueid:	
+                    "reward": reward,
+                    "action": "served",
+                    "intensity_based_info": self.uses_intensity_based,
+			})
+
+
+    def get_queue_state(self, queueid): # , queueobj): #, action):
+
+        if "1" in queueid:
             if len(self.srv1_history) > 0:
                 latest_state = self.srv1_history[-1]
                 return latest_state
-                             
-            else:		 
+
+            else:
                 self.srv1_history.append({
-				    "ServerID": queueid, 
-                    "at_pose": 0, 
-                    "rate_jockeyed": 0.0, 
-                    "rate_reneged": 0.0, 
-                    "expected_service_time": 0.0,                                   
+				    "ServerID": queueid,
+                    "at_pose": 0,
+                    "rate_jockeyed": 0.0,
+                    "rate_reneged": 0.0,
+                    "expected_service_time": 0.0,
                     "long_avg_serv_time": self.long_avg_serv_time,
                     "time_service_took": 0.0,
-                    "reward": 0.0, 
-                    "action":"served",	
-                    "intensity_based_info": self.uses_intensity_based,			 
-			    })	
+                    "reward": 0.0,
+                    "action":"served",
+                    "intensity_based_info": self.uses_intensity_based,
+			    })
                 return self.srv1_history
         else:
             if len(self.srv2_history) > 0:
                 latest_state = self.srv2_history[-1]
                 return latest_state
-                             
-            else:	
+
+            else:
                 self.srv2_history.append({
-                    "ServerID": queueid, 
-                    "at_pose": 0, 
-                    "rate_jockeyed": 0.0, 
-                    "rate_reneged": 0.0, 
-                    "expected_service_time": 0.0,                                   
+                    "ServerID": queueid,
+                    "at_pose": 0,
+                    "rate_jockeyed": 0.0,
+                    "rate_reneged": 0.0,
+                    "expected_service_time": 0.0,
                     "long_avg_serv_time": self.long_avg_serv_time,
                     "time_service_took": 0.0,
-                    "reward": 0.0, 
+                    "reward": 0.0,
                     "action":"served",
-                     "intensity_based_info": self.uses_intensity_based,				 
-                })	               
-                          
-                return self.srv2_history  # self.history[0]                      
-    
+                     "intensity_based_info": self.uses_intensity_based,
+                })
+
+                return self.srv2_history  # self.history[0]
+
 
     def serveOneRequest(self, queueID,  jockeying_rate, reneging_rate, arrived_now): # dispatch_all_queues
         #randomly select which queue to process at a time t+1
-        q_selector = random.randint(1, 2)                           
-        
-        """Process a request and use the result for training the RL model."""             
-         
+        q_selector = random.randint(1, 2)
+
+        """Process a request and use the result for training the RL model."""
+
         if "1" in queueID:
-            queue = self.dict_queues_obj["1"]            
+            queue = self.dict_queues_obj["1"]
             serv_rate = self.dict_servers_info["1"]
             self.long_avg_serv_time = self.get_long_run_avg_service_time(queueID)
-            
+
         else:
             queue = self.dict_queues_obj["2"]
             serv_rate = self.dict_servers_info["2"]
-            self.long_avg_serv_time = self.get_long_run_avg_service_time(queueID)            
+            self.long_avg_serv_time = self.get_long_run_avg_service_time(queueID)
 
         if len(queue) == 0:
             return  # No request to process
-        
+
         queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate
         req = queue[0]  # Process the first request
         queue = queue[1:]  # Remove it from the queue
         req.time_exit = self.time
 
         # Compute reward based on actual waiting time vs. expected time
-        time_in_queue = req.time_exit-req.time_entrance 
+        time_in_queue = req.time_exit-req.time_entrance
 
-        # Store the experience for RL training        
+        # Store the experience for RL training
         state = self.get_queue_state(queueID)
 
         # Convert state dictionary to array for the agent
@@ -2969,7 +3054,7 @@ class RequestQueue:
                 1.0 if state.get("action") == "served" else 0.0,  # Encode action
                 1.0 if state.get("intensity_based_info", False) else 0.0
             ], dtype=np.float32)
-        
+
             # Select action using the array
             action = self.agent.select_action(state_array)
         else:
@@ -2979,71 +3064,71 @@ class RequestQueue:
         # Inside serveOneRequest loop:
         if not req.uses_nn:
             # Ensure Markov-based requests get the 'Served' reward status
-            reward = self.calculate_reward(time_in_queue, req.service_time, action=Actions.SERVED.value) 
+            reward = self.calculate_reward(time_in_queue, req.service_time, action=Actions.SERVED.value)
             self.markov_rewards.append(reward)
 
         # Better (continuous):
-        # reward = max(0,  req.service_time - time_in_queue) / req.service_time #expected_time  # Normalized delay reduction       
+        # reward = max(0,  req.service_time - time_in_queue) / req.service_time #expected_time  # Normalized delay reduction
         reward = self.calculate_reward( time_in_queue, req.service_time, action)
 
         len_queue_1, len_queue_2 = self.get_queue_sizes()
-                              
-        
+
+
         if "1" in queueID:
             self.total_served_requests_srv1+=1
             self.objObserv.set_obs(queueID, len_queue_1, queue_intensity, jockeying_rate, reneging_rate, time_in_queue, req.service_time, reward, -1, self.long_avg_serv_time,  req.uses_nn) # self.uses_intensity_based
             self.srv1_history.append(self.objObserv.get_obs())
             curr_intensity =  self.srv1_history[-1]
-            
-            if self.total_served_requests_srv1 >= abs(len(arrived_now)/2): # and "1" in queueID: 
+
+            if self.total_served_requests_srv1 >= abs(len(arrived_now)/2): # and "1" in queueID:
                 self.departure_dispatch_count += 1
-                self.uses_intensity_based = False                              
-                
+                self.uses_intensity_based = False
+
             if curr_intensity['this_busy'] <= 2.0:
                 self.intensity_dispatch_count += 1
                 self.uses_intensity_based = True
-                                       
+
             self.history.append(self.objObserv.get_obs())
             #self.objObserv.set_obs(queueID, len_queue_1, queue_intensity, jockeying_rate, reneging_rate, time_in_queue, req.service_time, reward, -1, self.long_avg_serv_time, self.uses_intensity_based )
-            self.dispatch_queue_state(queue, queueID, self.uses_intensity_based)  
+            self.dispatch_queue_state(queue, queueID, self.uses_intensity_based)
         else:
             self.total_served_requests_srv2+=1
             self.objObserv.set_obs(queueID, len_queue_2, queue_intensity, jockeying_rate, reneging_rate, time_in_queue, req.service_time, reward, -1, self.long_avg_serv_time, req.uses_nn) #self.uses_intensity_based )
             self.srv2_history.append(self.objObserv.get_obs())
             curr_intensity =  self.srv2_history[-1]
-            
+
             if self.total_served_requests_srv2 >= abs(len(arrived_now)/2): # and "2" in queueID:
                 self.departure_dispatch_count += 1
                 self.uses_intensity_based = False
-            
+
             self.history.append(self.objObserv.get_obs())
-              
-            self.dispatch_queue_state(queue, queueID, self.uses_intensity_based)                                        
-        
-        # Store the experience for RL training        
-        #state = self.get_queue_state(queueID) 
-        
-        
+
+            self.dispatch_queue_state(queue, queueID, self.uses_intensity_based)
+
+        # Store the experience for RL training
+        #state = self.get_queue_state(queueID)
+
+
         '''
             Dispatch updated queue state - measure the value of what information
             1. Dispatch after the number of departures equal to the number of new arrivals at that run
-            2. Dispatch only when the queue intensity is less than or equal to 1 
-        '''               
-        
+            2. Dispatch only when the queue intensity is less than or equal to 1
+        '''
+
         if not isinstance(None, type(state)):
             # action = self.agent.select_action(state)
             self.agent.store_reward(reward)
 
             # Train RL model after each request is processed Observed:
             self.agent.update()
-                            
-        return 	    
-        
-			
+
+        return
+
+
     def get_jockey_reward(self, req, prev_remaining_time):
         """
         Compute reward for a jockeyed event.
-    
+
         Reward is 1 if total time spent in the system (from entry to exit)
         is less than the time that was left to get served in the previous queue.
         Penalize with -1 otherwise.
@@ -3060,14 +3145,14 @@ class RequestQueue:
             return 1
         else:
             return -0.5
-            
-            
+
+
     def get_renege_reward(self, req, local_processing):
         """
         Compute reward for a reneging event.
-    
+
         Reward is 1 if you renege and the remaining time
-        before getting served is less than the time to process locally 
+        before getting served is less than the time to process locally
 
         :param req: The request object.
         :param prev_remaining_time: Time left to get served in the previous queue before jockeying.
@@ -3081,23 +3166,23 @@ class RequestQueue:
             return 1
         else:
             return -0.5
-        
-    
+
+
     def get_history(self, queueid):
-		
+
         if "1" in queueid:
             return self.srv1_history
         else:
-            return self.srv2_history   
-    
-    
+            return self.srv2_history
+
+
     def get_curr_queue_id(self):
-        
+
         return self.queueID
-        
-        
+
+
     def get_curr_queue(self):
-		
+
         if "1" in  self.queueID:  # Server1
             self.queue = self.dict_queues.get("1")
                # find customer in queue by index
@@ -3105,7 +3190,7 @@ class RequestQueue:
         # req = self.queue[index]
         else:
             self.queue = self.dict_queues.get("2") # Server2
-		
+
         return self.queue
 
 
@@ -3120,8 +3205,8 @@ class RequestQueue:
                 curr_queue = self.dict_queues_obj["1"]
 
         return curr_queue
-        
-        
+
+
     def compare_wait_and_service_time(self, req):
         """
         Compare the time a request spent in the queue with the service time.
@@ -3141,55 +3226,39 @@ class RequestQueue:
             "service_time": service_time,
             "difference": difference
         }
-        
-        
+
+
     def get_remaining_time(self, queue_id, position): # plot_rates
         """
         Calculate the remaining time until a request at a given position is processed.
-        
+
         :param queue_id: The ID of the queue (1 or 2).
         :param position: The position of the request in the queue (0-indexed).
         :return: Remaining time until the request is processed.
         """
         if "1" in queue_id:
-            serv_rate = self.dict_servers_info["1"]  
-            queue = self.dict_queues_obj["1"]  
+            serv_rate = self.dict_servers_info["1"]
+            queue = self.dict_queues_obj["1"]
         else:
-            serv_rate = self.dict_servers_info["2"]  
-            queue = self.dict_queues_obj["2"] 
+            serv_rate = self.dict_servers_info["2"]
+            queue = self.dict_queues_obj["2"]
 
         queue_length = len(queue)
-       
+
         if position < 0 or position > queue_length: #=
-            print("\n Pose: ", position, queue_length) 
+            print("\n Pose: ", position, queue_length)
             raise ValueError("Invalid position: Position must be within the bounds of the queue length.")
-        
+
         # Calculate the remaining time based on the position and service rate
         remaining_time = sum(np.random.exponential(1 / serv_rate) for _ in range(position + 1))
-        
+
         return remaining_time
-        
 
-    def old_calculate_max_cloud_delay(self, position, queue_intensity, req):
-        # Parameters for decreasing patience
-        alpha = 10.0  # Maximum patience for an empty queue
-        eta = 0.05    # Frustration coefficient
-        gamma = 1.0   # Minimum baseline patience
-    
-        # Inverse relationship: higher position = lower cloud delay (patience)
-        # This uses an exponential decay model
-        max_cloud_delay = alpha * np.exp(-eta * position) + gamma
-    
-        # Optionally further reduce patience if intensity is high
-        max_cloud_delay *= (1 / (1 + queue_intensity))
-    
-        return max_cloud_delay
 
-        
     def calculate_max_cloud_delay(self, position, queue_intensity, req):
         """
         Calculate the max cloud delay based on the position in the queue and the current queue intensity.
-        
+
         :param position: The position of the request in the queue (0-indexed).
         :param queue_intensity: The current queue intensity.
         :return: The max cloud delay.
@@ -3198,16 +3267,16 @@ class RequestQueue:
             srv_rate = self.srvrates_1
         else:
             srv_rate = self.srvrates_2
-			
-        if position is None:          
-            '''            
+
+        if position is None:
+            '''
             k₀: initial position at entry
             μ: service rate (requests per unit time)
             Δt: time elapsed since entry
-            '''         
-			    
+            '''
+
             position = max(1, req.pos_in_queue - int(srv_rate * self.time-req.time_entrance))
-                
+
         base_delay = req.service_time #1.0  # Base delay for the first position
         position_factor = 0.01  # Incremental delay factor per position
         intensity_factor = 2.0  # Factor to adjust delay based on queue intensity
@@ -3217,96 +3286,82 @@ class RequestQueue:
 
         # Adjust for queue intensity
         max_cloud_delay = position_delay * (1 + (queue_intensity / intensity_factor))
-        
+
         return max_cloud_delay
-        
-        
-		        
+
+
+
     def log_action(self, action, req, queueid):
         """Logs the request action to the file."""
-        
+
         logging.info("", extra={"request_id": req.customerid, "queue_id": queueid, "action": action})
-        
-        
-    def makeRenegingDecision(self, req, queueid, next_state, curr_queue_state): # req, curr_queue_id, next_state, 
-        
-        decision=False                  
+
+
+    def makeRenegingDecision(self, req, queueid, next_state, curr_queue_state): # req, curr_queue_id, next_state,
+
+        decision=False
 
         if "1" in queueid:
             serv_rate = self.dict_servers_info["1"]
-            queue =  self.dict_queues_obj["1"]  
-            dest_queue = self.dict_queues_obj["2"]    
+            queue =  self.dict_queues_obj["1"]
+            dest_queue = self.dict_queues_obj["2"]
         else:
-            serv_rate = self.dict_servers_info["2"] 
+            serv_rate = self.dict_servers_info["2"]
             queue =  self.dict_queues_obj["2"]
-            dest_queue = self.dict_queues_obj["1"] 
+            dest_queue = self.dict_queues_obj["1"]
 
         # Temporary: Replace complex Erlang logic with simple comparison
         current_wait_estimate = req.pos_in_queue / serv_rate
-        
+
         if self.learning_mode=='transparent':
             self.max_cloud_delay=stats.erlang.ppf(self.certainty,a=req.pos_in_queue,loc=0,scale=1/serv_rate) #(self.certainty,a=self.pos_in_queue,loc=0,scale=1/serv_rate) #self.serv_rate)
 
-        else:	
-            curr_pose = self.get_request_position( queueid, req.customerid)		
+        else:
+            curr_pose = self.get_request_position( queueid, req.customerid)
             num_observations=min(len(self.objObserv.get_renege_obs()), len(self.history)) # queueid, queue),len(self.history)
             mean_interval=np.mean(num_observations) # unbiased estimation of 1/lambda where lambda is the service rate
             if np.isnan(mean_interval):
                 mean_interval=0
             if mean_interval!=0:
                 self.serv_rate=1/mean_interval
-            # k_erlang=req.pos_in_queue*num_observations #self.pos_in_queue*num_observations
-            # scale_erlang=mean_interval*k_erlang
-            
+
             if np.isnan(mean_interval):
                 self.max_cloud_delay=np.Inf
             else:
                 self.max_local_delay = self.generateLocalCompUtility(req)
                 queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate
-                self. max_cloud_delay = self.calculate_max_cloud_delay(curr_pose, queue_intensity, req) #self.calculate_max_cloud_delay(curr_pose, serv_rate)                                                           
-            
-            #if "1" in queueid:
-            #    self.queue = self.dict_queues_obj["1"] 
-            #    serv_rate = self.srvrates_1           
-            #else:
-            ##    self.queue = self.dict_queues_obj["2"] 
-            #    serv_rate = self.srvrates_2
-             
-            self.avg_delay = self.calculate_max_cloud_delay(len(dest_queue)+1, queue_intensity, req)    
+                self. max_cloud_delay = self.calculate_max_cloud_delay(curr_pose, queue_intensity, req) #self.calculate_max_cloud_delay(curr_pose, serv_rate)
+
+            self.avg_delay = self.calculate_max_cloud_delay(len(dest_queue)+1, queue_intensity, req)
             # Get the relevant queue
             queue = self.dict_queues_obj[queueid]
-           
-            found = False                              
-            # Compute remaining waiting time (number of requests ahead * average service time)
-            # For M/M/1, expected remaining time = position * 1/service_rate
-            # remaining_wait_time = pos * (1.0 / serv_rate) if serv_rate > 0 else 1e4  # avoid zero division
-                
-            #if customer_id in req.customerid: # _in_queue
-                
-            remaining_wait_time = self.get_remaining_time(queueid, curr_pose)  # pos) #               
+
+            found = False
+
+            remaining_wait_time = self.get_remaining_time(queueid, curr_pose)  # pos) #
             # renege = (remaining_wait_time > self.max_local_delay) #T_local)
             renege = (current_wait_estimate > self.max_local_delay)
-                                    
+
             if renege:
                 decision = True
                 diff_wait = abs(remaining_wait_time - self.avg_delay) # jockey_total_expected_time_to_service
                 reward = self.reqRenege(req, queueid, curr_pose, serv_rate, queue_intensity, self.max_local_delay, req.customerid, req.service_time, decision, queue, req.uses_nn, diff_wait)
                 #self.reqRenege(req_in_queue, queueid, pos, serv_rate, T_local, req_in_queue.customerid, req_in_queue.service_time, decision, queue, anchor)
                 found = True
-                #return 
+                #return
                     # break
 
                 if not found:
                     print(f" Request ID {req.customerid} not found in queue {queueid}. Continuing with processing...")
-                    return # False    
-                       
-        self.curr_req = req                
+                    return # False
+
+        self.curr_req = req
 
         return decision
 
 
     def reqRenege(self, req, queueid, curr_pose, serv_rate, queue_intensity, time_local_service, customerid, time_to_service_end, decision, curr_queue, uses_nn, diff_wait):
-        
+
         if decision:
             decison = 1
         else:
@@ -3314,7 +3369,7 @@ class RequestQueue:
 
         if curr_pose >= len(curr_queue):
             return
-            
+
         else:
             # Get the queue as a list
             queue = list(self.dict_queues_obj[queueid])
@@ -3323,51 +3378,48 @@ class RequestQueue:
                 queue.pop(curr_pose)
             # Update the main queue object
             self.dict_queues_obj[queueid] = queue
-            self.queueID = queueid  
-        
+            self.queueID = queueid
+
             # req.customerid = req.customerid+"_reneged"
             if not req.customerid.endswith("_reneged"):
                 req.customerid = req.customerid+"_reneged"
-                
+
             req.reneged = True
-            req.time_exit = self.time  
-            
+            req.time_exit = self.time
+
             self.log_action("Reneged", req, queueid)
-        
+
             # reward = self.getRenegeRewardPenalty(req, time_local_service, time_to_service_end)
             reward = self.get_renege_reward( req, time_local_service)
             print(colored("%s", 'green') % (req.customerid) + " in Server %s" %(queueid) + " reneging now, to local processing with reward %f "%(reward) )
-                                     
-            #self.reneging_rate = self.compute_reneging_rate(curr_queue)
-            #self.jockeying_rate = self.compute_jockeying_rate(curr_queue)
-            self.long_avg_serv_time = self.get_long_run_avg_service_time(queueid)  
-            
+            self.long_avg_serv_time = self.get_long_run_avg_service_time(queueid)
+
             if not uses_nn:
                 self.reneging_rate = self.compute_reneging_rate_per_server(self.state_subscribers, queueid) # self.compute_reneging_rate(self.state_subscribers)
-                self.jockeying_rate = self.compute_jockeying_rate_per_server(self.state_subscribers, queueid) # self.compute_jockeying_rate(self.state_subscribers)                   
+                self.jockeying_rate = self.compute_jockeying_rate_per_server(self.state_subscribers, queueid) # self.compute_jockeying_rate(self.state_subscribers)
                 self.objObserv.set_renege_obs(queueid, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, time_local_service, req, reward, decision, self.long_avg_serv_time, uses_nn, diff_wait)
                 #self.curr_obs_renege.append(self.objObserv.get_renege_obs())
             else:
                 self.reneging_rate = self.compute_reneging_rate_per_server(self.nn_subscribers, queueid) # self.compute_reneging_rate(self.nn_subscribers)
                 self.jockeying_rate = self.compute_jockeying_rate_per_server(self.nn_subscribers, queueid) # self.compute_jockeying_rate(self.nn_subscribers)
                 self.markov_rewards.append(reward)
-                self.objObserv.set_renege_obs(queueid, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, time_local_service, req, reward, decision, self.long_avg_serv_time, uses_nn, diff_wait) 
-                #self.curr_obs_renege.append(self.objObserv.get_renege_obs())            
-            
+                self.objObserv.set_renege_obs(queueid, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, time_local_service, req, reward, decision, self.long_avg_serv_time, uses_nn, diff_wait)
+                #self.curr_obs_renege.append(self.objObserv.get_renege_obs())
+
             self.curr_req = req
-            
+
             return reward
-            
-            
+
+
     def get_current_renege_count(self):
-		
+
         return self.objObserv.get_renege_obs()
 
 
     def get_request_position(self, queue_id, request_id):
         """
         Get the position of a given request in the queue.
-        
+
         :param queue_id: The ID of the queue (1 or 2).
         :param request_id: The ID of the request.
         :return: The position of the request in the queue (0-indexed).
@@ -3377,29 +3429,29 @@ class RequestQueue:
         else:
             queue = self.dict_queues_obj["2"]  # Queue2
 
-        for position, req in enumerate(queue):            
+        for position, req in enumerate(queue):
             if req.customerid == request_id:
                 return position
 
         return None
-        
-            
-    def reqJockey(self, curr_queue_id, dest_queue_id, req, customerid, serv_rate, remaining_time, exp_delay, decision, curr_pose, curr_queue, uses_nn, diff_wait):	
+
+
+    def reqJockey(self, curr_queue_id, dest_queue_id, req, customerid, serv_rate, remaining_time, exp_delay, decision, curr_pose, curr_queue, uses_nn, diff_wait):
 		# Convert here the decision from bool to numeric - true = 1, false = 0
-		
+
 		# Do not allow jockeying for requests that have already reneged
         if '_reneged' in req.customerid:
             return  # Ignore this request
-			        
+
         if decision:
             decision = 1
         else:
             decision = 0
-			
+
         if curr_pose >= len(curr_queue):
-            return                   
-            
-        else:	               
+            return
+
+        else:
             # Remove from current queue
             queue = list(self.dict_queues_obj[curr_queue_id])
             if 0 <= curr_pose < len(queue):
@@ -3410,32 +3462,30 @@ class RequestQueue:
             dest_queue_list = list(self.dict_queues_obj[dest_queue_id])
             dest_queue_list.append(req)
             self.dict_queues_obj[dest_queue_id] = dest_queue_list
-            
+
             if not req.customerid.endswith("_jockeyed"):
                 req.customerid = req.customerid+"_jockeyed"
-                
+
             req.jockeyed = True
-            req.time_exit = self.time  
-        
+            req.time_exit = self.time
+
             if  "1" in curr_queue_id: # Server1
                 queue_intensity = self.arr_rate/self.dict_servers_info["1"] # Server1
-            
+
             else:
                 queue_intensity = self.arr_rate/self.dict_servers_info["2"] # Server2
-        
+
             reward = self.get_jockey_reward(req, remaining_time)
-                              
-            print(colored("%s", 'green') % (req.customerid) + " in Server %s" %(curr_queue_id) + " jockeying now, to Server %s" % (colored(dest_queue_id,'green'))+ " with reward %f"%(reward))                      
-            
+
+            print(colored("%s", 'green') % (req.customerid) + " in Server %s" %(curr_queue_id) + " jockeying now, to Server %s" % (colored(dest_queue_id,'green'))+ " with reward %f"%(reward))
+
             self.log_action(f"Jockeyed", req, dest_queue_id)
-            
-            #self.reneging_rate = self.compute_reneging_rate(queue)
-            #self.jockeying_rate = self.compute_jockeying_rate(queue)     
+
             self.long_avg_serv_time = self.get_long_run_avg_service_time(curr_queue_id)
-            
+
             if not uses_nn:
                 self.reneging_rate = self.compute_reneging_rate_per_server(self.state_subscribers, curr_queue_id) # self.compute_reneging_rate(self.state_subscribers)
-                self.jockeying_rate = self.compute_jockeying_rate_per_server(self.state_subscribers, curr_queue_id) # self.compute_jockeying_rate(self.state_subscribers)                   
+                self.jockeying_rate = self.compute_jockeying_rate_per_server(self.state_subscribers, curr_queue_id) # self.compute_jockeying_rate(self.state_subscribers)
                 self.objObserv.set_jockey_obs(curr_queue_id, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, exp_delay, req, reward, decision, self.long_avg_serv_time , uses_nn, diff_wait) #req.exp_time_service_end
                 #self.curr_obs_jockey.append(self.objObserv.get_jockey_obs())
             else:
@@ -3443,56 +3493,56 @@ class RequestQueue:
                 self.jockeying_rate = self.compute_jockeying_rate_per_server(self.nn_subscribers, curr_queue_id) # self.compute_jockeying_rate(self.nn_subscribers)
                 self.markov_rewards.append(reward)  # ADD THIS LINE
                 self.objObserv.set_jockey_obs(curr_queue_id, curr_pose, queue_intensity, self.jockeying_rate, self.reneging_rate, exp_delay, req, reward, decision, self.long_avg_serv_time , uses_nn, diff_wait) #req.exp_time_service_end
-                                               
-            self.curr_req = req                    
-        
+
+            self.curr_req = req
+
         return reward
-        
-    
+
+
     def get_current_jockey_observations(self):
-		
+
         #print("OBS -> ", self.objObserv.get_jockey_obs())
         return self.objObserv.get_jockey_obs()
 
 
     def makeJockeyingDecision(self, req, curr_queue_id, alt_queue_id, next_state, curr_queue_state,  serv_rate): # req, curr_queue_id, alt_queue_id, next_state, curr_queue_state,  serv_rate
-                
-        decision=False  
+
+        decision=False
         found = False
-        
+
         if "1" in curr_queue_id:
             serv_rate = self.srvrates_1
-        else:  
-            serv_rate = self.srvrates_2               
-        
+        else:
+            serv_rate = self.srvrates_2
+
         curr_queue = self.dict_queues_obj.get(curr_queue_id)
         dest_queue = self.dict_queues_obj.get(alt_queue_id)
         curr_pose = self.get_request_position( curr_queue_id, req.customerid)
-        queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate                
-        
-        self.avg_delay = self.calculate_max_cloud_delay(len(dest_queue)+1, queue_intensity, req) # self.calculate_max_cloud_delay(curr_pose, serv_rate) 
-        # self.generateExpectedJockeyCloudDelay ( req, alt_queue_id)                 
+        queue_intensity = self.objQueues.get_arrivals_rates()/ serv_rate
+
+        self.avg_delay = self.calculate_max_cloud_delay(len(dest_queue)+1, queue_intensity, req) # self.calculate_max_cloud_delay(curr_pose, serv_rate)
+        # self.generateExpectedJockeyCloudDelay ( req, alt_queue_id)
         # curr_pose = req.pos_in_queue # self.get_request_position(curr_queue_id, customerid)
-        
+
         if curr_pose is None:
             print(f" Request ID {req.customerid} not found in queue {curr_queue_id}. Continuing with processing...")
-            
-        else:                                
-   
+
+        else:
+
             remaining_wait_time = self.get_remaining_time(curr_queue_id, curr_pose) # pos) #
             time_already_spent_in_curr_queue = self.time - req.time_entrance
-            
-            # The time expected to spent in the other queue is what has already been 
+
+            # The time expected to spent in the other queue is what has already been
             # spent plus the new time when the jockey lands at a particular position in the other queue
             jockey_total_expected_time_to_service = time_already_spent_in_curr_queue + self.avg_delay
-             
-        
+
+
             if remaining_wait_time > jockey_total_expected_time_to_service: # self.avg_delay:
                 decision = True
                 diff_wait = remaining_wait_time - jockey_total_expected_time_to_service
                 reward = self.reqJockey(curr_queue_id, alt_queue_id, req, req.customerid, serv_rate, remaining_wait_time, self.avg_delay, decision, curr_pose, curr_queue, req.uses_nn, diff_wait)
                 found = True
-                #return 
+                #return
                     #break
 
                 if not found:
@@ -3500,8 +3550,8 @@ class RequestQueue:
                     return False
 
         return decision
-                    
-    
+
+
     def compute_reneging_rate_by_info_source(self, info_src_requests):
         """
         Compute the reneging rate for a specific info source.
@@ -3520,23 +3570,23 @@ class RequestQueue:
             logging.warning("No reneging requests available for the selected information source. Returning rate as 0.0.")
             return 0.0
 
-        return total_reneges / total_count 
-      
-    
-        
+        return total_reneges / total_count
+
+
+
     def plot_reneging_time_vs_queue_length(self):
-		
+
         # print("\n **** ", self.curr_obs_renege)
         nn_x, nn_y = [], []
         state_x, state_y = [], []
-        
-        for obs in self.curr_obs_renege:  
+
+        for obs in self.curr_obs_renege:
             if not isinstance(obs, dict):
                 continue
             req = obs.get("Request")
             if req is None:
                 continue
-            
+
             #req = obs["Request"]
             # Ensure necessary fields are present and valid
             time_entrance = getattr(req, 'time_entrance', None)
@@ -3558,7 +3608,7 @@ class RequestQueue:
         if state_x and state_y:
             state_sorted = sorted(zip(state_x, state_y))
             state_x, state_y = zip(*state_sorted)
-    
+
         plt.figure(figsize=(10, 6))
         if nn_x:
             plt.plot(nn_x, nn_y, '-o', color='orange', label='NN-based Reneged')
@@ -3571,12 +3621,12 @@ class RequestQueue:
         plt.grid(True)
         plt.tight_layout()
         plt.show()
-        
-        
+
+
     def plot_jockeying_time_vs_queue_length(self):
         nn_x, nn_y = [], []
         state_x, state_y = [], []
-        
+
         for obs in self.curr_obs_jockey:
             if not isinstance(obs, dict):
                 continue
@@ -3603,7 +3653,7 @@ class RequestQueue:
         if state_x and state_y:
             state_sorted = sorted(zip(state_x, state_y))
             state_x, state_y = zip(*state_sorted)
-    
+
         plt.figure(figsize=(10, 6))
         if nn_x:
             plt.plot(nn_x, nn_y, '-o', color='orange', label='NN-based Jockeyed')
@@ -3617,59 +3667,6 @@ class RequestQueue:
         plt.tight_layout()
         plt.show()
 
-    
-    def compare_behavior_rates_by_information_how_often(self):
-        """
-        Compare the percentage of jockeyed versus reneged requests based on
-        intensity-based information versus departure-based information over all episodes.
-        """
-        # Separate observations based on decision source
-        jockeyed_intensity_based_requests = [d for d in self.objObserv.get_jockey_obs() if d.get("intensity_based_info", False)]
-        jockeyed_departure_based_requests = [d for d in self.objObserv.get_jockey_obs() if not d.get("intensity_based_info", False)]
-    
-        reneged_intensity_based_requests = [d for d in self.objObserv.get_renege_obs() if d.get("intensity_based_info", False)]
-        reneged_departure_based_requests = [d for d in self.objObserv.get_renege_obs() if not d.get("intensity_based_info", False)]
-
-        # Compute total counts for each category
-        total_jockeyed_intensity = len(jockeyed_intensity_based_requests)
-        total_jockeyed_departure = len(jockeyed_departure_based_requests)
-        total_reneged_intensity = len(reneged_intensity_based_requests)
-        total_reneged_departure = len(reneged_departure_based_requests)
-
-        # Compute percentages
-        total_jockeyed = total_jockeyed_intensity + total_jockeyed_departure
-        total_reneged = total_reneged_intensity + total_reneged_departure
-
-        jockeyed_intensity_percent = (total_jockeyed_intensity / total_jockeyed) * 100 if total_jockeyed > 0 else 0
-        jockeyed_departure_percent = (total_jockeyed_departure / total_jockeyed) * 100 if total_jockeyed > 0 else 0
-        reneged_intensity_percent = (total_reneged_intensity / total_reneged) * 100 if total_reneged > 0 else 0
-        reneged_departure_percent = (total_reneged_departure / total_reneged) * 100 if total_reneged > 0 else 0
-
-        # Create a bar chart
-        categories = ["Jockeyed", "Reneged"]
-        intensity_based_percents = [jockeyed_intensity_percent, reneged_intensity_percent]
-        departure_based_percents = [jockeyed_departure_percent, reneged_departure_percent]
-
-        x = range(len(categories))  # Indices for categories
-
-        plt.figure(figsize=(10, 6))
-        plt.bar(x, intensity_based_percents, width=0.4, label="Intensity-Based", color="blue", align="center")
-        plt.bar(
-            [i + 0.4 for i in x], departure_based_percents, width=0.4, label="Departure-Based", color="orange", align="center"
-        )
-
-        # Add labels and titles
-        plt.xlabel("Categories")
-        plt.ylabel("Percentage")
-        #plt.title("Percentage of Jockeyed vs Reneged Requests by Decision Source")
-        plt.xticks([i + 0.2 for i in x], categories)
-        plt.legend()
-        plt.grid(axis="y", linestyle="--", alpha=0.7) 
-        plt.tight_layout()
-
-        # Display the plot
-        plt.show()
-        
 
     def compare_rates_by_information_source_with_graph(self):
         """
@@ -3708,7 +3705,7 @@ class RequestQueue:
 
         # Show the plot
         plt.show()
-    
+
 
     def compare_rates_by_information_source(self):
         """
@@ -3752,7 +3749,7 @@ class RequestQueue:
             print(f"  Jockeying Rate: {rates['jockeying_rate']:.2f}")
         return comparison
 
- 
+
     def old_calculate_reward(self, time_in_queue, expected_time, action):
         if action == "reneged":
             # Reward for saving time
@@ -3826,21 +3823,21 @@ class RequestQueue:
 
     def compute_reneging_rate_by_info_source(self, info_src_requests):
         """Compute the reneging rate for a specific info source."""
-        renegs = len(info_src_requests)  
-        return renegs / len(self.get_current_renege_count()) 
-        
-      
+        renegs = len(info_src_requests)
+        return renegs / len(self.get_current_renege_count())
+
+
     def compute_jockeying_rate_by_info_source(self, info_src_requests):
         """Compute the reneging rate for a specific info source."""
-        jockeys = len(info_src_requests) 
+        jockeys = len(info_src_requests)
         return jockeys / len(self.get_current_jockey_observations())
-    
-        
+
+
     def set_equal_service_rates(self, rate):
         self.dict_servers_info["1"] = rate
         self.dict_servers_info["2"] = rate
-        
-        
+
+
     def plot_reneging_and_jockeying_rates_vs_queue_size_by_type(self):
         """
         Plots the reneging and jockeying rates as queue sizes grow for Markov, NN-based,
@@ -3890,11 +3887,6 @@ class RequestQueue:
                         sync_rates[val-1] = counts[idx]
                 return sync_rates
 
-            #j_sync = synchronize(queue_sizes, jockeying_counts, complete_range)
-            #r_sync = synchronize(queue_sizes, reneging_counts, complete_range)
-
-            #rate_results[label] = (j_sync, r_sync)
-
             # Fix: Use interpolation with 'right' set to the last known value
             # This ensures the line extends horizontally to the end of the plot
             j_sync = np.interp(complete_range, queue_sizes, jockeying_counts, right=jockeying_counts[-1])
@@ -3902,45 +3894,18 @@ class RequestQueue:
 
             rate_results[label] = (j_sync, r_sync)
 
-        # Plotting
-        # plt.figure(figsize=(12, 6))
-
-        # 3. Increase right margin slightly to make room for the legend
         fig, ax = plt.subplots(figsize=(14, 7))
         plt.subplots_adjust(right=0.82)
-        
-        #for label, (x_axis, j_rates, r_rates) in rate_results.items():
-        #    plt.plot(x_axis, r_rates, '-', color=colors[label]["reneging"], label=f'{label} Reneging')
-        #    plt.plot(x_axis, j_rates, '--', color=colors[label]["jockeying"], label=f'{label} Jockeying')
-
-        #for label, (jockeying_rates, reneging_rates) in rate_results.items():
-        #    # Plot using the unified complete_range for X
-        #    plt.plot(complete_range, reneging_rates, '-', label=f'{label} Reneging',
-        #             color=colors[label]["reneging"], linewidth=2, alpha=0.8)
-        #    plt.plot(complete_range, jockeying_rates, '--', label=f'{label} Jockeying',
-        #             color=colors[label]["jockeying"], linewidth=2, alpha=0.8)
-
-        # Forces the viewport to stay consistent
-        #plt.xlim(0, max_queue_length)
-        
-        # Logarithmic scale on y-axis
-        #plt.yscale('log')
-
-        #plt.xlabel("Queue Size (Number of Requests Entered)")
-        #plt.ylabel("Rate")
-        #plt.title("Reneging and Jockeying Rates vs Queue Size (Unified X-Axis)")
-        #plt.legend(loc='upper right', fontsize='small', ncol=2)
-        #plt.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.5)
 
         for label, (j_rates, r_rates) in rate_results.items():
             ax.plot(complete_range, r_rates, '-', label=f'{label} Reneging',
                      color=colors[label]["reneging"], linewidth=1, alpha=0.8)
             ax.plot(complete_range, j_rates, '-', label=f'{label} Jockeying',
                      color=colors[label]["jockeying"], linewidth=1, alpha=0.8)
-        
+
         # 1. Use a symmetric log scale if you want to see values near zero
-        ax.set_yscale('symlog', linthresh=0.01) 
-    
+        ax.set_yscale('symlog', linthresh=0.01)
+
         # 2. Alternatively, explicitly set y-limits to show the floor
         ax.set_ylim(-0.5, 1.0)
 
@@ -3955,64 +3920,7 @@ class RequestQueue:
         ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.5)
         plt.tight_layout()
         plt.show()
- 
 
-    def old_plot_reneging_and_jockeying_rates_vs_queue_size_by_type(self):
-        """
-        Plots the reneging and jockeying rates as queue sizes grow for Markov, NN-based,
-        and Jockeying Threshold models, with improved colors and gridlines.
-        """
-        types = [
-            ("Markov-Based", self.state_subscribers),
-            ("NN-Based", self.nn_subscribers),
-            ("Jockeying Threshold", self.all_requests)
-        ]
-
-        rate_results = {}
-
-        # Define non-saturating colors
-        colors = {
-            "Markov-Based": {"reneging": "steelblue", "jockeying": "royalblue"},
-            "NN-Based": {"reneging": "forestgreen", "jockeying": "darkorange"},
-            "Jockeying Threshold": {"reneging": "purple", "jockeying": "brown"}
-        }
-
-        # Compute rates
-        for label, subscribers in types:
-            jockeying_counts = []
-            reneging_counts = []
-            queue_sizes = []
-
-            for i in range(1, len(subscribers) + 1):
-                current_subs = subscribers[:i]
-                queue_sizes.append(i)
-                num_jockeyed = sum(getattr(req, 'jockeyed', False) for req in current_subs)
-                num_reneged = sum(getattr(req, 'reneged', False) for req in current_subs)
-                jockeying_counts.append(num_jockeyed / i)
-                reneging_counts.append(num_reneged / i)
-
-            rate_results[label] = (queue_sizes, jockeying_counts, reneging_counts)
-
-        # Create the plot
-        plt.figure(figsize=(12, 6))
-        for label, (queue_sizes, jockeying_rates, reneging_rates) in rate_results.items():
-            # Use non-saturating colors for better visibility
-            plt.plot(queue_sizes, reneging_rates, '-o', label=f'{label} Reneging Rate', 
-                     color=colors[label]["reneging"], markersize=2, alpha=0.8)
-            plt.plot(queue_sizes, jockeying_rates, '-x', label=f'{label} Jockeying Rate', 
-                     color=colors[label]["jockeying"], markersize=2, alpha=0.8)
-
-        # Set logarithmic scale for y-axis if appropriate
-        plt.yscale('log')
-
-        # Add title, labels, gridlines, and legend
-        plt.xlabel("Queue Size (Number of Requests Entered)")
-        plt.ylabel("Rate")
-        plt.title("Reneging and Jockeying Rates vs Queue Size by Information Type")
-        plt.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.7)
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
 
     def plot_asymptotic_behavior_of_jockeying_and_reneging(self, max_queue_length=100, bin_width=2):
         """
@@ -4027,7 +3935,7 @@ class RequestQueue:
 
         # Bin queue lengths
         bins = np.arange(1, max_queue_length+bin_width, bin_width)
-        
+
         def bin_by_length(obs_list, reward_key='reward'):
             count_nn = np.zeros(len(bins))
             total_nn = np.zeros(len(bins))
@@ -4077,8 +3985,8 @@ class RequestQueue:
 
         # Validation printout for theorem
         print("Asymptotic regime validation: For large queue lengths, probabilities approach extrema (0 or 1), and curves for NN-based and Markov-based decisions become indistinguishable.")
-        
-        
+
+
     def plot_decision_probability_vs_queue_length(self, bin_width=1, min_count_per_n=1):
         """
         Improved: Plot Pr{estimator declares switch} vs queue length n for Markov, actor-critic, and oracle.
@@ -4156,7 +4064,7 @@ class RequestQueue:
         plt.grid(True)
         plt.tight_layout()
         plt.show()
-        
+
 
     def plot_diagnostics_error_and_misclassification(self, min_count_per_n=1):
         """
@@ -4168,7 +4076,7 @@ class RequestQueue:
         obs_jockey = self.objObserv.get_jockey_obs()
         for obs in obs_jockey:
             print("\n ************ ", obs)
-            
+
         queue_lengths = [obs.get("at_pose") for obs in obs_jockey if isinstance(obs, dict) and obs.get("at_pose") is not None]
         unique_ns = sorted(set(queue_lengths))
         print("Observed queue lengths (n):", unique_ns)
@@ -4247,8 +4155,8 @@ class RequestQueue:
         axs[1].grid(True)
         plt.tight_layout()
         plt.show()
-        
-        
+
+
     def plot_successful_jockey_probability_vs_queue_length(self, T=None, min_count_per_n=1):
         """
         Plot Pr{switch & complete before T} vs actual integer queue length n for Markov, NN, and Oracle.
@@ -4333,43 +4241,11 @@ class RequestQueue:
         plt.grid(True)
         plt.tight_layout()
         plt.show()
-        
-    
-    def run_equal_service_rate_experiment(self, arrival_rates_even, duration, env, num_episodes=10):
-        """
-        For each value in arrival_rates_even, set μ₁ = μ₂ = λ/2 and run the simulation, plotting results.
-        """
-        for arrival_rate in arrival_rates_even:
-            service_rate = arrival_rate / 2.0
-            self.set_equal_service_rates(service_rate)
-            self.objQueues.sampled_arr_rate = arrival_rate  # Update the sampled arrival rate in Queues
-            print(f"\nRunning for arrival_rate={arrival_rate}, service_rate={service_rate}")
-            self.run(
-                duration,
-                env,
-                adjust_service_rate=False,
-                num_episodes=num_episodes,
-                save_to_file=f"equal_service_rate_metrics_lambda_{arrival_rate}.csv",
-                arrival_rates_even=arrival_rates_even
-            )
-            self.plot_rates()
-            # plot_reneging_and_jockeying_rates_vs_queue_size()
-            plot_reneging_and_jockeying_rates_vs_queue_size_by_type()
-       
-    def get_information_model(self) -> str:
-        """Return the information model selected by RequestQueue.uses_nn."""
-        return "Actor-Critic" if bool(self.uses_nn) else "Markov"
 
-    def export_baseline_mfg_state(
-        self,
-        burn_in_fraction: float = 0.2,
-        history_start: Optional[int] = None,
-    ):
-        """
-        Extract empirical statistics for the continuous HJB-FPK MFG.
 
-        ``history_start`` lets a sweep use only the trajectory generated by the
-        current simulation run, rather than accidentally pooling all earlier runs.
+    def export_baseline_mfg_state(self, burn_in_fraction: float = 0.2):
+        """
+        Extract baseline summary statistics to initialize the continuous MFG.
         """
         if not self.global_queue_length_history or not self.global_service_rate_history:
             raise ValueError("No baseline histories available. Run the simulator first.")
@@ -4378,30 +4254,16 @@ class RequestQueue:
         mu_hist = np.asarray(self.global_service_rate_history, dtype=float)
         lam_hist = np.asarray(self.global_arrival_rate_history, dtype=float)
 
-        if history_start is not None:
-            history_start = int(max(0, history_start))
-            q_hist = q_hist[history_start:]
-            mu_hist = mu_hist[history_start:]
-            lam_hist = lam_hist[history_start:]
-
-        if len(q_hist) == 0 or len(mu_hist) == 0:
-            raise ValueError("Selected baseline history window is empty.")
-
         start = int(len(q_hist) * burn_in_fraction)
         q_hist = q_hist[start:]
         mu_hist = mu_hist[start:]
         lam_hist = lam_hist[start:]
 
-        if len(q_hist) == 0:
-            q_hist = np.asarray(self.global_queue_length_history, dtype=float)
-            mu_hist = np.asarray(self.global_service_rate_history, dtype=float)
-            lam_hist = np.asarray(self.global_arrival_rate_history, dtype=float)
-
         mu_bar = np.mean(mu_hist, axis=0)
-        lam_bar = float(np.mean(lam_hist)) if lam_hist.size else float(np.sum(mu_bar))
+        lam_bar = float(np.mean(lam_hist))
         q_bar = np.mean(q_hist, axis=0)
 
-        # Little-style proxy used only to initialize the waiting-time density.
+        # Little-style proxy for mean wait
         wait_proxy = q_bar / np.maximum(mu_bar, 1e-9)
 
         return {
@@ -4410,14 +4272,91 @@ class RequestQueue:
             "wait_proxy": wait_proxy,
         }
 
-    def run_mfg_from_baseline(
+
+    def run_mfg_from_baseline(self, tau_base=None, fname="baseline_vs_mfg",
+                              history_start=None, run_id=None,
+                              mfg_overrides=None, record_history=True, calibrate=True):
+        base = self.export_baseline_mfg_state(history_start=history_start)
+        total_sim_time = max(len(self.global_queue_length_history) * self.time_res, 1e-6)
+        scale = max(8.0 / total_sim_time, 1.0)          # T_final=8 over simulated time
+        calib = self.calibrate_mfg_from_subscribers(mfg_time_scale=scale) if calibrate else None
+
+        # re-bind in case uses_nn was switched between runs
+        if self.mfg.uses_nn != self.uses_nn:
+            self.mfg = FullDensityMFG(uses_nn=self.uses_nn)
+        self.mfg.build_params(base, calib, mfg_overrides)
+
+        tau = tau_base if tau_base is not None else (calib["tau"] if calib else 0.3)
+        out = self.mfg.analyze(tau, calib, run_id or f"run_{len(self.mfg.history)+1}",
+                               record=record_history)
+        self.mfg_stability_history = self.mfg.history
+        print(f"[MFG:{self.mfg.model_name}] tau={tau:.4g} tau_c={out['tau_c']} "
+              f"K_switch={out['params'].K_switch:.3g} K_abandon={out['params'].K_abandon:.3g}")
+        return out
+
+
+    def get_information_model(self) -> str:
+        return "Actor-Critic" if self.uses_nn else "Markov"
+
+    def export_baseline_mfg_state(self, burn_in_fraction=0.2, history_start=None):
+        if not self.global_queue_length_history:
+            raise ValueError("No baseline histories available. Run the simulator first.")
+        q = np.asarray(self.global_queue_length_history, dtype=float)
+        mu = np.asarray(self.global_service_rate_history, dtype=float)
+        lam = np.asarray(self.global_arrival_rate_history, dtype=float)
+        if history_start is not None:
+            s = int(max(0, history_start))
+            q, mu, lam = q[s:], mu[s:], lam[s:]
+        if len(q) == 0:
+            raise ValueError("Selected baseline history window is empty.")
+        start = int(len(q) * burn_in_fraction)
+        if start < len(q):
+            q, mu, lam = q[start:], mu[start:], lam[start:]
+        mu_bar, q_bar = mu.mean(axis=0), q.mean(axis=0)
+        return {"mu_bar": mu_bar, "lam_bar": float(lam.mean()),
+                "wait_proxy": q_bar / np.maximum(mu_bar, 1e-9)}
+
+    def calibrate_mfg_from_subscribers(self, tau_floor=1e-2, gain_floor=1e-3,
+                                       gain_cap=5.0, default_tau=0.3,
+                                       mfg_time_scale=1.0, use_hazard=True,
+                                       per_server=False):
+        subs = self.nn_subscribers if self.uses_nn else self.state_subscribers
+        key = "nn" if self.uses_nn else "markov"
+        n = len(subs)
+
+        def rates(group):
+            m = len(group)
+            if m == 0:
+                return 0.0, 0.0
+            nj = sum(1 for r in group if getattr(r, "jockeyed", False))
+            nr = sum(1 for r in group if getattr(r, "reneged", False))
+            if use_hazard:
+                T = sum(float(r.time_exit - r.time_entrance) for r in group
+                        if r.time_exit and r.time_exit > r.time_entrance)
+                if T > 1e-12:
+                    return nj / T, nr / T
+            return nj / m, nr / m
+
+        jr, rr = rates(subs)
+        times = np.asarray(self.dispatch_times.get(key, []), dtype=float)
+        tau_sim = float(np.mean(np.diff(times))) if times.size >= 2 else float(default_tau)
+        tau = max(tau_sim * mfg_time_scale, tau_floor)
+        clip = lambda x: float(np.clip(x, gain_floor, gain_cap))
+        return {"K_switch": clip(jr), "K_abandon": clip(rr), "tau": tau, "tau_sim": tau_sim,
+                "jockey_rate": jr, "renege_rate": rr, "n_subscribers": n,
+                "n_dispatches": int(times.size), "mfg_time_scale": float(mfg_time_scale),
+                "use_hazard": use_hazard}
+
+    
+    def old_run_mfg_from_baseline(
         self,
-        tau_base: float = 0.3,
+        tau_base: Optional[float] = None,
         fname: str = "baseline_vs_mfg",
         history_start: Optional[int] = None,
         run_id: Optional[str] = None,
         mfg_overrides: Optional[Dict[str, object]] = None,
         record_history: bool = True,
+        calibrate: bool = True,
     ):
         """
         Run the full continuous HJB-FPK MFG and full-density delay-stability
@@ -4428,10 +4367,36 @@ class RequestQueue:
             uses_nn=True  -> Actor-Critic/NN information model.
 
         The flag selects the information model; it does not invent a new delay or
-        gain. Model-specific ``K_switch``, ``K_abandon`` and ``tau_base`` should be
-        supplied/calibrated explicitly through the arguments when needed.
+        gain. Model-specific ``K_switch``, ``K_abandon`` and ``tau`` are calibrated
+        from observed behaviour if ``calibrate=True``, otherwise supplied through
+        ``mfg_overrides`` or defaults.
+
+        Args:
+            tau_base: Operating telemetry delay. If None and calibrate=True,
+                use the measured inter-dispatch period. Otherwise default to 0.3.
+            calibrate: If True, measure K_switch, K_abandon, tau from subscriber group.
+            mfg_overrides: Explicit parameter overrides (win over calibration).
+            record_history: If True, append run to mfg_stability_history.
         """
         base = self.export_baseline_mfg_state(history_start=history_start)
+
+        # Compute time scale: MFG time units per simulation time unit.
+        # MFG uses T_final (default 8.0); simulation uses total elapsed time.
+        T_mfg_default = 8.0
+        if hasattr(self, "T_final"):
+            T_mfg = float(self.T_final)
+        else:
+            T_mfg = T_mfg_default
+        
+        total_sim_time = len(self.global_queue_length_history) * self.time_res if self.global_queue_length_history else 1.0
+        mfg_time_scale = max(T_mfg / max(total_sim_time, 1e-6), 1.0)
+
+        # Model-specific calibration from the active subscriber group.
+        calib = self.calibrate_mfg_from_subscribers(
+            mfg_time_scale=mfg_time_scale,
+            use_hazard=True,
+            per_server=False  # Keep False for now; per-server requires MFGParams changes
+        ) if calibrate else None
 
         params_kwargs = {
             "N": 2,
@@ -4440,10 +4405,26 @@ class RequestQueue:
             "m0_mean": np.clip(np.asarray(base["wait_proxy"], dtype=float), 0.5, 8.0),
             "uses_nn": bool(self.uses_nn),
         }
+        if calib is not None:
+            K_sw = calib["K_switch"]
+            K_ab = calib["K_abandon"]
+            # Convert arrays to scalars if per_server=True (take mean)
+            if isinstance(K_sw, np.ndarray):
+                K_sw = float(np.mean(K_sw))
+            if isinstance(K_ab, np.ndarray):
+                K_ab = float(np.mean(K_ab))
+            params_kwargs["K_switch"] = K_sw
+            params_kwargs["K_abandon"] = K_ab
+
+        # Explicit overrides win over calibration (useful for ablations).
         if mfg_overrides:
             params_kwargs.update(dict(mfg_overrides))
             # The simulator's RequestQueue flag is authoritative.
             params_kwargs["uses_nn"] = bool(self.uses_nn)
+
+        # Operating delay: explicit argument > calibrated dispatch period > 0.3
+        if tau_base is None:
+            tau_base = calib["tau"] if calib is not None else 0.3
 
         params = MFGParams(**params_kwargs)
         sol = solve_mfg(params, tau=float(tau_base))
@@ -4500,6 +4481,10 @@ class RequestQueue:
             "mfg_iters": int(sol["iters"]),
             "mfg_err": float(sol["err"]),
             "n_crossings": int(len(crossing_delays)),
+            "calib_jockey_rate": np.nan if calib is None else calib["jockey_rate"],
+            "calib_renege_rate": np.nan if calib is None else calib["renege_rate"],
+            "calib_n_subscribers": 0 if calib is None else calib["n_subscribers"],
+            "calib_n_dispatches": 0 if calib is None else calib["n_dispatches"],
         }
         if record_history:
             self.mfg_stability_history.append(record)
@@ -4515,6 +4500,9 @@ class RequestQueue:
         print("MFG operating M*:", M_bar)
         print("Stable at tau=0:", stable_tau0)
         print("Full-density Hopf tau_c:", tau_c)
+        if calib is not None:
+            print("Calibrated from subscribers:", calib)
+
 
         return {
             "params": params,
@@ -4537,30 +4525,6 @@ class RequestQueue:
             "history_record": record,
         }
 
-    def plot_mfg_tau_c_history(
-        self,
-        filename: str = "mfg_tau_c_history.png",
-    ):
-        """Plot the recorded run-level critical delay history."""
-        if not self.mfg_stability_history:
-            print("No MFG stability history available to plot.")
-            return None
-
-        df = pd.DataFrame(self.mfg_stability_history)
-        x = np.arange(len(df))
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.plot(x, df["tau_c"].to_numpy(dtype=float), "o-", label=r"Critical delay $\tau_c$")
-        ax.plot(x, df["operating_tau"].to_numpy(dtype=float), "--", label=r"Operating delay $\tau$")
-        ax.set_xlabel("Simulation / sweep run")
-        ax.set_ylabel("Delay (s)")
-        ax.set_title(f"Full-density critical delay history — {df['information_model'].iloc[-1]}")
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-        fig.tight_layout()
-        fig.savefig(filename, dpi=300)
-        plt.close(fig)
-        return df
 
 class ImpatientTenantEnv:
     metadata = {"render_modes": ["ansi"], "render_fps": 4}
@@ -4944,7 +4908,6 @@ class ImpatientTenantEnv:
             
         # Terminate if queue is empty or max_steps reached
         terminated = queue_empty or (self.current_step >= self.max_steps)
-
         # Get observation and info
         observation = self.queue_state
         info = self._get_info()
@@ -4970,68 +4933,6 @@ class ImpatientTenantEnv:
         }
         return raw_server_status  
               
-
-# ============================================================================
-# Full continuous HJB-FPK MFG + full-density delay stability layer
-# Integrated from full_mfg_fixed.py.
-#
-# The legacy reduced fluid MFE layer below is retained for backward compatibility,
-# but it is NOT used by the full-density HJB-FPK Hopf analysis.
-# ============================================================================
-
-@dataclass
-class MFGParams:
-    """
-    Holds model parameters for the coupled HJB-FPK MFG system and stability scanner.
-    """
-    N: int = 2                        # Number of queues/channels
-    mu: np.ndarray = None             # Base service capacities
-    lam: np.ndarray = None            # Baseline arrival intensities per queue
-    W_max: np.ndarray = None          # Queue bound caps: w_i in [0, W_max_i]
-    K_abandon: float = 0.3            # Control gain parameter for reneging
-    K_switch: float = 0.2             # Control gain parameter for jockeying
-    rho: float = 0.04                 # Discount factor for backward HJB
-    eta: np.ndarray = None            # Congestion weight coefficients in running cost
-    m0_mean: np.ndarray = None        # Baseline initial mean wait per queue
-    m0_std: float = 1.0               # Initial distribution spread
-    
-    # Numerical Grid Discretization (Fine resolution to satisfy CFL)
-    Nw: int = 100                     # Spatial grid points for waiting-time state w
-    T_final: float = 8.0              # Finite time horizon for simulation
-    Nt: int = 800                     # Fine time steps for advection stability
-    
-    # Convergence and Numerical Safeguards
-    max_mfg_iters: int = 25           # Picard iterations for McKean-Vlasov fixed point
-    mfg_tol: float = 1e-4             # Convergence tolerance for HJB value function
-    u_clip_max: float = 50.0          # Upper clipping threshold for value function u
-    ctrl_clip_max: float = 5.0        # Upper clipping threshold for optimal controls
-    omega_max: float = 50.0           # Maximum frequency scanning bound
-    omega_steps: int = 4000           # Grid steps for imaginary axis frequency sweep
-
-    # Information-model selector: this is supplied from RequestQueue.uses_nn.
-    # False -> Markov/state-based information; True -> Actor-Critic/NN information.
-    uses_nn: bool = False
-
-    # Local full-density feedback linearization
-    linearization_eps: float = 1e-4   # Density perturbation for A0 finite differences
-    information_eps: float = 1e-3     # Delayed-information perturbation for U finite differences
-    linearization_nt: int = 120       # Reduced horizon used only by local policy re-solves
-    operating_fraction: float = 0.15  # Time slice used as the quasi-stationary operating point
-
-    def __post_init__(self):
-        if self.mu is None:
-            self.mu = np.array([2.0, 1.8])
-        if self.lam is None:
-            self.lam = np.array([0.6, 0.6])
-        if self.W_max is None:
-            self.W_max = np.array([10.0, 10.0])
-        if self.eta is None:
-            self.eta = np.array([0.4, 0.4])
-        if self.m0_mean is None:
-            self.m0_mean = np.array([2.5, 2.5])
-        self.uses_nn = bool(self.uses_nn)
-        self.information_model = "Actor-Critic" if self.uses_nn else "Markov"
-
 
 # ============================================================
 # Core Physics & Helper Functions
@@ -5068,6 +4969,123 @@ def compute_true_congestion(m: np.ndarray, w_grids: List[np.ndarray], dw: np.nda
 # ============================================================
 
 def solve_backward_hjb(
+    params: "MFGParams",
+    w_grids: List[np.ndarray],
+    dw: np.ndarray,
+    dt: float,
+    M_true: np.ndarray,
+    m_pop: np.ndarray,
+    tau: float
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Solves backward-in-time Delayed Hamilton-Jacobi-Bellman (HJB) DPDE for value functions u_i(w,t):
+        -d_t u_i - b_i * d_w u_i + rho * u_i = H_i^tau(w, t; u)
+
+    Discretization notes:
+      * b_i < 0 (queues drain toward w = 0). In backward time, information moves toward
+        larger w, so the upwind derivative is the BACKWARD difference (u[k]-u[k-1])/dw.
+      * w = 0 is the inflow boundary in backward time -> Dirichlet condition u_i(0,t) = 0.
+      * Transport AND reaction terms are implicit. Because the upwind stencil only looks
+        left and u(0,t) is known, the implicit system is solved by one sweep upward in w.
+        The scheme is unconditionally stable and monotone (no CFL limit).
+      * The delay tau acts on what agents OBSERVE (the mean wait M), not on the value
+        of the queue they would join.
+    """
+    N, Nw, Nt = params.N, params.Nw, params.Nt
+    tau_steps = int(round(tau / dt))
+
+    # ---- Block 1: delayed telemetry -------------------------------------------------
+    # M_info[:, t] is the mean wait agents actually observe at time t (value from t - tau).
+    # For t < tau, agents observe the initial value M(0).
+    M_info = np.zeros_like(M_true)
+    for t_idx in range(Nt):
+        del_t_idx = max(0, t_idx - tau_steps)
+        M_info[:, t_idx] = M_true[:, del_t_idx]
+
+    # ---- Block 2: allocate outputs --------------------------------------------------
+    u = np.zeros((N, Nw, Nt))
+    a_ren = np.zeros((N, Nw, Nt))
+    alpha = np.zeros((N, N, Nw, Nt))
+
+    # ---- Block 3: terminal condition u_i(w, T) = Psi_cloud(w) -------------------------
+    for i in range(N):
+        u[i, :, -1] = cloud_outside_option(w_grids[i])
+
+    n_clip_hit = 0   # diagnostic: should stay 0 with the monotone scheme
+
+    # ---- Block 4: backward time sweep -------------------------------------------------
+    for t_idx in range(Nt - 2, -1, -1):
+
+        # ---- Block 4a (FIX 1): value of joining the tail of each queue ---------------
+        # Taken from the already-computed level t_idx + 1 for ALL queues, so the result
+        # no longer depends on the order of the i-loop and never reads unfilled cells.
+        u_j_join = u[:, -1, t_idx + 1].copy()
+
+        for i in range(N):
+            w = w_grids[i]
+            psi_cloud = cloud_outside_option(w)
+            u_old = u[i, :, t_idx + 1]   # value at the later time (already computed)
+
+            # ---- Block 4b: Hamiltonian-minimizing feedback controls (clipped) ---------
+            raw_a = params.K_abandon * np.maximum(0.0, u_old - psi_cloud)
+            a_ren[i, :, t_idx] = np.clip(raw_a, 0.0, params.ctrl_clip_max)
+
+            for j in range(N):
+                if j != i:
+                    raw_alpha = params.K_switch * np.maximum(0.0, u_old - u_j_join[j])
+                    alpha[i, j, :, t_idx] = np.clip(raw_alpha, 0.0, params.ctrl_clip_max)
+
+            # ---- Block 4c (FIX 2): drift at the same time index as the FPK solver -----
+            outflow = a_ren[i, :, t_idx] + np.sum(alpha[i, :, :, t_idx], axis=0)
+            b_i = -1.0 - (1.0 / params.mu[i]) * np.cumsum(outflow * m_pop[i, :, t_idx]) * dw[i]
+
+            # ---- Block 4d: running cost f_i(w, M_i) (FIX 2: index t_idx) --------------
+            running_cost = (
+                w
+                + params.eta[i] * M_info[i, t_idx]
+                + (a_ren[i, :, t_idx] ** 2) / (2.0 * params.K_abandon)
+            )
+            for j in range(N):
+                if j != i:
+                    running_cost += (alpha[i, j, :, t_idx] ** 2) / (2.0 * params.K_switch)
+
+            # ---- Block 4f: jump Hamiltonian, split into reaction and source parts ------
+            # H_jump = a*(psi - u) + sum_j alpha_j*(u_j - u) = S_jump - L*u, where
+            #   L      = a + sum_j alpha_j            (total switching/abandon rate)
+            #   S_jump = a*psi + sum_j alpha_j*u_j
+            L_rate = a_ren[i, :, t_idx].copy()
+            S_jump = a_ren[i, :, t_idx] * psi_cloud
+            for j in range(N):
+                if j != i:
+                    L_rate += alpha[i, j, :, t_idx]
+                    S_jump += alpha[i, j, :, t_idx] * u_j_join[j]
+
+            # ---- Block 4g (FIX 3): fully implicit upwind step, swept upward in w ------
+            # Solves  u_k (1 + dt(rho + L_k) + c_k) = u_old_k + dt*S_k + c_k * u_{k-1}
+            # with c_k = dt*|b_k|/dw. All coefficients are positive -> stable, u >= 0.
+            c = dt * np.abs(b_i) / dw[i]                  # b_i <= -1 < 0
+            rhs = u_old + dt * (running_cost + S_jump)
+            denom = 1.0 + dt * (params.rho + L_rate) + c
+            u_new = np.empty(Nw)
+            u_new[0] = 0.0                                # Dirichlet: u_i(0,t) = 0
+            for k in range(1, Nw):
+                u_new[k] = (rhs[k] + c[k] * u_new[k - 1]) / denom[k]
+
+            # ---- Block 4h: store (clip kept only as a diagnostic) ----------------------
+            n_clip_hit += int(np.sum((u_new > params.u_clip_max) | (u_new < 0.0)))
+            u[i, :, t_idx] = np.clip(u_new, 0.0, params.u_clip_max)
+
+    # ---- Block 5: diagnostics ----------------------------------------------------------
+    if n_clip_hit > 0:
+        warnings.warn(
+            f"HJB value clip active in {n_clip_hit} cell-updates; "
+            f"check u_clip_max or the sign of the running cost / outside option"
+        )
+
+    return u, a_ren, alpha
+
+
+def failing_solve_backward_hjb(
     params: MFGParams,
     w_grids: List[np.ndarray],
     dw: np.ndarray,
@@ -5079,75 +5097,122 @@ def solve_backward_hjb(
     """
     Solves backward-in-time Delayed Hamilton-Jacobi-Bellman (HJB) DPDE for value functions u_i(w,t):
         -d_t u_i - b_i * d_w u_i + rho * u_i = H_i^tau(w, t; u)
+
+    Discretization notes:
+      * b_i < 0 (queues drain toward w = 0). In backward time, information moves toward
+        larger w, so the upwind derivative is the BACKWARD difference (u[i]-u[i-1])/dw.
+      * w = 0 is the inflow boundary in backward time -> Dirichlet condition u_i(0,t) = 0.
+      * The reaction terms (rho + a + sum alpha) * u are treated implicitly.
     """
     N, Nw, Nt = params.N, params.Nw, params.Nt
     tau_steps = int(round(tau / dt))
 
+    # ---- Block 1: delayed telemetry -------------------------------------------------
     # Agents do not use the current aggregate mean wait in their feedback.
-    # Build the delayed telemetry actually available at time t.
+    # M_info[:, t] is the mean wait they actually observe at time t (value from t - tau).
     M_info = np.zeros_like(M_true)
     for t_idx in range(Nt):
         del_t_idx = max(0, t_idx - tau_steps)
         M_info[:, t_idx] = M_true[:, del_t_idx]
 
+    # ---- Block 2: allocate outputs --------------------------------------------------
     u = np.zeros((N, Nw, Nt))
     a_ren = np.zeros((N, Nw, Nt))
     alpha = np.zeros((N, N, Nw, Nt))
-    
-    # Terminal condition u_i(w, T) = Psi_cloud(w)
+
+    # ---- Block 3: terminal condition u_i(w, T) = Psi_cloud(w) -------------------------
     for i in range(N):
         u[i, :, -1] = cloud_outside_option(w_grids[i])
-        
+
+    # Diagnostic counters (reported after the sweep)
+    max_cfl = 0.0
+    n_clip_hit = 0
+
+    # ---- Block 4: backward time sweep -------------------------------------------------
     for t_idx in range(Nt - 2, -1, -1):
         del_t_idx = max(0, t_idx - tau_steps)
-        
+
         for i in range(N):
             w = w_grids[i]
             psi_cloud = cloud_outside_option(w)
-            
-            # Delayed destination value at tail w = W_j_max
+            u_old = u[i, :, t_idx + 1]   # value at the later time (already computed)
+
+            # ---- Block 4a: delayed destination value at the tail w = W_j_max ----------
+            # NOTE: del_t_idx <= t_idx is an EARLIER time index, and this sweep fills u from
+            # late to early. For tau_steps > 0 these entries have not been computed yet, so
+            # they are likely still 0. Print u_j_delayed to check. If it is all zeros, the
+            # jockeying control ignores the destination's value (see my notes below).
             u_j_delayed = np.zeros(N)
             for j in range(N):
                 u_j_delayed[j] = u[j, -1, del_t_idx]
-            
-            # Hamiltonian minimization feedback controls with safety clipping
-            raw_a = params.K_abandon * np.maximum(0.0, u[i, :, t_idx + 1] - psi_cloud)
+                
+            if t_idx == Nt - 2 or t_idx == Nt // 2:
+                print("t_idx", t_idx, "del_t_idx", del_t_idx, "u_j_delayed", u_j_delayed)
+
+            # ---- Block 4b: Hamiltonian-minimizing feedback controls (clipped) ---------
+            raw_a = params.K_abandon * np.maximum(0.0, u_old - psi_cloud)
             a_ren[i, :, t_idx] = np.clip(raw_a, 0.0, params.ctrl_clip_max)
-            
+
             for j in range(N):
                 if j != i:
-                    raw_alpha = params.K_switch * np.maximum(0.0, u[i, :, t_idx + 1] - u_j_delayed[j])
+                    raw_alpha = params.K_switch * np.maximum(0.0, u_old - u_j_delayed[j])
                     alpha[i, j, :, t_idx] = np.clip(raw_alpha, 0.0, params.ctrl_clip_max)
-            
-            # Population drift vector field b_i(w,t)
-            outflow = a_ren[i, :, t_idx + 1] + np.sum(alpha[i, :, :, t_idx + 1], axis=0)
-            b_i = -1.0 - (1.0 / params.mu[i]) * np.cumsum(outflow * m_pop[i, :, t_idx + 1]) * dw[i]
-            
-            # Running cost function f_i(w, M_i)
-            running_cost = w + params.eta[i] * M_info[i, t_idx + 1] + (a_ren[i, :, t_idx]**2) / (2.0 * params.K_abandon)
+
+            # ---- Block 4c: population drift b_i(w,t) (same form as the FPK) -----------
+            # outflow = a_ren[i, :, t_idx + 1] + np.sum(alpha[i, :, :, t_idx + 1], axis=0)
+            # b_i = -1.0 - (1.0 / params.mu[i]) * np.cumsum(outflow * m_pop[i, :, t_idx + 1]) * dw[i]
+            # Block 4c: drift consistent with the FPK solver (same time index, controls just computed)
+            outflow = a_ren[i, :, t_idx] + alpha[i, :, :, t_idx].sum(axis=0)
+            b_i = -1.0 - np.cumsum(outflow * m_pop[i, :, t_idx]) * dw[i] / params.mu[i]
+
+            # CFL for the explicit transport part
+            max_cfl = max(max_cfl, float(np.max(np.abs(b_i))) * dt / dw[i])
+
+            # ---- Block 4d: running cost f_i(w, M_i) -----------------------------------
+            running_cost = (
+                w
+                + params.eta[i] * M_info[i, t_idx + 1]
+                + (a_ren[i, :, t_idx] ** 2) / (2.0 * params.K_abandon)
+            )
             for j in range(N):
                 if j != i:
-                    running_cost += (alpha[i, j, :, t_idx]**2) / (2.0 * params.K_switch)
-            
-            # Spatial upwind difference
+                    running_cost += (alpha[i, j, :, t_idx] ** 2) / (2.0 * params.K_switch)
+
+            # ---- Block 4e: spatial derivative (FIXED: backward difference) -------------
+            # b_i < 0, so the characteristic comes from the left neighbour in backward time.
             du_dw = np.zeros(Nw)
-            du_dw[:-1] = (u[i, 1:, t_idx + 1] - u[i, :-1, t_idx + 1]) / dw[i]
-            du_dw[-1] = du_dw[-2]
-            
-            # Jump Hamiltonian couplings
-            H_jump = a_ren[i, :, t_idx] * (psi_cloud - u[i, :, t_idx + 1])
+            du_dw[1:] = (u_old[1:] - u_old[:-1]) / dw[i]
+            du_dw[0] = 0.0   # unused: u(0,t) is overwritten by the Dirichlet condition below
+
+            # ---- Block 4f: jump Hamiltonian, split into reaction and source parts ------
+            # H_jump = a*(psi - u) + sum_j alpha_j*(u_j - u) = S_jump - L*u, where
+            #   L      = a + sum_j alpha_j            (total switching/abandon rate)
+            #   S_jump = a*psi + sum_j alpha_j*u_j
+            L_rate = a_ren[i, :, t_idx].copy()
+            S_jump = a_ren[i, :, t_idx] * psi_cloud
             for j in range(N):
                 if j != i:
-                    H_jump += alpha[i, j, :, t_idx] * (u_j_delayed[j] - u[i, :, t_idx + 1])
-            
-            # Backward integration step
-            du_dt = params.rho * u[i, :, t_idx + 1] - b_i * du_dw - running_cost - H_jump
-            u_next = u[i, :, t_idx + 1] - dt * du_dt
-            
-            # Prevent overflow explosions and enforce boundary condition u_i(0,t) = 0
-            u[i, :, t_idx] = np.clip(u_next, 0.0, params.u_clip_max)
-            u[i, 0, t_idx] = 0.0
-            
+                    L_rate += alpha[i, j, :, t_idx]
+                    S_jump += alpha[i, j, :, t_idx] * u_j_delayed[j]
+
+            # ---- Block 4g: backward step, semi-implicit in the reaction term ----------
+            # Explicit version: u_new = u_old*(1 - dt*(rho+L)) + dt*b*du_dw + dt*(running + S_jump)
+            # Implicit in (rho + L)*u removes the explicit stability limit on that term.
+            S_total = running_cost + S_jump
+            u_new = (u_old + dt * b_i * du_dw + dt * S_total) / (1.0 + dt * (params.rho + L_rate))
+
+            # ---- Block 4h: safety clip and boundary condition --------------------------
+            # The clip is a last-resort guard. If it triggers, something is still unstable.
+            n_clip_hit += int(np.sum((u_new > params.u_clip_max) | (u_new < 0.0)))
+            u[i, :, t_idx] = np.clip(u_new, 0.0, params.u_clip_max)
+            u[i, 0, t_idx] = 0.0   # u_i(0,t) = 0
+
+    # ---- Block 5: diagnostics ----------------------------------------------------------
+    if max_cfl > 1.0:
+        warnings.warn(f"HJB transport CFL={max_cfl:.2f} > 1; increase Nt or reduce dt")
+    if n_clip_hit > 0:
+        warnings.warn(f"HJB value clip active in {n_clip_hit} cell-updates; solution may be unstable")
+
     return u, a_ren, alpha
 
 
@@ -5155,7 +5220,124 @@ def solve_backward_hjb(
 # Delayed FPK DPDE Solver (Forward Sweep with Mass Stabilization)
 # ============================================================
 
+def test_fpk_transport_only(params, w_grids, dw):
+    N, Nw = params.N, params.Nw
+    a0 = np.zeros((N, Nw))
+    al0 = np.zeros((N, N, Nw))
+    m0 = np.stack([np.exp(-0.5 * ((w_grids[i] - params.m0_mean[i]) / params.m0_std) ** 2)
+                   for i in range(N)])
+    for i in range(N):
+        m0[i] /= np.sum(m0[i]) * dw[i]
+
+    # mass balance: d/dt mass_i should equal lam_i + flux[0], with flux = b*m, b = -1
+    rhs = fpk_rhs(params, w_grids, dw, m0, a0, al0)
+    for i in range(N):
+        print(f"queue {i}: dMass/dt = {np.sum(rhs[i]) * dw[i]:.6f}  expected = {params.lam[i] - m0[i, 0]:.6f}")
+
+    # spectrum: expect all eigenvalues near -1/dw
+    n = N * Nw
+    A = np.zeros((n, n))
+    e = 1e-6
+    f = lambda x: fpk_rhs(params, w_grids, dw, x.reshape(N, Nw), a0, al0).ravel()
+    for k in range(n):
+        dx = np.zeros(n); dx[k] = e
+        A[:, k] = (f(m0.ravel() + dx) - f(m0.ravel() - dx)) / (2 * e)
+    ev = np.linalg.eigvals(A)
+    print("max Re eig:", ev.real.max(), "| expected about", -1.0 / np.min(dw))
+
+
 def solve_forward_fpk(
+    params: MFGParams,
+    w_grids: List[np.ndarray],
+    dw: np.ndarray,
+    dt: float,
+    a_ren: np.ndarray,
+    alpha: np.ndarray,
+    tau: Optional[float] = None
+) -> np.ndarray:
+    """
+    Solves forward-in-time FPK equation for density m_i(w,t).
+
+    The delay is already encoded in the feedback controls from the HJB solver, so
+    ``tau`` is kept only for backward compatibility.
+
+    Scheme: first-order upwind transport (b < 0, mass drifts toward w = 0), adaptive
+    substeps so the CFL number is <= 0.9 with the CURRENT drift, and a semi-implicit
+    treatment of the loss term. With CFL <= 1 this preserves non-negativity, so the
+    clip and mass-stabilization hacks are removed.
+    """
+    N, Nw, Nt = params.N, params.Nw, params.Nt
+    m = np.zeros((N, Nw, Nt))
+    MAX_SUBSTEPS = 5000          # safety cap per outer step
+    max_n_sub = 0                # diagnostic: worst substep count seen
+
+    # ---- Block 1: initial condition (normalized Gaussian per queue) -------------------
+    for i in range(N):
+        m[i, :, 0] = np.exp(-0.5 * ((w_grids[i] - params.m0_mean[i]) / params.m0_std) ** 2)
+        m[i, :, 0] /= (np.sum(m[i, :, 0]) * dw[i])
+
+    # ---- Block 2: outer time loop -----------------------------------------------------
+    for t_idx in range(0, Nt - 1):
+        for i in range(N):
+            m_i = m[i, :, t_idx]
+
+            # ---- Block 2a: controls, frozen over the outer step ---------------------
+            total_loss = a_ren[i, :, t_idx] + np.sum(alpha[i, :, :, t_idx], axis=0)
+
+            # ---- Block 2b: arrivals (external + jockeying), frozen over the outer step
+            jockey_inflow = sum(
+                np.sum(m[j, :, t_idx] * alpha[j, i, :, t_idx]) * dw[j]
+                for j in range(N) if j != i
+            )
+            phi_in = params.lam[i] + jockey_inflow
+
+            # ---- Block 2c: adaptive substepping over [t, t + dt] ---------------------
+            m_cur = m_i.copy()
+            t_sub = 0.0
+            n_sub = 0
+            while t_sub < dt - 1e-14:
+                # Drift from the current density (b <= -1 always, so max_speed >= 1)
+                b = -1.0 - (1.0 / params.mu[i]) * np.cumsum(total_loss * m_cur) * dw[i]
+                max_speed = np.max(np.abs(b))
+
+                # Substep length: keep the CFL number <= 0.9 and do not overshoot dt
+                h = min(dt - t_sub, 0.9 * dw[i] / max_speed)
+
+                # Upwind flux difference (b < 0 -> right neighbour); nothing enters from above
+                flux = b * m_cur
+                dflux_dw = np.zeros(Nw)
+                dflux_dw[:-1] = (flux[1:] - flux[:-1]) / dw[i]
+                dflux_dw[-1] = -flux[-1] / dw[i]
+
+                # Transport + arrivals at the top cell (explicit)
+                m_adv = m_cur - h * dflux_dw
+                m_adv[-1] += (h / dw[i]) * phi_in
+
+                # Loss term (renege + jockey out), implicit -> stable for any loss size
+                m_cur = m_adv / (1.0 + h * total_loss)
+
+                t_sub += h
+                n_sub += 1
+                if n_sub >= MAX_SUBSTEPS:
+                    warnings.warn(
+                        f"FPK queue {i}, t_idx {t_idx}: hit {MAX_SUBSTEPS} substeps "
+                        f"(max|b|={max_speed:.1f}); drift is extremely large"
+                    )
+                    break
+
+            max_n_sub = max(max_n_sub, n_sub)
+
+            # ---- Block 2d: roundoff-only guard (not a stability fix) -----------------
+            m[i, :, t_idx + 1] = np.maximum(m_cur, 0.0)
+
+    # ---- Block 3: diagnostics -------------------------------------------------------
+    if max_n_sub > 100:
+        warnings.warn(f"FPK needed up to {max_n_sub} substeps per step; check control saturation")
+
+    return m
+
+
+def failing_solve_forward_fpk(
     params: MFGParams,
     w_grids: List[np.ndarray],
     dw: np.ndarray,
@@ -5171,43 +5353,59 @@ def solve_forward_fpk(
     the time-dependent feedback controls produced by the HJB solver. ``tau`` is retained
     only as a backward-compatible optional argument.
 
-    Uses the same conservative transport discretization as the baseline solver.
+    Transport is discretized with a first-order upwind scheme for b < 0 (mass drifts
+    toward w = 0 and leaves through the w = 0 boundary); arrivals enter at the top cell.
     """
+
+    test_fpk_transport_only(params, w_grids, dw)
+
     N, Nw, Nt = params.N, params.Nw, params.Nt
     m = np.zeros((N, Nw, Nt))
-    
+
+    max_cfl = 0.0
+
     # Initialize normalized Gaussian population distributions
     for i in range(N):
         #m[i, :, 0] = np.exp(-0.5 * ((w_grids[i] - 2.5) / 1.0) ** 2)
         m[i, :, 0] = np.exp(-0.5 * ((w_grids[i] - params.m0_mean[i]) / params.m0_std) ** 2)
         m[i, :, 0] /= (np.sum(m[i, :, 0]) * dw[i])
-        
+
+    max_dtL = 0.0
     for t_idx in range(0, Nt - 1):
+        
         for i in range(N):
+            m_i = m[i, :, t_idx]
             total_loss = a_ren[i, :, t_idx] + np.sum(alpha[i, :, :, t_idx], axis=0)
-            
+
             # Drift calculation
-            b_i = -1.0 - (1.0 / params.mu[i]) * np.cumsum(total_loss * m[i, :, t_idx]) * dw[i]
-            
-            # Conservative spatial flux difference
-            flux = b_i * m[i, :, t_idx]
+            b_i = -1.0 - (1.0 / params.mu[i]) * np.cumsum(total_loss * m_i) * dw[i]
+
+            # Conservative spatial flux difference (upwind for b < 0)
+            flux = b_i * m_i
             dflux_dw = np.zeros(Nw)
-            dflux_dw[1:] = (flux[1:] - flux[:-1]) / dw[i]
-            dflux_dw[0] = flux[0] / dw[i]
-            
+            dflux_dw[:-1] = (flux[1:] - flux[:-1]) / dw[i]
+            dflux_dw[-1] = -flux[-1] / dw[i]   # nothing enters from above
+
             # Inter-queue jockeying inflow
-            jockey_inflow = sum(np.sum(m[j, :, t_idx] * alpha[j, i, :, t_idx]) * dw[j] for j in range(N) if j != i)
+            jockey_inflow = sum(
+                np.sum(m[j, :, t_idx] * alpha[j, i, :, t_idx]) * dw[j]
+                for j in range(N) if j != i
+            )
             # phi_in = 0.6 + jockey_inflow
             phi_in = params.lam[i] + jockey_inflow
-            
+
             # Update density profile
-            dm_dt = -dflux_dw - total_loss * m[i, :, t_idx]
-            m_next = m[i, :, t_idx] + dt * dm_dt
-            m_next[-1] += (dt / dw[i]) * phi_in
-            
+            m_adv = m_i - dt * dflux_dw
+            m_adv[-1] += (dt / dw[i]) * phi_in
+            m_next = m_adv / (1.0 + dt * total_loss)
+            #dm_dt = -dflux_dw - total_loss * m_i
+            #m_next = m_i + dt * dm_dt
+            #m_next[-1] += (dt / dw[i]) * phi_in
+
+
             # Ensure non-negativity and prevent numerical blowup
             m_next = np.clip(m_next, 0.0, 10.0)
-            
+
             mass = np.sum(m_next) * dw[i]
             if mass > 1e-12:
                 # mild stabilization, not full renormalization
@@ -5216,24 +5414,75 @@ def solve_forward_fpk(
                 m_next[-1] = 1.0 / dw[i]
 
             cfl = np.max(np.abs(b_i)) * dt / dw[i]
-            if cfl > 1.0:
-                warnings.warn(f"CFL={cfl:.2f} > 1 for queue {i}; increase Nt or reduce dt")
+
+            #if cfl > 1.0:
+            #    warnings.warn(f"CFL={cfl:.2f} > 1 for queue {i}; increase Nt or reduce dt")
+
+            max_cfl = max(max_cfl, cfl)
 
             # Normalize mass to prevent drift divergence
             #mass = np.sum(m_next) * dw[i]
             #if mass > 1e-8:
             #    m_next = m_next / mass
-                
+
+            max_dtL = max(max_dtL, dt * np.max(total_loss)) # inside the i-loop, after total_loss
+
             m[i, :, t_idx + 1] = m_next
-            
+
+    print("MAX CFI => ", max_cfl)
+    print("dt =", dt, "| max dt*loss =", max_dtL)   # after the loops
+
     return m
+
+
+def fpk_rhs(
+    params: MFGParams,
+    w_grids: List[np.ndarray],
+    dw: np.ndarray,
+    m: np.ndarray,
+    a_ren: np.ndarray,
+    alpha: np.ndarray,
+) -> np.ndarray:
+    """
+    Smooth FPK right-hand side used by the Jacobian calculation.
+
+    Important: this function deliberately excludes clipping, mass renormalization,
+    and warning logic. Those are numerical safeguards for time marching, not part
+    of the differentiable population dynamics L(m; I).
+    """
+    N, Nw = params.N, params.Nw
+    rhs = np.zeros((N, Nw), dtype=float)
+
+    for i in range(N):
+        m_i = m[i]
+        total_loss = a_ren[i] + np.sum(alpha[i], axis=0)
+
+        # Population drift induced by departures of agents ahead.
+        b_i = -1.0 - (1.0 / params.mu[i]) * np.cumsum(total_loss * m_i) * dw[i]
+
+        flux = b_i * m_i
+        dflux_dw = np.zeros(Nw)
+        dflux_dw[:-1] = (flux[1:] - flux[:-1]) / dw[i]   # upwind for b < 0
+        dflux_dw[-1] = -flux[-1] / dw[i]                  # nothing enters from above
+
+        # External arrivals + jockeying arrivals from the other queues.
+        jockey_inflow = sum(
+            np.sum(m[j] * alpha[j, i]) * dw[j]
+            for j in range(N) if j != i
+        )
+        phi_in = params.lam[i] + jockey_inflow
+
+        rhs[i] = -dflux_dw - total_loss * m_i
+        rhs[i, -1] += phi_in / dw[i]
+
+    return rhs
 
 
 # ============================================================
 # Full-Density Linearized Delay Stability & Hopf Analysis
 # ============================================================
 
-def fpk_rhs(
+def failing_fpk_rhs(
     params: MFGParams,
     w_grids: List[np.ndarray],
     dw: np.ndarray,
@@ -5257,10 +5506,10 @@ def fpk_rhs(
         # Population drift induced by departures of agents ahead.
         b_i = -1.0 - (1.0 / params.mu[i]) * np.cumsum(total_loss * m[i]) * dw[i]
 
-        flux = b_i * m[i]
+        flux = b_i * m_i
         dflux_dw = np.zeros(Nw)
-        dflux_dw[1:] = (flux[1:] - flux[:-1]) / dw[i]
-        dflux_dw[0] = flux[0] / dw[i]
+        dflux_dw[:-1] = (flux[1:] - flux[:-1]) / dw[i]   # upwind for b < 0
+        dflux_dw[-1] = -flux[-1] / dw[i]                  # nothing enters from above
 
         # External arrivals + jockeying arrivals from the other queues.
         jockey_inflow = sum(
@@ -5341,6 +5590,7 @@ def linearize_full(
        and the characteristic determinant can be evaluated through an N x N
     transfer matrix even though A0 is (N*Nw) x (N*Nw).
     """
+    
     N, Nw = params.N, params.Nw
     w_grids, dw = sol["w_grids"], sol["dw"]
     idx = int(round(np.clip(params.operating_fraction, 0.0, 1.0) * (params.Nt - 1)))
@@ -5349,8 +5599,12 @@ def linearize_full(
     m_bar = np.asarray(sol["m"][:, :, idx], dtype=float).copy()
     M_bar = np.asarray(sol["M"][:, idx], dtype=float).copy()
 
-    eps = params.linearization_eps if eps is None else eps
-    info_eps = params.information_eps if info_eps is None else info_eps
+    k = np.array([0.25, 0.5, 0.25])
+    m_s = np.stack([np.convolve(np.pad(m_bar[i], 1, mode='edge'), k, mode='valid')
+                for i in range(N)])
+    a_s, al_s, _ = _snapshot_hjb_controls(params, w_grids, dw, M_bar, m_s, tau)
+    print("smoothed a[0,40:]:", np.round(a_s[0, 40:], 2))
+    print("smoothed alpha[0,1,40:]:", np.round(al_s[0, 1, 40:], 2))
 
     def L(m_flat: np.ndarray, M_info: np.ndarray) -> np.ndarray:
         m = np.asarray(m_flat, dtype=float).reshape(N, Nw)
@@ -5360,6 +5614,19 @@ def linearize_full(
         return fpk_rhs(params, w_grids, dw, m, a_loc, alpha_loc).ravel()
 
     x0 = m_bar.ravel()
+
+    resid = L(x0, M_bar)
+    r = resid.reshape(N, Nw)
+    qi, wi = np.unravel_index(np.argmax(np.abs(r)), r.shape)
+    print("Equilibrium test: ||L||_inf =", np.max(np.abs(resid)),
+          "| worst cell: queue", qi, "w-index", wi, "of", Nw,
+          "| rel resid:", np.linalg.norm(resid) / (np.linalg.norm(x0) + 1e-12))
+    print("max m_bar:", m_bar.max(),
+          "| cells at clip (>=10):", int(np.sum(m_bar >= 10.0 - 1e-9)))
+
+    eps = params.linearization_eps if eps is None else eps
+    info_eps = params.information_eps if info_eps is None else info_eps
+
     n_state = N * Nw
     A0 = np.zeros((n_state, n_state), dtype=float)
 
@@ -5374,6 +5641,46 @@ def linearize_full(
         dI[j] = info_eps
         U[:, j] = (L(x0, M_bar + dI) - L(x0, M_bar - dI)) / (2.0 * info_eps)
 
+    a_loc, alpha_loc, _ = _snapshot_hjb_controls(params, w_grids, dw, M_bar, m_bar, tau)
+
+    a_loc, alpha_loc, u_loc = _snapshot_hjb_controls(params, w_grids, dw, M_bar, m_bar, tau)
+    print("u[0,40:]:", np.round(u_loc[0, 40:], 4))
+    print("2nd diff u[0,40:]:", np.round(np.diff(u_loc[0, 40:], 2), 4))
+    print("u[1,40:]:", np.round(u_loc[1, 40:], 4)) 
+    
+    def L_fr(x):
+        return fpk_rhs(params, w_grids, dw, x.reshape(N, Nw), a_loc, alpha_loc).ravel()
+
+    A_fr = np.zeros_like(A0)
+
+    for k in range(n_state):
+        dx = np.zeros(n_state); dx[k] = eps
+        A_fr[:, k] = (L_fr(x0 + dx) - L_fr(x0 - dx)) / (2.0 * eps)
+
+    A_ctrl = A0 - A_fr
+
+    cols = [5, 6, 9, 10, 15]   # queue 0 flat indices from your printout
+    for e in [1e-2, 1e-3, 1e-4, 1e-5, 1e-6]:
+        out = []
+        for k in cols:
+            dx = np.zeros(n_state); dx[k] = e
+            ap, alp, _ = _snapshot_hjb_controls(params, w_grids, dw, M_bar, (x0 + dx).reshape(N, Nw), tau)
+            am, alm, _ = _snapshot_hjb_controls(params, w_grids, dw, M_bar, (x0 - dx).reshape(N, Nw), tau)
+            out.append((round(np.max(np.abs(ap - am)), 4), round(np.max(np.abs(alp - alm)), 4)))
+        print(e, out)
+
+    print("m_bar[0,40:]:", np.round(m_bar[0, 40:], 4))
+    print("resid [0,40:]:", np.round(r[0, 40:], 3))
+
+
+    colmax = np.max(np.abs(A_ctrl), axis=0).reshape(N, Nw)
+    print("max Re eig(A_fr):", np.max(np.linalg.eigvals(A_fr).real),
+          "| ||A_ctrl||_2:", np.linalg.norm(A_ctrl, 2),
+          "| max|A_ctrl|:", np.abs(A_ctrl).max(),
+          "| controls max (a_ren, alpha):", a_loc.max(), alpha_loc.max())
+    print("columns with largest control sensitivity (queue, w-index):",
+          np.unravel_index(np.argsort(colmax.ravel())[-5:], colmax.shape))
+
     # Exact derivative of the normalized mean M_i = int(w m_i)/int(m_i).
     Vt = np.zeros((N, n_state), dtype=float)
     for i in range(N):
@@ -5382,6 +5689,11 @@ def linearize_full(
         if mass <= 1e-12:
             raise ValueError(f"Queue {i} has near-zero equilibrium mass; cannot form dM/dm.")
         Vt[i, block] = (w_grids[i] - M_bar[i]) * dw[i] / mass
+
+    print("controls a_loc[0,40:]:", np.round(a_loc[0, 40:], 2))
+    print("alpha_loc[0,:,40:]:", np.round(alpha_loc[0, :, 40:], 2))
+    m0 = m_bar[0]
+    print("checkerboard ratio (mean |2nd diff| / mean m):", np.mean(np.abs(np.diff(m0, 2))) / np.mean(m0))
 
     return A0, U, Vt
 
@@ -5596,6 +5908,8 @@ def solve_mfg(params: MFGParams, tau: float, relax: float = 0.5):
     M_true = compute_true_congestion(m_pop, w_grids, dw)
     history = []
 
+    # test_fpk_transport_only(params, w_grids, dw)
+
     for it in range(params.max_mfg_iters):
         u, a_ren, alpha = solve_backward_hjb(params, w_grids, dw, dt, M_true, m_pop, tau)
         m_new = solve_forward_fpk(params, w_grids, dw, dt, a_ren, alpha, tau)
@@ -5768,6 +6082,33 @@ def run_information_model_sweep(
 # ============================================================
 # Main MFG Execution Driver
 # ============================================================
+
+def diagnose_frozen_controls(params, tau, sol, eps=None):
+    N, Nw = params.N, params.Nw
+    w_grids, dw = sol["w_grids"], sol["dw"]
+    idx = int(round(np.clip(params.operating_fraction, 0.0, 1.0) * (params.Nt - 1)))
+    idx = min(max(idx, 0), params.Nt - 1)
+    m_bar = np.asarray(sol["m"][:, :, idx], dtype=float).copy()
+    M_bar = np.asarray(sol["M"][:, idx], dtype=float).copy()
+    eps = params.linearization_eps if eps is None else eps
+
+    a_loc, alpha_loc, _ = _snapshot_hjb_controls(params, w_grids, dw, M_bar, m_bar, tau)
+
+    def L_frozen(x):
+        return fpk_rhs(params, w_grids, dw, x.reshape(N, Nw), a_loc, alpha_loc).ravel()
+
+    x0 = m_bar.ravel()
+    n_state = N * Nw
+    A_fr = np.zeros((n_state, n_state))
+    for k in range(n_state):
+        dx = np.zeros(n_state)
+        dx[k] = eps
+        A_fr[:, k] = (L_frozen(x0 + dx) - L_frozen(x0 - dx)) / (2.0 * eps)
+
+    print("frozen-control max Re:", np.max(np.linalg.eigvals(A_fr).real))
+    return A_fr
+
+
 def run_simulation_and_plot(
     fname: str = "fig4_mfg_combined",
     params: Optional[MFGParams] = None,
@@ -5783,7 +6124,14 @@ def run_simulation_and_plot(
 
     # Full-density stability linearization.  response_map is used below only
     # to visualize the scalar equilibrium map; it is not used for tau_c.
+
+    diagnose_frozen_controls(params, tau_base, sol)
+
     A0, U, Vt = linearize_full(params, tau_base, sol)
+
+    print("max Re eig(A0):", np.max(np.linalg.eigvals(A0).real))
+    print("max Re eig(A0+UVt):", np.max(np.linalg.eigvals(A0 + U @ Vt).real))
+
     A_tau = U @ Vt
     tau_c, _ = tau_c_full(
         A0, U, Vt,
@@ -5889,656 +6237,6 @@ def run_simulation_and_plot(
     return result
 
 
-
-
-# ============================================================================
-# Mean-field queueing layer
-# Insert this block after A2CAgent and before class RequestQueue
-# ============================================================================
-
-@dataclass
-class StabilityResult:
-    tau: float
-    rightmost_real_root: float
-    hopf_frequency: float
-    stable: bool
-
-@dataclass
-class DynamicResult:
-    tau: float
-    mean_queue: float
-    oscillation_amplitude: float
-    dominant_frequency: float
-    burn_in: int
-
-
-@dataclass
-class MFEResult:
-    m_star: np.ndarray
-    policy_star: np.ndarray
-    converged: bool
-    iterations: int
-    history: Dict[str, List[np.ndarray]]
-    mean_sojourn: float
-    oscillation_amp: float
-
-    # this is solver iteration noise, NOT physical oscillation
-    solver_error_std: float
-    residual_inf_norm: float
-    rightmost_real_part: Optional[float] = None
-    hopf_frequency: Optional[float] = None
-
-    equilibrium_residual: float = np.nan
-    A0: Optional[np.ndarray] = None
-    At: Optional[np.ndarray] = None
-    kappa_beh: float = np.nan
-    rightmost_root: Optional[complex] = None
-    tau_critical: Optional[float] = None
-
-
-class MeanFieldQueueGame:
-    """
-    Reduced behavioural mean-field queue model.
-
-    IMPORTANT MODELING CHANGE
-    --------------------------
-    The information model does NOT allocate exogenous arrivals.  Arrival rates
-    are fixed (or supplied through ``arrival_split``).  Delayed information
-    affects only behavioural flows: reneging and jockeying.
-
-    Continuous state q_i(t): queue occupancy at facility i.
-
-        qdot = lambda - service(q) + B(q, I),   I(t) = q(t-tau)
-
-    where B contains reneging and jockeying.  This is the reduced fluid MFG/MFE
-    used for the theorem/numerical checks; it is not a PDE HJB--FPK solver.
-    """
-
-    def __init__(
-        self,
-        c_list: List[int],
-        mu_list: List[float],
-        total_arrival_rate: float,
-        telemetry_delay:  float = 0.0, #Optional[float],
-        dt: float = 0.01,
-        choice_sharpness: float = 1.0,
-        initial_jobs: Optional[List[float]] = None,
-        arrival_split: Optional[List[float]] = None,
-        renege_scale: float = 0.10,
-        renege_sensitivity: float = 4.0,
-        renege_threshold: float = 1.0,
-        jockey_scale: float = 0.20,
-        jockey_sensitivity: float = 4.0,
-        jockey_threshold: float = 0.0,
-    ):
-        if len(c_list) != len(mu_list) or len(c_list) == 0:
-            raise ValueError("c_list and mu_list must have the same non-zero length")
-        if dt <= 0:
-            raise ValueError("dt must be positive")
-
-        self.N = len(c_list)
-        self.c_list = np.asarray(c_list, dtype=float)
-        self.mu_list = np.asarray(mu_list, dtype=float)
-        self.total_arrival_rate = float(total_arrival_rate)
-        self.telemetry_delay = float(telemetry_delay)
-        self.dt = float(dt)
-        self.choice_sharpness = float(choice_sharpness)
-
-        # mu0: Base service rate at empty queue (q = 0)
-        # mu_slope: Total additional capacity scale asymptotic to max service rate
-        self.mu0 = np.zeros(self.N, dtype=float)
-        self.mu_slope = self.c_list * self.mu_list
-
-        if arrival_split is None:
-            self.arrival_split = np.ones(self.N, dtype=float) / self.N
-        else:
-            a = np.asarray(arrival_split, dtype=float)
-            if a.shape != (self.N,) or np.any(a < 0) or np.sum(a) <= 0:
-                raise ValueError("arrival_split must be a non-negative vector of length N")
-            self.arrival_split = a / np.sum(a)
-
-        self.arrival_rates = self.total_arrival_rate * self.arrival_split
-
-        if telemetry_delay is None:
-            avg_mu = float(np.mean(self.mu_list))
-            telemetry_delay = 1.0 / avg_mu if avg_mu > 0 else 1.0
-        self.telemetry_delay = max(0.0, float(telemetry_delay))
-        #self.delay_steps = max(0, int(round(self.telemetry_delay / self.dt)))
-        # self.telemetry_buffer = deque(maxlen=max(1, self.delay_steps + 1))
-
-        # Behavioural-response parameters.  These are the reduced-form hazards
-        # to be calibrated from the reneging/jockeying observations in the
-        # simulator; they are deliberately separate from arrival allocation.
-        self.renege_scale = float(renege_scale)
-        self.renege_sensitivity = float(renege_sensitivity)
-        self.renege_threshold = float(renege_threshold)
-        self.jockey_scale = float(jockey_scale)
-        self.jockey_sensitivity = float(jockey_sensitivity)
-        self.jockey_threshold = float(jockey_threshold)
-
-        if initial_jobs is None:
-            self.jobs = np.zeros(self.N, dtype=float)
-        else:
-            self.jobs = np.asarray(initial_jobs, dtype=float).reshape(-1)
-            if self.jobs.size == 1 and self.N > 1:
-                self.jobs = np.repeat(self.jobs.item(), self.N)
-            if self.jobs.size != self.N:
-                raise ValueError(f"initial_jobs must have length {self.N}")
-            self.jobs = np.maximum(self.jobs, 0.0)
-
-        self.reset(self.jobs)
-
-    @staticmethod
-    def _sigmoid(x: np.ndarray) -> np.ndarray:
-        x = np.clip(np.asarray(x, dtype=float), -60.0, 60.0)
-        return 1.0 / (1.0 + np.exp(-x))
-
-    @staticmethod
-    def _softmax(logits: np.ndarray) -> np.ndarray:
-        logits = np.asarray(logits, dtype=float)
-        if logits.size == 0:
-            return logits
-        x = logits - np.max(logits)
-        exps = np.exp(x)
-        return exps / max(float(np.sum(exps)), 1e-15)
-
-    def reset(self, initial_jobs: Optional[np.ndarray] = None) -> np.ndarray:
-        if initial_jobs is None:
-            self.jobs = np.zeros(self.N, dtype=float)
-        else:
-            self.jobs = np.maximum(np.asarray(initial_jobs, dtype=float).reshape(-1), 0.0)
-            if self.jobs.size != self.N:
-                raise ValueError("initial_jobs must have length N")
-        self.telemetry_buffer.clear()
-        for _ in range(self.delay_steps + 1):
-            self.telemetry_buffer.append(self.jobs.copy())
-        return self.jobs.copy()
-
-    def current_jobs(self) -> np.ndarray:
-        return self.jobs.copy()
-
-    def delayed_jobs(self) -> np.ndarray:
-        """Return the actual delayed state from the telemetry buffer."""
-        if not self.telemetry_buffer:
-            return self.jobs.copy()
-        return np.asarray(self.telemetry_buffer[0], dtype=float).copy()
-
-    def service_capacity(self) -> np.ndarray:
-        return self.c_list * self.mu_list
-
-    def mean_field(self) -> np.ndarray:
-        total = float(np.sum(self.jobs))
-        if total <= 1e-12:
-            return np.ones(self.N) / self.N
-        return self.jobs / total
-
-    def _normalized_congestion(self, perceived_jobs: np.ndarray) -> np.ndarray:
-        return np.asarray(perceived_jobs, dtype=float) / np.maximum(self.service_capacity(), 1e-12)
-
-    @staticmethod
-    def numerical_jacobian(f, x, eps=1e-6) -> np.ndarray:
-        """Central finite-difference approximation of vector field jacobian."""
-        x = np.asarray(x, dtype=float)
-        n = len(x)
-        J = np.zeros((n, n), dtype=float)
-
-        for k in range(n):
-            h = eps * max(1.0, abs(x[k]))
-            xp = x.copy()
-            xm = x.copy()
-            xp[k] += h
-            xm[k] -= h
-            J[:, k] = (f(xp) - f(xm)) / (2.0 * h)
-
-        return J
-
-    def performance_proxy(self, q: np.ndarray) -> float:
-        """Occupancy to total arrival rate proxy ratio."""
-        return float(np.sum(q) / np.sum(self.arrival_rates))
-
-    def local_contraction_diagnostic(self, q_star: np.ndarray, eta: float = 0.05) -> dict:
-        """Numerical check for operator T(q) = q - eta * F(q, q) local contraction."""
-        def T(q):
-            return q - eta * self.rhs(q, q)
-
-        J = self.numerical_jacobian(T, q_star)
-        L = float(np.linalg.norm(J, 2))
-
-        return {
-            "local_L_estimate": L,
-            "local_contraction": bool(L < 1.0),
-            "interpretation": "local numerical diagnostic, not a uniqueness proof"
-        }
-    # -------------------------------------------------------------------
-    # 1. Continuous Service & Analytical Instantaneous Jacobian
-    # -------------------------------------------------------------------
-    def broked_service_flow(self, q: np.ndarray) -> np.ndarray:
-        """Smooth saturating service flow replacing non-differentiable min(c, q)."""
-        q = np.maximum(np.asarray(q, dtype=float), 0.0)
-        return self.mu0 + self.mu_slope * q / (1.0 + q)
-
-    def service_flow(self, q: np.ndarray) -> np.ndarray:
-        """Instantaneous physical service/departure flow."""
-        q = np.maximum(np.asarray(q, dtype=float), 0.0)
-        return self.mu_list * np.minimum(self.c_list, q)
-
-    def d_service_flow(self, q: np.ndarray) -> np.ndarray:
-        """Derivative of service flow with respect to q."""
-        q = np.maximum(np.asarray(q, dtype=float), 0.0)
-        return self.mu_slope / (1.0 + q) ** 2
-
-    def analytical_jacobian_A0(self, q_star: np.ndarray, I_star: np.ndarray) -> np.ndarray:
-        """
-        Computes complete A0 = F_q(q*, I*) analytically.
-        Combines physical service damping with direct q-dependence of jockeying.
-        """
-        # 1. Service derivative: -diag(s'(q*))
-        A_service = -np.diag(self.d_service_flow(q_star))
-
-        # 2. Direct q-derivative of jockeying: R(I*)^T - diag(R_out(I*))
-        # Extract jockeying transition rate matrix
-        N = self.N
-        crowd = self._normalized_congestion(I_star)
-        rates = np.zeros((N, N))
-        for i in range(N):
-            alternatives = crowd.copy()
-            alternatives[i] = np.inf
-            logits = -self.jockey_sensitivity * (alternatives - self.jockey_threshold)
-            finite = np.isfinite(logits)
-            if np.any(finite):
-                rates[i, finite] = self.jockey_scale * self._softmax(logits[finite])
-
-        R_out = np.sum(rates, axis=1)
-        A_jockey = rates.T - np.diag(R_out)
- 
-        return A_service + A_jockey
-
-
-    # -------------------------------------------------------------------
-    # 2. Transverse Mode Spectral Decomposition
-    # -------------------------------------------------------------------
-    def extract_transverse_gain(self, At: np.ndarray) -> dict:
-        """
-        Extracts transverse behavioral gain kappa_beh from feedback matrix At (or B).
-        Separates common mass expansion from anti-symmetric switching modes.
-        """
-        eigvals, eigvecs = np.linalg.eig(At)
-        ones_vec = np.ones(self.N) / np.sqrt(self.N)
-
-        transverse_eigvals = []
-        common_eigval = None
-
-        for i in range(self.N):
-            vec = eigvecs[:, i]
-            norm_v = np.linalg.norm(vec)
-            alignment = abs(np.dot(vec, ones_vec)) / norm_v if norm_v > 1e-12 else 0.0
-
-            if alignment > 0.85:
-                common_eigval = eigvals[i]
-            else:
-                transverse_eigvals.append(eigvals[i])
-
-        kappa_beh = float(np.max(np.real(transverse_eigvals))) if transverse_eigvals else float(np.real(eigvals[0]))
-
-        return {
-            "all_eigvals": eigvals,
-            "common_eigval": common_eigval,
-            "transverse_eigvals": transverse_eigvals,
-            "kappa_beh": kappa_beh
-        }
-
-
-    # -------------------------------------------------------------------
-    # 3. Complex Characteristic Root Finder & Hopf Threshold Search
-    # -------------------------------------------------------------------
-    def find_characteristic_roots(self, A0: np.ndarray, At: np.ndarray, tau: float) -> list:
-        """Solves det(lambda*I - A0 - At*exp(-lambda*tau)) = 0 via Nelder-Mead grid search."""
-        def residual(lam: complex) -> float:
-            M = lam * np.eye(self.N) - A0 - At * np.exp(-lam * tau)
-            return float(abs(np.linalg.det(M)))
-
-        def objective(x):
-            lam = x[0] + 1j * x[1]
-            return np.log1p(residual(lam))
-
-        roots = []
-        re_grid = np.linspace(-2.0, 1.0, 10)
-        im_grid = np.linspace(-6.0, 6.0, 20)
-
-        for re0 in re_grid:
-            for im0 in im_grid:
-                sol = minimize(objective, np.array([re0, im0]), method="Nelder-Mead", options={"maxiter": 500})
-                lam = sol.x[0] + 1j * sol.x[1]
-                if residual(lam) < 1e-6:
-                    if not any(abs(lam - z) < 1e-4 for z in roots):
-                        roots.append(lam)
-
-        return sorted(roots, key=lambda z: z.real, reverse=True)
-
-    def estimate_hopf_threshold(
-        self, A0: np.ndarray, At: np.ndarray, tau_lo: float = 0.0, tau_hi: float = 10.0, n_scan: int = 40
-    ):
-        """Locates first numerical crossing of Re(lambda_max(tau)) = 0 via root-finding."""
-        taus = np.linspace(tau_lo, tau_hi, n_scan)
-        vals = []
-
-        for tau in taus:
-            roots = self.find_characteristic_roots(A0, At, tau)
-            lam = roots[0] if roots else None
-            vals.append(np.nan if lam is None else lam.real)
-
-        for k in range(len(taus) - 1):
-            if not np.isfinite(vals[k]) or not np.isfinite(vals[k + 1]):
-                continue
-            if vals[k] * vals[k + 1] > 0:
-                continue
-
-            def f(t):
-                r = self.find_characteristic_roots(A0, At, t)
-                return np.nan if not r else r[0].real
-
-            try:
-                tau_c = brentq(f, taus[k], taus[k + 1])
-            except ValueError:
-                continue
-
-            roots_c = self.find_characteristic_roots(A0, At, tau_c)
-            lam_c = roots_c[0] if roots_c else None
-
-            if lam_c is not None and abs(lam_c.imag) > 1e-5:
-                return tau_c, lam_c
-
-        return None, None
-
-    def reneging_flow(self, q: np.ndarray, perceived_jobs: np.ndarray) -> np.ndarray:
-        """Delayed-information reneging hazard times current population in queue."""
-        congestion = self._normalized_congestion(perceived_jobs)
-        hazard = self.renege_scale * self._sigmoid(
-            self.renege_sensitivity * (congestion - self.renege_threshold)
-        )
-        return hazard * np.maximum(q, 0.0)
-
-    def jockeying_flow(self, q: np.ndarray, perceived_jobs: np.ndarray) -> np.ndarray:
-        """
-        Net jockeying flow.  Agents currently in queue i switch toward queues
-        that look better under delayed telemetry.  The construction is
-        population-conserving: sum_i jockeying_flow_i == 0.
-        """
-        q = np.maximum(np.asarray(q, dtype=float), 0.0)
-        crowd = self._normalized_congestion(perceived_jobs)
-        net = np.zeros(self.N, dtype=float)
-        for i in range(self.N):
-            if q[i] <= 0:
-                continue
-            alternatives = crowd.copy()
-            alternatives[i] = np.inf
-            logits = -self.jockey_sensitivity * (alternatives - self.jockey_threshold)
-            probs = np.zeros(self.N, dtype=float)
-            finite = np.isfinite(logits)
-            if np.any(finite):
-                probs[finite] = self._softmax(logits[finite])
-            switch_rate = self.jockey_scale * float(np.sum(probs))
-            outflow = switch_rate * q[i]
-            net[i] -= outflow
-            net += outflow * probs
-        # Numerical projection onto the mass-conserving subspace.
-        net -= np.mean(net)
-        return net
-
-    def behavioural_flow(self, q: np.ndarray, perceived_jobs: np.ndarray) -> np.ndarray:
-        return -self.reneging_flow(q, perceived_jobs) + self.jockeying_flow(q, perceived_jobs)
-
-    def rhs(self, q: np.ndarray, perceived_jobs: np.ndarray) -> np.ndarray:
-        q = np.maximum(np.asarray(q, dtype=float), 0.0)
-        # INVOCATION 1: Use smooth service_flow instead of min(c, q)
-        return self.arrival_rates - self.service_flow(q) + self.behavioural_flow(q, perceived_jobs)
-
-    def bad_rhs(self, q: np.ndarray, perceived_jobs: np.ndarray) -> np.ndarray:
-        """
-        Reduced-flow RHS for equilibrium and linearization.
-        Replace internals with your calibrated behavioural form if needed.
-        """
-        q = np.asarray(q, dtype=float)
-        perceived_jobs = np.asarray(perceived_jobs, dtype=float)
-
-        # Exogenous split arrivals (keep fixed unless experiment explicitly changes this)
-        arrivals = np.ones(self.N, dtype=float) * (self.total_arrival_rate / self.N)
-
-        cap = np.maximum(self.service_capacity(), 1e-8)
-        service = np.minimum(q, cap)  # simple fluid discharge
-
-        # Behavioural feedback placeholder (reneging + jockeying reduced proxy)
-        crowd_now = q / cap
-        crowd_info = perceived_jobs / cap
-        behaviour = -0.10 * crowd_info + 0.02 * (np.mean(crowd_now) - crowd_now)
-
-        return arrivals - service + behaviour
-
-    #def equilibrium_residual(self, q: np.ndarray) -> np.ndarray:
-    #    # At equilibrium for pure delay-observation models, perceived = current
-    #    return self.rhs(q, q)
-
-    def linearize(self, q_star: np.ndarray, eps: float = 1e-6):
-        """
-        Computes system matrices A0 (analytical) and At (numerical derivative wrt perceived_jobs).
-        Returns A0 = dF/dq and At = dF/dI at (q*, I*=q*), for F(q,I)=rhs(q,I).
-        """
-        q_star = np.asarray(q_star, dtype=float)
-
-        # INVOCATION 2: Analytical A0 replaces finite differences for q-jacobian
-        A0 = self.analytical_jacobian_A0(q_star, q_star)
-
-        # At (or B) remains finite difference wrt delayed telemetry input I
-        n = self.N
-        At = np.zeros((n, n), dtype=float)
-        for j in range(n):
-            e = np.zeros(n); e[j] = eps
-            At[:, j] = (self.rhs(q_star, q_star + e) - self.rhs(q_star, q_star - e)) / (2 * eps)
-
-        return A0, At
-
-    def analyze_stability(self, q_star: np.ndarray):
-        """
-        Runs full spectral extraction and delay stability pipeline on stationary state q_star.
-        """
-        A0, At = self.linearize(q_star)
-
-        # 1. Operational stability at current telemetry_delay
-        roots = self.find_characteristic_roots(A0, At, self.telemetry_delay)
-        rightmost = roots[0] if roots else None
-
-        # INVOCATION 3: Extract transverse gain kappa_beh from At
-        spectral_info = self.extract_transverse_gain(At)
-
-        tau_c, lam_c = self.estimate_hopf_threshold(A0, At, tau_lo=0.0, tau_hi=10.0)
-
-        return {
-            "A0": A0,
-            "At": At,
-            "current_rightmost_root": rightmost,  # Status at self.telemetry_delay
-            "is_stable": bool(rightmost.real < 0) if rightmost else None,
-            "rightmost_root": rightmost,
-            "kappa_beh": spectral_info["kappa_beh"],
-            "spectral_B": spectral_info,
-            "contraction": self.local_contraction_diagnostic(q_star),
-            "performance_proxy": self.performance_proxy(q_star),
-            "tau_critical": tau_c,
-            "critical_root": lam_c
-        }
-
-        # INVOCATION 4: Root finding for characteristic spectrum
-        #roots = self.find_characteristic_roots(A0, At, self.telemetry_delay)
-        #rightmost = roots[0] if roots else None
-
-        # INVOCATION 5: Scan for Hopf bifurcation threshold tau_c
-        #tau_c, _ = self.estimate_hopf_delay(A0, At)
-
-        #return {
-        #    "A0": A0,
-        #    "At": At,
-        #    "kappa_beh": spectral_info["kappa_beh"],
-        #    "spectral_B": spectral_info,
-        #    "rightmost_root": rightmost,
-        #    "tau_critical": tau_c
-        #}
-
-    def step(self, _unused_policy: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
-        """Advance the reduced behavioural MFG one fluid step."""
-        perceived = self.delayed_jobs()
-        flow = self.rhs(self.jobs, perceived)
-        jobs_next = np.maximum(0.0, self.jobs + self.dt * flow)
-        self.jobs = jobs_next
-
-        print("\n *** DEBUG **** self.delayed_job ****** \n",perceived, "\n ***** jobs_next  *****\n ", jobs_next, "\n **** self.jobs *******\n ", self.jobs )
-        self.telemetry_buffer.append(jobs_next.copy())
-        return {
-            "jobs": jobs_next.copy(),
-            "perceived_jobs": perceived.copy(),
-            "routing_probs": self.arrival_split.copy(),  # exogenous, NOT information-driven
-            "arrivals": self.arrival_rates * self.dt,
-            "mean_field": self.mean_field().copy(),
-            "reneging_flow": self.reneging_flow(self.jobs, perceived),
-            "jockeying_flow": self.jockeying_flow(self.jobs, perceived),
-        }
-
-    def simulate(self, policy_fn=None, steps: int = 5000) -> Dict[str, np.ndarray]:
-        hist = {k: [] for k in [
-            "jobs", "perceived_jobs", "routing_probs", "arrivals", "mean_field",
-            "mean_sojourn", "imbalance", "reneging_flow", "jockeying_flow"
-        ]}
-        for _ in range(steps):
-            out = self.step()
-            for k in out:
-                hist[k].append(out[k])
-            hist["mean_sojourn"].append(self.mean_sojourn_from_state(out["jobs"]))
-            mf = out["mean_field"]
-            hist["imbalance"].append(float(np.max(mf) - np.min(mf)))
-        return {k: np.asarray(v) for k, v in hist.items()}
-
-    def mean_sojourn_from_state(self, q: np.ndarray) -> float:
-        if self.total_arrival_rate <= 0:
-            return 0.0
-        return float(np.sum(np.asarray(q, dtype=float)) / self.total_arrival_rate)
-
-    # Backward-compatible name; it now reports physical congestion, not arrival routing.
-    def routing_probs(self, perceived_jobs, mean_field=None):
-        return self.arrival_split.copy()
-
-    def crowding_scores(self, perceived_jobs, mean_field=None):
-        return self._normalized_congestion(perceived_jobs)
-
-    def equilibrium_residual(self, q: np.ndarray) -> np.ndarray:
-        q = np.asarray(q, dtype=float)
-        return self.rhs(q, q)
-
-    def numerical_linearization(self, q_star: np.ndarray, eps: float = 1e-6):
-        """
-        Compute A0 = dF/dq and A_tau = dF/dI for
-            qdot = F(q(t), I(t)), I(t)=q(t-tau).
-        Characteristic equation:
-            det(lambda I - A0 - A_tau exp(-lambda tau)) = 0.
-        """
-        q_star = np.asarray(q_star, dtype=float)
-        n = self.N
-        # A0 = np.zeros((n, n), dtype=float)
-        A0 = self.analytical_jacobian_A0(q_star, q_star)
-        At = np.zeros((n, n), dtype=float)
-        for j in range(n):
-            e = np.zeros(n); e[j] = eps
-            A0[:, j] = (self.rhs(q_star + e, q_star) - self.rhs(q_star - e, q_star)) / (2*eps)
-            At[:, j] = (self.rhs(q_star, q_star + e) - self.rhs(q_star, q_star - e)) / (2*eps)
-        return A0, At
-
-    def characteristic_residual(self, lam: complex, q_star: np.ndarray) -> complex:
-        A0, At = self.numerical_linearization(q_star)
-        M = lam*np.eye(self.N) - A0 - At*np.exp(-lam*self.telemetry_delay)
-        return complex(np.linalg.det(M))
-
-
-class MeanFieldEquilibriumSolver:
-    """Fixed-point iteration for the reduced behavioural MFE."""
-
-    def __init__(self, game: MeanFieldQueueGame, tol=1e-6, max_iter=10000, relaxation=0.5):
-        self.game = game
-        self.tol = float(tol)
-        self.max_iter = int(max_iter)
-        self.relaxation = float(relaxation)
-
-    def solve_mfe(self, m0=None) -> MFEResult:
-        if m0 is None:
-            q = self.game.current_jobs()
-        else:
-            q = np.maximum(np.asarray(m0, dtype=float).reshape(-1), 0.0)
-        if q.size != self.game.N:
-            raise ValueError("m0 must have length N")
-
-        history = {"m": [q.copy()], "policy": [], "m_next": [], "error": []}
-        converged = False
-        self.game.reset(q)
-
-        for k in range(self.max_iter):
-            # At stationarity I=q, so solve the actual behavioural balance,
-            # not an arrival-allocation softmax fixed point.
-            residual = self.game.equilibrium_residual(q)
-            # Damped pseudo-time fixed-point step.
-            scale = max(float(np.max(self.game.service_capacity())), 1.0)
-            q_candidate = np.maximum(q + (self.game.dt * scale) * residual, 0.0)
-            q_next = (1-self.relaxation)*q + self.relaxation*q_candidate
-            err = float(np.linalg.norm(q_next-q, ord=1))
-            history["m"].append(q_next.copy())
-            history["m_next"].append(q_candidate.copy())
-            history["policy"].append(self.game.arrival_split.copy())
-            history["error"].append(np.array([err]))
-            q = q_next
-            if err < self.tol and np.linalg.norm(self.game.equilibrium_residual(q), ord=np.inf) < self.tol:
-                converged = True
-                break
-
-        residual_norm = float(np.linalg.norm(self.game.equilibrium_residual(q), ord=np.inf))
-
-        # INVOCATION 6: Call stability pipeline upon convergence
-        stab = self.game.analyze_stability(q)
-
-        recent = np.asarray(history["error"][-20:]).reshape(-1)
-        # osc_amp = float(np.std(recent)) if recent.size else 0.0
-        err_arr = np.asarray(history["error"]).reshape(-1) if history["error"] else np.array([])
-        tail = err_arr[-20:] if err_arr.size >= 20 else err_arr
-        solver_error_std = float(np.std(tail)) if tail.size else float("nan")
-        residual = self.game.equilibrium_residual(m)
-        residual_inf_norm = float(np.max(np.abs(residual)))
-
-        # Pass extracted metrics directly into updated MFEResult container
-        return MFEResult(
-            m_star=q.copy(),
-            policy_star=self.game.arrival_split.copy(),
-            converged=converged,
-            iterations=k + 1,
-            history=history,
-            mean_sojourn=self.game.mean_sojourn_from_state(q),
-            # oscillation_amp=osc_amp,
-            solver_error_std=solver_error_std,
-            residual_inf_norm=residual_inf_norm,
-            equilibrium_residual=residual_norm,
-            A0=stab["A0"],
-            At=stab["At"],
-            kappa_beh=stab["kappa_beh"],
-            rightmost_root=stab["rightmost_root"],
-            tau_critical=stab["tau_critical"]
-        )
-
-        #A0, At = self.game.numerical_linearization(q)
-        #eigs = np.linalg.eigvals(A0) if self.game.telemetry_delay == 0 else None
-        #recent = np.asarray(history["error"][-20:]).reshape(-1)
-        #osc_amp = float(np.std(recent)) if recent.size else 0.0
-        #return MFEResult(
-        #    m_star=q.copy(), policy_star=self.game.arrival_split.copy(),
-        #    converged=converged, iterations=k+1, history=history,
-        #    mean_sojourn=self.game.mean_sojourn_from_state(q),
-        #    oscillation_amp=osc_amp, equilibrium_residual=residual_norm,
-        #    stability_eigs=eigs,
-        #)
-
-
 def visualize_results(metrics_file="simu_results.csv", window=5):
     """
     Visualize simulation results recorded in the metrics file.
@@ -6617,9 +6315,6 @@ def visualize_comparison(adjusted_file="adjusted_metrics.csv", non_adjusted_file
 
 
 # --- Baseline Policies ---
-def sq_policy(k_i, k_j):
-    """Shortest Queue Baseline (ignores service rates)."""
-    return 1 if k_i > k_j else 0
 
 def sed_policy(k_i, k_j, mu_i, mu_j):
     """
@@ -6637,13 +6332,6 @@ def sed_policy(k_i, k_j, mu_i, mu_j):
 
 
 # --- Utility Functions ---
-def old_compute_ci(data, confidence=0.95):
-    """Compute confidence intervals."""
-    n = len(data)
-    mean = np.mean(data)
-    stderr = sem(data)
-    h = stderr * t.ppf((1 + confidence) / 2., n - 1)
-    return mean, mean - h, mean + h
 
 def compute_ci(data, confidence=0.95):
     """Compute mean and (1 - confidence) two-tailed confidence interval."""
@@ -6707,63 +6395,6 @@ def compute_se(data):
     return np.std(data, ddof=1) / np.sqrt(len(data))
 
 
-def run_mfe_experiment(c_list: List[int], mu_list: List[float], total_arrival_rate: float,
-                telemetry_delay: float, dt: float, choice_sharpness: float, tol: float = 1e-4,
-                max_iter: int = 200,) -> MFEResult:
-
-    game = MeanFieldQueueGame(c_list=c_list, mu_list=mu_list, total_arrival_rate=total_arrival_rate,
-        telemetry_delay=telemetry_delay, dt=dt, choice_sharpness=choice_sharpness,)
-
-    solver = MeanFieldEquilibriumSolver(game, tol=tol, max_iter=max_iter)
-
-    return solver.solve_mfe()
-
-
-def run_braess_sweep(base_c_list: List[int], base_mu_list: List[float], arrival_grid: List[float],
-                telemetry_delay: float,  dt: float, choice_sharpness: float, ) -> List[Dict[str, float]]:
-    """
-    Compare mean sojourn across increasing arrival rates / expanded network loads.
-    """
-    rows: List[Dict[str, float]] = []
-    for lam in arrival_grid:
-        result = run_mfe_experiment(c_list=base_c_list, mu_list=base_mu_list,
-            total_arrival_rate=lam, telemetry_delay=telemetry_delay, dt=dt, choice_sharpness=choice_sharpness,)
-
-        rows.append(
-            {
-                "arrival_rate": float(lam),
-                "converged": float(result.converged),
-                "iterations": float(result.iterations),
-                "mean_sojourn": float(result.mean_sojourn),
-                "oscillation_amp": float(result.oscillation_amp),
-            }
-        )
-
-    return rows
-
-
-def run_tipping_point_sweep(base_c_list: List[int], base_mu_list: List[float], arrival_rate: float,
-                telemetry_grid: List[float], dt: float, choice_sharpness: float,) -> List[Dict[str, float]]:
-    """
-    Sweep telemetry delay and record oscillation / sojourn diagnostics.
-    """
-    rows: List[Dict[str, float]] = []
-    for tau in telemetry_grid:
-        result = run_mfe_experiment(c_list=base_c_list, mu_list=base_mu_list, total_arrival_rate=arrival_rate,
-            telemetry_delay=tau, dt=dt, choice_sharpness=choice_sharpness, )
-
-        rows.append(
-            {
-                "telemetry_delay": float(tau),
-                "converged": float(result.converged),
-                "iterations": float(result.iterations),
-                "mean_sojourn": float(result.mean_sojourn),
-                "oscillation_amp": float(result.oscillation_amp),
-            }
-        )
-
-    return rows
-
 def main():
     utility_basic = 1.0
     discount_coef = 0.1
@@ -6784,6 +6415,9 @@ def main():
     )
     print(f"Selected information model: {request_queue.get_information_model()} (uses_nn={request_queue.uses_nn})")
 
+    # MFG object is owned by the queue; one instance per information model
+    print("MFG initialised for:", request_queue.mfg.model_name)
+
     # Initialize ImpatientTenantEnv with the RequestQueue instance
     env = ImpatientTenantEnv()
     env.requestObj = request_queue
@@ -6793,10 +6427,22 @@ def main():
     print("=" * 80)
     print("Environment and RequestQueue initialized successfully!")
 
+    # ===================================================================
+    # MFG DIAGNOSTIC: Check if default MFG is stable at tau=0
+    # ===================================================================
+    print("\n" + "=" * 80)
+    print("MFG DIAGNOSTIC: Testing default parameters")
+    print("=" * 80)
+    res = run_simulation_and_plot(fname="mfg_default", tau_base=0.3)
+    print("Default MFG tau_c:", res["tau_c"])
+    if res["tau_c"] is None:
+        print("WARNING: Default MFG not stable at tau=0. Check eigvals(A0 + U@Vt).")
+    print()
+
     # Simulation parameters
-    duration = 2 # 7  # Time steps per episode
-    num_episodes = 5 # 40  # Number of training episodes
-    num_seeds = 1 # 4  # Number of random seeds for averaging
+    duration = 10 #2 # 7  # Time steps per episode
+    num_episodes = 15 # 40  # Number of training episodes
+    num_seeds = 2 #1 # 4  # Number of random seeds for averaging
 
     dt = 0.01
     telemetry_delay = 0.15
@@ -7020,14 +6666,75 @@ def main():
     # After baseline completes, run the continuous MFG comparison
     try:
         comparison = request_queue.run_mfg_from_baseline(
-            tau_base=0.3,
+            tau_base=None,
             fname=f"baseline_vs_mfg_{request_queue.get_information_model().lower().replace('-', '_')}",
             run_id="baseline_final",
             record_history=True,
         )
+        out = request_queue.mfg.last                      # after run_mfg_from_baseline
+        run_simulation_and_plot(fname=f"mfg_{request_queue.mfg.model_name}",                
+                        params=out["params"], tau_base=out["history_record"]["operating_tau"])
+
         print("MFG comparison complete.")
     except Exception as exc:
         print(f"Skipping MFG comparison: {exc}")
+
+
+    # ===================================================================
+    # PART 3: HETEROGENEITY SWEEP FOR BOTH INFORMATION MODELS
+    # ===================================================================
+    print("\n" + "=" * 80)
+    print("PART 3: HETEROGENEITY SWEEP (MARKOV AND ACTOR-CRITIC)")
+    print("=" * 80)
+
+    mfg_by_model = {}
+
+    for nn_flag in (False, True):
+        model_label = "Actor-Critic" if nn_flag else "Markov"
+        print(f"\n{'='*60}")
+        print(f"Heterogeneity sweep for: {model_label}")
+        print(f"{'='*60}")
+        
+        # Switch information model
+        request_queue.uses_nn = bool(nn_flag)
+        request_queue.mfg = mfg_by_model.setdefault(nn_flag, FullDensityMFG(nn_flag))
+        request_queue.uses_intensity_based = bool(nn_flag)
+        request_queue.information_model = model_label
+        
+        # Reset subscriber lists and dispatch tracking
+        request_queue.nn_subscribers = []
+        request_queue.state_subscribers = []
+        request_queue.all_requests = []
+        request_queue.dispatch_times = {"markov": [], "nn": []}
+        
+        # Run the sweep (calibration is triggered inside)
+        try:
+            df = request_queue.run_proper_heterogeneity_sweep( duration, env, num_seeds=num_seeds, num_episodes=num_episodes,
+                 fixed_arrival_rate=False, run_mfg_stability=True, mfg_tau=None)
+
+            request_queue.mfg.plot_tau_c_history()
+
+            print(f"\n✓ Sweep completed for {model_label}")
+            print(f"  Results saved to heterogeneity_sweep_dynamic.csv")
+        except Exception as exc:
+            print(f"✗ Sweep failed for {model_label}: {exc}")
+            import traceback
+            traceback.print_exc()
+
+    print("\n" + "=" * 80)    
+    print("All sweeps and MFG analyses complete.")
+
+    # Side-by-side comparison
+    frames = [pd.DataFrame(m.history) for m in mfg_by_model.values() if m.history]
+    if frames:
+        cmp = pd.concat(frames, ignore_index=True)
+        cmp.to_csv("mfg_model_comparison.csv", index=False)
+        print(cmp[["information_model", "run_id", "K_switch", "K_abandon",
+                   "operating_tau", "tau_c", "stable_at_operating_tau"]])
+    else:
+        print("No MFG history recorded. Check for 'MFG failed' messages above.")
+
+    print("=" * 80)
 
 if __name__ == "__main__":
     main()
